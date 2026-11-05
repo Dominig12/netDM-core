@@ -124,8 +124,9 @@ public sealed class NetworkRuntime
         // Exploration-limited requests must not reuse or poison full-budget cached routes.
         // A bounded search returning Missing may simply have exceeded its work budget.
         var cacheEligible = maxExplored == 100_000;
+        RouteResult cachedRoute = null!;
         var cached = cacheEligible &&
-            Cache.TryGet(snapshot.ConnectivityVersion, from, to, out var cachedRoute);
+            Cache.TryGet(snapshot.ConnectivityVersion, from, to, out cachedRoute);
         var result = cached ? cachedRoute! :
             Router.Find(snapshot, from, to, maxExplored, cancellationToken);
         if (!cached && cacheEligible && result.Explored <= maxExplored)
