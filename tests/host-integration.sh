@@ -270,3 +270,44 @@ with zipfile.ZipFile(os.path.join(root,"netdm-three-scenarios.zip")) as z:
         assert content["suite"]["scenario"]==key,content
 print("Three-stage benchmark suite + independent JSON files + ZIP: PASS")
 PY
+
+# New radio routing / transport modes. A* must be a selectable production
+# candidate, while multi-tick packets are queued and forwarded separately
+# from the legacy whole-path airtime reservation.
+grep -q 'A\* · Admissible spatial heuristic' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+grep -q 'HOPWISE · One hop per simulation tick' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+curl -fsS -X POST "$base/api/benchmark/start" \
+  -H 'Content-Type: application/json' \
+  -d '{"nodes":121,"routesPerSecond":75,"movesPerSecond":0,"linkChangesPerSecond":0,"durationSeconds":7,"seed":1337,"wirelessEnabled":true,"radioModel":"shared","radioRange":14,"mediumBytesPerTick":512,"sharedSearch":"astar","packetTransportEnabled":true}' \
+  > "${RUNNER_TEMP:-/tmp}/netdm-packet-start.json"
+sleep 5
+curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-packet-metrics.json"
+curl -fsS "$base/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-packet-history.json"
+curl -fsS "$base/api/packets" > "${RUNNER_TEMP:-/tmp}/netdm-packet-stats.json"
+python3 - <<'PY'
+import json,os
+root=os.environ.get("RUNNER_TEMP","/tmp")
+def load(s):
+    with open(os.path.join(root,s),encoding="utf-8") as f: return json.load(f)
+m=load("netdm-packet-metrics.json")
+h=load("netdm-packet-history.json")
+stats=load("netdm-packet-stats.json")
+bench=m["benchmark"]
+assert bench["options"]["sharedSearch"]=="astar",bench
+assert bench["options"]["packetTransportEnabled"] is True,bench
+assert stats["enqueued"]>0,stats
+assert stats["enqueued"]==stats["delivered"]+stats["dropped"]+stats["expired"]+stats["queued"],stats
+assert stats["wirelessHops"]>0,stats
+assert stats["peakQueued"]<=2048,stats
+assert stats["lastTick"]>=0,stats
+assert all(x["packetsQueued"]>=0 for x in h),h
+assert all(x["packetsDeliveredPerSecond"]>=0 for x in h),h
+assert all(x["exploredPerRoute"]>=0 for x in h),h
+assert all(x["allocatedBytesPerRoute"]>=0 for x in h),h
+assert all(x["gcPauseMillisecondsPerSecond"]>=0 for x in h),h
+assert m["runtime"]["totalExploredNodes"]>=0,m
+assert m["runtime"]["totalRouteAllocatedBytes"]>=0,m
+assert m["runtime"]["gcTotalPauseMilliseconds"]>=0,m
+print("A* radio + packet forwarding + GC diagnostics HTTP integration: PASS")
+PY
+curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null

@@ -19,7 +19,17 @@ public sealed record SharedMediumSnapshot(
     long Version,
     TopologySnapshot Physical,
     ImmutableDictionary<NodeId, RadioProfile> Devices,
-    ImmutableDictionary<RadioMediumCell, ImmutableHashSet<NodeId>> Cells);
+    ImmutableDictionary<RadioMediumCell, ImmutableHashSet<NodeId>> Cells)
+{
+    /// <summary>Disables geometric heuristics when arbitrary long-range cables exist.</summary>
+    public bool HasPhysicalLinks { get; init; }
+}
+
+public enum SharedRadioSearchMode
+{
+    Dijkstra = 0,
+    AStar = 1
+}
 
 public readonly record struct SharedMediumUpdateResult(
     long Version, long PhysicalVersion, int Moves, int ChangedRadios, int IndexedCells);
@@ -50,6 +60,9 @@ public sealed class SharedMediumNetwork
     private readonly RouteCache _cache = new(8_192);
     private readonly Dictionary<RadioDomainKey, (long Tick, long Used)> _airtime = new();
     private readonly long _bytesPerTick;
+    private readonly SharedRadioSearchMode _searchMode;
+    private readonly int _maximumRadioRange;
+    private readonly uint _minimumRadioCost;
     private SharedMediumSnapshot _current;
     private long _accepted, _rejected, _acceptedBytes, _rejectedBytes;
     private long _rejectedStaleRoute, _rejectedInvalidPath;
@@ -57,19 +70,35 @@ public sealed class SharedMediumNetwork
     private long _attemptedWirelessHops;
     private long _acceptedRevalidated;
 
-    public SharedMediumNetwork(NetworkRuntime runtime, long bytesPerTick = 8_192)
+    public SharedMediumNetwork(NetworkRuntime runtime, long bytesPerTick = 8_192,
+        SharedRadioSearchMode searchMode = SharedRadioSearchMode.Dijkstra,
+        int maximumRadioRange = 128, uint minimumRadioCost = 1)
     {
         ArgumentNullException.ThrowIfNull(runtime);
         if (bytesPerTick is < 1 or > 1_000_000)
             throw new ArgumentOutOfRangeException(nameof(bytesPerTick));
+        if (maximumRadioRange is < 1 or > 128)
+            throw new ArgumentOutOfRangeException(nameof(maximumRadioRange));
+        if (minimumRadioCost == 0)
+            throw new ArgumentOutOfRangeException(nameof(minimumRadioCost));
+        if (!Enum.IsDefined(searchMode))
+            throw new ArgumentOutOfRangeException(nameof(searchMode));
         _runtime = runtime;
         _bytesPerTick = bytesPerTick;
-        _current = new SharedMediumSnapshot(0, runtime.Topology.Snapshot,
+        _searchMode = searchMode;
+        _maximumRadioRange = maximumRadioRange;
+        _minimumRadioCost = minimumRadioCost;
+        var physical = runtime.Topology.Snapshot;
+        _current = new SharedMediumSnapshot(0, physical,
             ImmutableDictionary<NodeId, RadioProfile>.Empty,
-            ImmutableDictionary<RadioMediumCell, ImmutableHashSet<NodeId>>.Empty);
+            ImmutableDictionary<RadioMediumCell, ImmutableHashSet<NodeId>>.Empty)
+        {
+            HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0)
+        };
     }
 
     public long BytesPerTick => _bytesPerTick;
+    public SharedRadioSearchMode SearchMode => _searchMode;
     public SharedMediumSnapshot Snapshot => Volatile.Read(ref _current);
 
     public SharedMediumStatistics Stats()
@@ -121,7 +150,13 @@ public sealed class SharedMediumNetwork
                     throw new ArgumentException("Every updated node must exist and be unique.");
 
                 if (change.ChangeProfile && change.Profile is { } candidate)
+                {
                     candidate.Validate();
+                    if (candidate.Range > _maximumRadioRange ||
+                        candidate.Cost < _minimumRadioCost)
+                        throw new ArgumentException(
+                            "Radio profile violates the configured A* range/cost bounds.");
+                }
 
                 var oldPosition = node.Position;
                 var nextPosition = change.Position ?? oldPosition;
@@ -161,7 +196,10 @@ public sealed class SharedMediumNetwork
             if (moves.Count > 0) _runtime.Apply(moves);
             var physical = _runtime.Topology.Snapshot;
             var next = new SharedMediumSnapshot(checked(before.Version + 1), physical,
-                devices.ToImmutable(), cells.ToImmutable());
+                devices.ToImmutable(), cells.ToImmutable())
+            {
+                HasPhysicalLinks = before.HasPhysicalLinks
+            };
             _cache.Clear();
             Volatile.Write(ref _current, next);
             return new SharedMediumUpdateResult(next.Version, physical.Version,
@@ -216,8 +254,12 @@ public sealed class SharedMediumNetwork
             var changes = unique.Select(id =>
                 new TopologyChange(TopologyOperation.RemoveNode, id)).ToArray();
             _runtime.Apply(changes);
+            var physical = _runtime.Topology.Snapshot;
             var next = new SharedMediumSnapshot(checked(before.Version + 1),
-                _runtime.Topology.Snapshot, devices.ToImmutable(), cells.ToImmutable());
+                physical, devices.ToImmutable(), cells.ToImmutable())
+            {
+                HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0)
+            };
             _cache.Clear();
             Volatile.Write(ref _current, next);
             return unique.Count;
@@ -232,16 +274,21 @@ public sealed class SharedMediumNetwork
         CancellationToken cancellationToken = default)
     {
         var started = Stopwatch.GetTimestamp();
+        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
         var snapshot = Snapshot;
         RouteResult cachedResult = null!;
         var eligible = maxExplored == 100_000;
         var cached = eligible &&
             _cache.TryGet(snapshot.Version, source, destination, out cachedResult);
         var result = cached ? cachedResult :
-            RouteCore(snapshot, source, destination, maxExplored, cancellationToken);
+            _searchMode == SharedRadioSearchMode.AStar
+                ? RouteAStarCore(snapshot, source, destination, _maximumRadioRange,
+                    _minimumRadioCost, maxExplored, cancellationToken)
+                : RouteCore(snapshot, source, destination, maxExplored, cancellationToken);
         if (!cached && eligible && result.Explored <= maxExplored)
             _cache.Store(snapshot.Version, result, source, destination);
-        _runtime.RecordExternalRoute(result, cached, Stopwatch.GetTimestamp() - started);
+        _runtime.RecordExternalRoute(result, cached, Stopwatch.GetTimestamp() - started,
+            GC.GetAllocatedBytesForCurrentThread() - allocatedBefore);
         return result;
     }
 
@@ -310,6 +357,135 @@ public sealed class SharedMediumNetwork
                 Relax(wireless.To, wireless.Cost);
         }
         return RouteResult.Missing(snapshot.Version, explored);
+    }
+
+    /// <summary>
+    /// Exact A* on the immutable radio graph. An optimistic geometric heuristic
+    /// is only admissible without arbitrary-length physical cable shortcuts.
+    /// Bounds are enforced at radio registration. Distant channels and Z
+    /// layers have no radio path when there are no cables.
+    /// </summary>
+    public static RouteResult RouteAStarCore(SharedMediumSnapshot snapshot,
+        NodeId source, NodeId target, int maximumRadioRange = 128,
+        uint minimumRadioCost = 1, int maxExplored = 100_000,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxExplored);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumRadioRange);
+        ArgumentOutOfRangeException.ThrowIfZero(minimumRadioCost);
+        if (!snapshot.Physical.Nodes.ContainsKey(source) ||
+            !snapshot.Physical.Nodes.ContainsKey(target))
+            return RouteResult.Missing(snapshot.Version);
+        if (source == target)
+            return new RouteResult(snapshot.Version, true, 0, [source], 1);
+
+        if (!snapshot.HasPhysicalLinks)
+        {
+            if (!snapshot.Devices.TryGetValue(source, out var sourceRadio) ||
+                !snapshot.Devices.TryGetValue(target, out var targetRadio) ||
+                sourceRadio.Channel != targetRadio.Channel ||
+                snapshot.Physical.Nodes[source].Position!.Value.Z !=
+                snapshot.Physical.Nodes[target].Position!.Value.Z)
+                return RouteResult.Missing(snapshot.Version);
+        }
+
+        var targetPosition = snapshot.Physical.Nodes[target].Position;
+        double Heuristic(NodeId node)
+        {
+            if (snapshot.HasPhysicalLinks || targetPosition is null)
+                return 0;
+            var position = snapshot.Physical.Nodes[node].Position;
+            if (position is null) return 0;
+            double dx = (double)position.Value.X - targetPosition.Value.X;
+            double dy = (double)position.Value.Y - targetPosition.Value.Y;
+            // Every radio hop moves at most maximumRadioRange units and costs
+            // at least minimumRadioCost. floor() rounds toward a *lower* bound.
+            return Math.Floor(Math.Sqrt(dx * dx + dy * dy) / maximumRadioRange) *
+                minimumRadioCost;
+        }
+
+        var distances = new Dictionary<NodeId, ulong> { [source] = 0 };
+        var parents = new Dictionary<NodeId, NodeId>();
+        var frontier = new PriorityQueue<(NodeId Id, ulong Distance), double>();
+        frontier.Enqueue((source, 0), Heuristic(source));
+        int explored = 0;
+
+        while (frontier.TryDequeue(out var item, out _))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var node = item.Id;
+            var cost = item.Distance;
+            if (!distances.TryGetValue(node, out var latest) || latest != cost)
+                continue;
+            if (++explored > maxExplored)
+                return RouteResult.Missing(snapshot.Version, explored);
+            if (node == target)
+            {
+                var path = new List<NodeId> { node };
+                for (var cursor = target; cursor != source;)
+                {
+                    cursor = parents[cursor];
+                    path.Add(cursor);
+                }
+                path.Reverse();
+                return new RouteResult(snapshot.Version, true, cost, path, explored);
+            }
+
+            void Relax(NodeId candidate, uint weight)
+            {
+                var next = checked(cost + weight);
+                if (distances.TryGetValue(candidate, out var prior) && next >= prior)
+                    return;
+                distances[candidate] = next;
+                parents[candidate] = node;
+                frontier.Enqueue((candidate, next), next + Heuristic(candidate));
+            }
+            foreach (var cable in snapshot.Physical.Nodes[node].Links.Values)
+                Relax(cable.To, cable.Cost);
+            foreach (var radio in RadioNeighbors(snapshot, node))
+                Relax(radio.To, radio.Cost);
+        }
+        return RouteResult.Missing(snapshot.Version, explored);
+    }
+
+    /// <summary>
+    /// Transmit exactly one hop against current topology and the shared
+    /// per-channel airtime ledger. Cable links need no channel allocation.
+    /// This is intentionally distinct from legacy whole-route TryTransmit.
+    /// </summary>
+    public RadioHopOutcome TryTransmitHop(NodeId from, NodeId to, int bytes, long tick)
+    {
+        if (bytes is < 1 or > 1_000_000)
+            throw new ArgumentOutOfRangeException(nameof(bytes));
+        ArgumentOutOfRangeException.ThrowIfNegative(tick);
+        var snapshot = Snapshot;
+        if (from == to ||
+            !snapshot.Physical.Nodes.TryGetValue(from, out var node) ||
+            !snapshot.Physical.Nodes.ContainsKey(to))
+            return RadioHopOutcome.LinkUnavailable;
+
+        var wire = node.Links.TryGetValue(to, out var edge)
+            ? (ulong)edge.Cost : ulong.MaxValue;
+        var radio = RadioCost(snapshot, from, to, out var domain);
+        if (wire == ulong.MaxValue && radio is null)
+            return RadioHopOutcome.LinkUnavailable;
+        if (wire <= (ulong)(radio ?? uint.MaxValue))
+            return RadioHopOutcome.TransmittedCable;
+
+        lock (_airtimeLock)
+        {
+            var slot = _airtime.TryGetValue(domain, out var existing)
+                ? existing : (Tick: -1L, Used: 0L);
+            if (slot.Tick > tick)
+                return RadioHopOutcome.OldTick;
+            if (bytes > _bytesPerTick)
+                return RadioHopOutcome.PacketTooLarge;
+            if (slot.Tick == tick && slot.Used + bytes > _bytesPerTick)
+                return RadioHopOutcome.ChannelBusy;
+            var used = slot.Tick == tick ? slot.Used : 0L;
+            _airtime[domain] = (tick, used + bytes);
+            return RadioHopOutcome.TransmittedRadio;
+        }
     }
 
     /// <summary>
@@ -512,10 +688,12 @@ public sealed class SharedMediumNetwork
 
     private void PublishPhysical(SharedMediumSnapshot before)
     {
+        var physical = _runtime.Topology.Snapshot;
         var next = before with
         {
             Version = checked(before.Version + 1),
-            Physical = _runtime.Topology.Snapshot
+            Physical = physical,
+            HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0)
         };
         _cache.Clear();
         Volatile.Write(ref _current, next);

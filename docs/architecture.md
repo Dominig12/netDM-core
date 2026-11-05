@@ -456,3 +456,51 @@ CI runs a small 3 x 3-second server-owned experiment, verifies that a
 manual start is rejected during execution, and downloads/inspects every
 JSON plus the combined ZIP. The canonical dashboard button starts
 3 x 120-second runs on 12k devices.
+
+## M10 prototype: exact radio A* and store-and-forward transport
+
+An A* solver is opt-in for Shared Medium. Its heuristic is a
+mathematically safe bound on the cost of wireless progress:
+
+`floor(distance / configuredMaximumRange) * configuredMinimumCost`.
+
+The registration API validates that all radio profiles obey these
+bounds. The heuristic is disabled whenever the physical graph has
+arbitrary cable edges, since cheap teleport-like connections would
+make a geometric lower bound inadmissible. The solver uses its own
+per-query priority queue and maintains exact shortest-path cost;
+smoke tests compare it with the existing Dijkstra on moving networks,
+disconnected domains, cable shortcuts and dense grids.
+
+`RadioPacketTransport` is a bounded, deterministic tick-driven queue.
+A radio packet may advance **once per tick**, consuming shared airtime
+only for that hop. Queue full -> immediate reject; channel busy -> defer;
+next link unavailable -> bounded route recalculation from current node;
+TTL or repeated failures -> drop. Delivery counts only final-hop
+success. The benchmark schedules forwarding passes through the same
+global CPU work scheduler, at Interactive priority.
+
+`GC.GetTotalPauseDuration` and sampled thread-local allocation deltas
+enable comparison of allocation churn against network cost. Per-route
+allocation estimates include routing/cache overhead on the worker
+thread; they exclude concurrent allocations on unrelated threads.
+GC pause totals describe the .NET process, not BYOND or x86 IPC.
+The history's per-interval GC pause figure is the difference between
+successive monotonic totals divided by elapsed sample seconds.
+
+### Safety and remaining work
+
+- Packet forwarding currently validates a hop on a pinned read snapshot;
+  another thread can mutate the graph between that check and the airtime
+  reservation. No end-to-end topology lease is provided yet.
+- Per-hop reroute work can be expensive in dense disconnected networks;
+  work per tick and number of retries are bounded, but a scheduler
+  budget is still a *soft* CPU quota.
+- Old `TryTransmit` reserves entire routes in a single tick; new packet
+  transport is opt-in so historical performance data remains interpretable.
+- Packet simulation does not implement encryption, bandwidth queues per
+  sender, retransmission acknowledgements, line-of-sight, packet
+  fragmentation or reliable ordering.
+- Calibrate A* on static connected 12k-node workloads before choosing a
+  default; fewer explored nodes does not automatically mean lower
+  p95 latency if spatial heuristic overhead dominates.

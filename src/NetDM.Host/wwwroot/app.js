@@ -207,7 +207,7 @@ mapCanvas.addEventListener("wheel",event=>{
 $("fit").addEventListener("click",fitMap);
 const observe=new ResizeObserver(()=>{drawMap();drawCharts();drawSchedulerCharts();drawComparisonPlot();});
 observe.observe(frame);
-for(const id of ["routes-chart","load-chart","latency-chart","memory-chart","links-chart","reachability-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
+for(const id of ["routes-chart","load-chart","latency-chart","explored-chart","gc-chart","memory-chart","links-chart","reachability-chart","packets-chart","packet-queue-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
 
 function plot(id,series,color,extra){
   const canvas=$(id),{ctx,w,h}=resizeCanvas(canvas);
@@ -244,11 +244,28 @@ function drawCharts(){
     {values:history.map(x=>x.p99Us),color:"#f3a572",width:1.3}
   ],"#5bd5db");
   plot("memory-chart",[{values:history.map(x=>x.managedBytes/1048576),color:"#87a5ff"}],"#87a5ff");
+  plot("explored-chart",[{values:history.map(x=>x.exploredPerRoute||0),color:"#69d5e2"}],"#69d5e2");
+  plot("gc-chart",[{values:history.map(x=>x.gcPauseMillisecondsPerSecond||0),color:"#eea576"}],"#eea576");
+  $("chart-explored").textContent=last
+    ?format(last.exploredPerRoute||0)+" nodes / "+format((last.allocatedBytesPerRoute||0)/1024)+" KiB":"—";
+  $("chart-gc").textContent=last?format(last.gcPauseMillisecondsPerSecond||0)+" ms/s":"—";
   plot("reachability-chart",[
     {values:history.map(x=>x.foundPercent||0),color:"#56dfbc"},
     {values:history.map(x=>x.mediumConfiguredDevices>0
       ?100*x.mediumConfiguredDevices/Math.max(1,x.nodeCount):0),color:"#729cf6",width:1.2}
   ],"#56dfbc");
+  plot("packets-chart",[
+    {values:history.map(x=>x.packetsDeliveredPerSecond||0),color:"#65dbb2"},
+    {values:history.map(x=>x.packetsDroppedPerSecond||0),color:"#ed8d79"},
+    {values:history.map(x=>x.packetsExpiredPerSecond||0),color:"#af9adb"}
+  ],"#65dbb2");
+  plot("packet-queue-chart",[
+    {values:history.map(x=>x.packetsQueued||0),color:"#82aafc"},
+    {values:history.map(x=>x.packetWirelessHopsPerSecond||0),color:"#f2be7a"}
+  ],"#82aafc");
+  $("chart-packets").textContent=last?
+    format(last.packetsDeliveredPerSecond||0)+" / "+format(last.packetsDroppedPerSecond||0):"—";
+  $("chart-packet-queue").textContent=last?format(last.packetsQueued||0)+" queued":"—";
   plot("rejections-chart",[
     {values:history.map(x=>x.rejectedTooLargePerSecond||0),color:"#f19f72"},
     {values:history.map(x=>x.rejectedCapacityPerSecond||0),color:"#e76373"},
@@ -344,7 +361,11 @@ async function pollMetrics(){
     $("kpi-radio").textContent=shared
       ? format(shared.domains)
       : bench.radio?compact(bench.radio.activeWirelessLinks):"—";
-    $("kpi-radio-events").textContent=shared
+    $("kpi-radio-events").textContent=shared&&bench.packetTransport
+      ? format(bench.packetTransport.delivered)+" delivered · "+
+        format(bench.packetTransport.queued)+" queued · "+
+        format(bench.packetTransport.dropped)+" dropped"
+      : shared
       ? format(shared.configuredDevices)+" devices · "+format(shared.occupiedCells)+" cells · "+
         format(shared.acceptedRevalidatedTransfers)+" revalidated · "+
         format(shared.rejectedTransfers)+" denied"
@@ -388,6 +409,9 @@ $("bench-form").addEventListener("submit",async event=>{
     wirelessEnabled:$("network-mode").value!=="wired",
     radioModel:$("network-mode").value==="shared"?"shared":"pairwise",
     mediumBytesPerTick:Number($("medium-budget").value),
+    sharedSearch:$("shared-search").value,
+    packetTransportEnabled:$("packet-delivery").value==="hopwise" &&
+      $("network-mode").value==="shared",
     radioRange:Number($("radio-range").value)
   };
   try{
@@ -581,7 +605,9 @@ async function pollSuite(){
         format(opts.nodes)+" nodes · "+format(opts.routesPerSecond)+
         " requested routes/s · seed "+opts.seed+" · radio range "+opts.radioRange+
         " · "+format(opts.mediumBytesPerTick)+" bytes/tick · "+
-        opts.durationSeconds+" seconds per scenario.";
+        opts.durationSeconds+" seconds per scenario · "+
+        (opts.sharedSearch==="astar"?"A*":"Dijkstra")+" · "+
+        (opts.packetTransportEnabled?"hop-by-hop packets":"legacy airtime")+".";
     }
     const rows=document.querySelectorAll("[data-suite-case]");
     for(const row of rows){
@@ -633,7 +659,11 @@ async function pollSuite(){
 $("suite-start").addEventListener("click",async()=>{
   try{
     const response=await fetch("/api/benchmark-suite/start",{
-      method:"POST",headers:{"Content-Type":"application/json"},body:"{}"
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        sharedSearch:$("suite-search").value,
+        packetTransportEnabled:$("suite-delivery").value==="hopwise"
+      })
     });
     if(!response.ok){
       const payload=await response.json();

@@ -48,6 +48,8 @@ app.MapGet("/api/metrics", (NetworkRuntime runtime, BenchmarkRunner benchmark,
 });
 
 app.MapGet("/api/history", (BenchmarkRunner benchmark) => Results.Ok(benchmark.History()));
+app.MapGet("/api/packets", (BenchmarkRunner benchmark) =>
+    Results.Ok(benchmark.PacketStatistics));
 
 app.MapPost("/api/benchmark/start", (BenchmarkOptions options, BenchmarkRunner benchmark, RoutingComparisonRunner comparison) =>
 {

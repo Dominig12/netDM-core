@@ -175,3 +175,8 @@ h1{font-size:27px;font-weight:650;letter-spacing:-.6px;margin:7px 0 0}
 .suite-zip-link[hidden]{display:none}
 .suite-description{margin:9px 0 0;color:#6e829b;font-size:10px;line-height:1.6}
 @media(max-width:900px){.suite-steps{grid-template-columns:1fr}.suite-status{margin-left:0}}
+
+.suite-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:14px}
+.suite-choices label{display:flex;flex-direction:column;gap:6px;color:#8da7be;font-size:11px;font-weight:600}
+.suite-choices .workload-select{margin:0;padding:9px;height:39px}
+@media(max-width:760px){.suite-choices{grid-template-columns:1fr}}

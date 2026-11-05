@@ -14,7 +14,9 @@ public sealed record BenchmarkOptions(
     bool WirelessEnabled = false,
     int RadioRange = 14,
     string RadioModel = "pairwise",
-    int MediumBytesPerTick = 8192)
+    int MediumBytesPerTick = 8192,
+    string SharedSearch = "dijkstra",
+    bool PacketTransportEnabled = false)
 {
     public void Validate()
     {
@@ -24,6 +26,12 @@ public sealed record BenchmarkOptions(
         if (LinkChangesPerSecond is < 0 or > 1_000) throw new ArgumentOutOfRangeException(nameof(LinkChangesPerSecond));
         if (DurationSeconds is < 2 or > 1800) throw new ArgumentOutOfRangeException(nameof(DurationSeconds));
         if (RadioRange is < 1 or > 128) throw new ArgumentOutOfRangeException(nameof(RadioRange));
+        if (PacketTransportEnabled && (!WirelessEnabled || RadioModel != "shared"))
+            throw new ArgumentException(
+                "Hop-by-hop packets require wireless Shared Medium mode.",
+                nameof(PacketTransportEnabled));
+        if (SharedSearch is not ("dijkstra" or "astar"))
+            throw new ArgumentException("SharedSearch must be dijkstra or astar.", nameof(SharedSearch));
         if (RadioModel is not ("pairwise" or "shared"))
             throw new ArgumentException("RadioModel must be pairwise or shared.", nameof(RadioModel));
         if (MediumBytesPerTick is < 1 or > 1_000_000)
@@ -36,7 +44,8 @@ public sealed record BenchmarkLoadStats(long Offered, long Admitted, long Reject
 public sealed record BenchmarkState(
     string Status, BenchmarkOptions? Options, DateTimeOffset? StartedUtc,
     double ElapsedSeconds, int WorldWidth, int WorldHeight, string? Error,
-    RadioStats? Radio, SharedMediumStatistics? SharedMedium, BenchmarkLoadStats Load);
+    RadioStats? Radio, SharedMediumStatistics? SharedMedium, BenchmarkLoadStats Load,
+    PacketTransportCounters? PacketTransport);
 
 public sealed record BenchmarkSample(
     DateTimeOffset At, double ElapsedSeconds, double ActualRoutesPerSecond,
@@ -54,7 +63,12 @@ public sealed record BenchmarkSample(
     int SchedulerQueued, double SchedulerQueueWaitP95Us,
     double OfferedRoutesPerSecond, double AdmittedRoutesPerSecond,
     double RejectedRoutesPerSecond,
-    double RevalidatedTransfersPerSecond);
+    double RevalidatedTransfersPerSecond,
+    int PacketsQueued, double PacketsDeliveredPerSecond,
+    double PacketsDroppedPerSecond, double PacketsExpiredPerSecond,
+    double PacketWirelessHopsPerSecond, double CapacityDeferralsPerSecond,
+    double ExploredPerRoute, double AllocatedBytesPerRoute,
+    double GcPauseMillisecondsPerSecond, int Gen2CollectionsInInterval);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -77,6 +91,12 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     private long _offeredRoutes, _admittedRoutes, _rejectedRoutes;
     private DynamicRadioNetwork? _radioEngine;
     private SharedMediumNetwork? _sharedMedium;
+    private RadioPacketTransport? _packets;
+
+    public PacketTransportCounters? PacketStatistics
+    {
+        get { lock (_gate) return _packets?.Capture(); }
+    }
 
     /// <summary>Only for read-only observability; the service remains benchmark-owned.</summary>
     public SharedMediumNetwork? ActiveSharedMedium
@@ -88,7 +108,8 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     {
         lock (_gate)
             return new BenchmarkState(_status, _options, _started, _elapsed, _width, _height, _error,
-                _radioEngine?.Stats(), _sharedMedium?.Stats(), LoadStats());
+                _radioEngine?.Stats(), _sharedMedium?.Stats(), LoadStats(),
+                _packets?.Capture());
     }
 
     public BenchmarkSample[] History() => _history.ToArray();
@@ -143,6 +164,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             _width = _height = 0;
             _radioEngine = null;
             _sharedMedium = null;
+            _packets = null;
             while (_history.TryDequeue(out _)) { }
             _task = Task.Run(() => RunAsync(options, _cts.Token));
             return true;
@@ -214,7 +236,12 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                         Profile: profile, ChangeProfile: true)).ToArray();
                 if (options.RadioModel == "shared")
                 {
-                    medium = new SharedMediumNetwork(runtime, options.MediumBytesPerTick);
+                    medium = new SharedMediumNetwork(runtime,
+                        options.MediumBytesPerTick,
+                        options.SharedSearch == "astar"
+                            ? SharedRadioSearchMode.AStar : SharedRadioSearchMode.Dijkstra,
+                        maximumRadioRange: options.RadioRange,
+                        minimumRadioCost: 8);
                     medium.Update(registrations, ct);
                 }
                 else
@@ -223,8 +250,12 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     radio.Update(registrations, ct);
                 }
             }
+            var packets = medium is not null && options.PacketTransportEnabled
+                ? new RadioPacketTransport(medium)
+                : null;
             lock (_gate)
             {
+                _packets = packets;
                 _width = columns * 12;
                 _height = ((options.Nodes + columns - 1) / columns) * 12;
                 _radioEngine = radio;
@@ -236,13 +267,16 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             var workerCount = options.RoutesPerSecond == 0 ? 0 :
                 Math.Min(4, Math.Max(1, Environment.ProcessorCount / 2));
             var workers = Enumerable.Range(0, workerCount).Select(worker =>
-                Task.Run(() => RouteWorkerAsync(options, worker, workerCount, medium, ct), ct)).ToList();
+                Task.Run(() => RouteWorkerAsync(options, worker, workerCount, medium, packets, ct), ct)).ToList();
             if (options.MovesPerSecond > 0 || options.LinkChangesPerSecond > 0)
                 workers.Add(Task.Run(() => MutationWorkerAsync(options, positions, radio, medium, ct), ct));
+            if (packets is not null)
+                workers.Add(Task.Run(() => PacketWorkerAsync(packets, ct), ct));
 
             var previous = runtime.Metrics.Capture(runtime.Cache.Count);
             var previousRadio = radio?.Stats();
             var previousMedium = medium?.Stats();
+            var previousPackets = packets?.Capture();
             var previousLoad = LoadStats();
             var previousTime = clock.Elapsed.TotalSeconds;
             var finishedNaturally = false;
@@ -255,6 +289,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 var snapshot = runtime.Topology.Snapshot;
                 var radioSnapshot = radio?.Stats();
                 var mediumSnapshot = medium?.Stats();
+                var packetSnapshot = packets?.Capture();
                 var interval = Math.Max(0.001, seconds - previousTime);
                 var schedulerSnapshot = scheduler.Capture();
                 var loadSnapshot = LoadStats();
@@ -287,13 +322,24 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     (loadSnapshot.Admitted - previousLoad.Admitted) / interval,
                     (loadSnapshot.Rejected - previousLoad.Rejected) / interval,
                     ((mediumSnapshot?.AcceptedRevalidatedTransfers ?? 0) -
-                     (previousMedium?.AcceptedRevalidatedTransfers ?? 0)) / interval);
+                     (previousMedium?.AcceptedRevalidatedTransfers ?? 0)) / interval,
+                    packetSnapshot?.Queued ?? 0,
+                    ((packetSnapshot?.Delivered ?? 0) - (previousPackets?.Delivered ?? 0)) / interval,
+                    ((packetSnapshot?.Dropped ?? 0) - (previousPackets?.Dropped ?? 0)) / interval,
+                    ((packetSnapshot?.Expired ?? 0) - (previousPackets?.Expired ?? 0)) / interval,
+                    ((packetSnapshot?.WirelessHops ?? 0) - (previousPackets?.WirelessHops ?? 0)) / interval,
+                    ((packetSnapshot?.BusyDeferrals ?? 0) - (previousPackets?.BusyDeferrals ?? 0)) / interval,
+                    deltaRoutes == 0 ? 0 : (double)(current.TotalExploredNodes - previous.TotalExploredNodes) / deltaRoutes,
+                    deltaRoutes == 0 ? 0 : (double)(current.TotalRouteAllocatedBytes - previous.TotalRouteAllocatedBytes) / deltaRoutes,
+                    Math.Max(0, current.GcTotalPauseMilliseconds - previous.GcTotalPauseMilliseconds) / interval,
+                    Math.Max(0, current.Gen2Collections - previous.Gen2Collections));
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;
                 previous = current;
                 previousRadio = radioSnapshot;
                 previousMedium = mediumSnapshot;
+                previousPackets = packetSnapshot;
                 previousLoad = loadSnapshot;
                 previousTime = seconds;
                 if (seconds >= options.DurationSeconds) { finishedNaturally = true; break; }
@@ -329,7 +375,8 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     /// or allow unbounded queues for each new arrival.
     /// </summary>
     private async Task RouteWorkerAsync(BenchmarkOptions options, int worker, int workers,
-        SharedMediumNetwork? medium, CancellationToken ct)
+        SharedMediumNetwork? medium, RadioPacketTransport? packets,
+        CancellationToken ct)
     {
         var rng = new Random(options.Seed + 10_001 + worker);
         var clock = Stopwatch.StartNew();
@@ -361,7 +408,10 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                             {
                                 var tick = Stopwatch.GetTimestamp() /
                                     Math.Max(1, Stopwatch.Frequency / 10);
-                                medium.TryTransmit(route, payload, tick);
+                                if (packets is not null)
+                                    packets.Enqueue(route, payload, tick);
+                                else
+                                    medium.TryTransmit(route, payload, tick);
                             }
                             return route;
                         }, WorkPriority.Background, ct, out Task<RouteResult>? task))
@@ -389,6 +439,31 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             // cancels outstanding work when the run is stopped.
             try { await Task.WhenAll(pending); }
             catch (Exception) { } // Scheduler publishes failures/cancellations.
+        }
+    }
+
+    /// <summary>
+    /// Schedule one bounded packet-forwarding pass per 100ms simulation tick.
+    /// This work shares the global priority scheduler with route requests.
+    /// </summary>
+    private async Task PacketWorkerAsync(RadioPacketTransport packets, CancellationToken ct)
+    {
+        var tickLength = Math.Max(1, Stopwatch.Frequency / 10);
+        long lastScheduledTick = -1;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            var currentTick = Stopwatch.GetTimestamp() / tickLength;
+            if (currentTick != lastScheduledTick)
+            {
+                lastScheduledTick = currentTick;
+                if (scheduler.TrySchedule(token => packets.Advance(currentTick, token),
+                    WorkPriority.Interactive, ct, out Task<int>? pass))
+                {
+                    await pass!;
+                }
+            }
+            await Task.Delay(20, ct);
         }
     }
 
