@@ -43,7 +43,13 @@ public sealed record BenchmarkSample(
     long ManagedBytes, int NodeCount, long Version, long ConnectivityVersion,
     int RadioLinks, double RadioLinksAddedPerSecond, double RadioLinksRemovedPerSecond,
     int MediumDomains, int MediumCells, double AcceptedTransfersPerSecond,
-    double RejectedTransfersPerSecond);
+    double RejectedTransfersPerSecond,
+    double ActualFoundPerSecond, double FoundPercent,
+    int MediumConfiguredDevices,
+    double RejectedStalePerSecond, double RejectedInvalidPerSecond,
+    double RejectedTooLargePerSecond, double RejectedCapacityPerSecond,
+    double RejectedOldTickPerSecond,
+    int SchedulerQueued, double SchedulerQueueWaitP95Us);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -207,6 +213,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 var radioSnapshot = radio?.Stats();
                 var mediumSnapshot = medium?.Stats();
                 var interval = Math.Max(0.001, seconds - previousTime);
+                var schedulerSnapshot = scheduler.Capture();
                 var deltaRoutes = current.Routes - previous.Routes;
                 var deltaMoves = current.Moves - previous.Moves;
                 var sample = new BenchmarkSample(
@@ -222,7 +229,16 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     ((radioSnapshot?.TotalWirelessLinksRemoved ?? 0) - (previousRadio?.TotalWirelessLinksRemoved ?? 0)) / interval,
                     mediumSnapshot?.Domains ?? 0, mediumSnapshot?.OccupiedCells ?? 0,
                     ((mediumSnapshot?.AcceptedTransfers ?? 0) - (previousMedium?.AcceptedTransfers ?? 0)) / interval,
-                    ((mediumSnapshot?.RejectedTransfers ?? 0) - (previousMedium?.RejectedTransfers ?? 0)) / interval);
+                    ((mediumSnapshot?.RejectedTransfers ?? 0) - (previousMedium?.RejectedTransfers ?? 0)) / interval,
+                    (current.Found - previous.Found) / interval,
+                    deltaRoutes == 0 ? 0 : 100.0 * (current.Found - previous.Found) / deltaRoutes,
+                    mediumSnapshot?.ConfiguredDevices ?? 0,
+                    ((mediumSnapshot?.RejectedStaleRoute ?? 0) - (previousMedium?.RejectedStaleRoute ?? 0)) / interval,
+                    ((mediumSnapshot?.RejectedInvalidPath ?? 0) - (previousMedium?.RejectedInvalidPath ?? 0)) / interval,
+                    ((mediumSnapshot?.RejectedTransferTooLarge ?? 0) - (previousMedium?.RejectedTransferTooLarge ?? 0)) / interval,
+                    ((mediumSnapshot?.RejectedCapacity ?? 0) - (previousMedium?.RejectedCapacity ?? 0)) / interval,
+                    ((mediumSnapshot?.RejectedOldTick ?? 0) - (previousMedium?.RejectedOldTick ?? 0)) / interval,
+                    schedulerSnapshot.Queued, schedulerSnapshot.QueueWaitP95Us);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;

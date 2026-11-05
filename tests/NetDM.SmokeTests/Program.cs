@@ -192,6 +192,8 @@ static void CheckSharedMedium()
     Check(!medium.TryTransmit(toTwo, 400, 1));
     Check(medium.TryTransmit(toTwo, 400, 2));
     Check(medium.Stats().AcceptedTransfers == 3);
+    Check(medium.Stats().RejectedCapacity == 1);
+    Check(medium.Stats().RejectedTransfers == 1);
     Check(medium.Stats().RejectedTransfers == 1);
 
     Check(medium.SetCable(new NodeId(2), new NodeId(3), 2));
@@ -203,9 +205,43 @@ static void CheckSharedMedium()
     Check(!medium.Route(new NodeId(1), new NodeId(3)).Found);
     Check(medium.Route(new NodeId(2), new NodeId(3)).Cost == 2);
     Check(!medium.TryTransmit(toTwo, 100, 3)); // stale route cannot send
+    Check(medium.Stats().RejectedStaleRoute == 1);
     Check(medium.SetCable(new NodeId(1), new NodeId(2), 1));
     Check(medium.Route(new NodeId(1), new NodeId(3)).Cost == 3);
     Check(medium.TryTransmit(medium.Route(new NodeId(1), new NodeId(3)), 900, 3));
+    // One two-hop wireless packet larger than the shared channel's entire
+    // tick cannot succeed even when the channel is otherwise idle.
+    var oversizedRuntime = new NetworkRuntime();
+    oversizedRuntime.Apply([
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+            Position: new NodePosition(0, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+            Position: new NodePosition(10, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(3),
+            Position: new NodePosition(20, 0))
+    ]);
+    var smallMedium = new SharedMediumNetwork(oversizedRuntime, bytesPerTick: 1024);
+    smallMedium.Update([
+        new RadioNodeUpdate(new NodeId(1), Profile: new RadioProfile(15,1), ChangeProfile: true),
+        new RadioNodeUpdate(new NodeId(2), Profile: new RadioProfile(15,1), ChangeProfile: true),
+        new RadioNodeUpdate(new NodeId(3), Profile: new RadioProfile(15,1), ChangeProfile: true)
+    ]);
+    var multiHop = smallMedium.Route(new NodeId(1), new NodeId(3));
+    Check(multiHop.Found && multiHop.Path.Count == 3);
+    Check(!smallMedium.TryTransmit(multiHop, 600, 1));
+    Check(smallMedium.Stats().RejectedTransferTooLarge == 1);
+    Check(smallMedium.Stats().AttemptedWirelessHops == 2);
+    Check(smallMedium.TryTransmit(multiHop, 400, 2));
+    Check(!smallMedium.TryTransmit(multiHop, 400, 1));
+    Check(smallMedium.Stats().RejectedOldTick == 1);
+    var malformed = multiHop with { Path = new[] { new NodeId(1), new NodeId(3) } };
+    Check(!smallMedium.TryTransmit(malformed, 100, 3));
+    Check(smallMedium.Stats().RejectedInvalidPath == 1);
+    var radioStats = smallMedium.Stats();
+    Check(radioStats.RejectedTransfers ==
+        radioStats.RejectedTransferTooLarge + radioStats.RejectedCapacity +
+        radioStats.RejectedStaleRoute + radioStats.RejectedInvalidPath +
+        radioStats.RejectedOldTick);
     Check(medium.RemoveNodes([new NodeId(2)]) == 1);
     Check(!medium.Route(new NodeId(1), new NodeId(3)).Found);
     Check(medium.Stats().ConfiguredDevices == 3);

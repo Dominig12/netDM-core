@@ -28,7 +28,10 @@ public readonly record struct SharedMediumStatistics(
     long Version, long PhysicalVersion, int ConfiguredDevices,
     int Domains, int OccupiedCells, long PairwiseRadioEdges,
     long AcceptedTransfers, long RejectedTransfers,
-    long AcceptedBytes, long RejectedBytes);
+    long AcceptedBytes, long RejectedBytes,
+    long RejectedStaleRoute, long RejectedInvalidPath,
+    long RejectedTransferTooLarge, long RejectedCapacity,
+    long RejectedOldTick, long AttemptedWirelessHops);
 
 public readonly record struct RadioMediumCellView(
     uint Channel, int Z, int X, int Y, int Count);
@@ -48,6 +51,9 @@ public sealed class SharedMediumNetwork
     private readonly long _bytesPerTick;
     private SharedMediumSnapshot _current;
     private long _accepted, _rejected, _acceptedBytes, _rejectedBytes;
+    private long _rejectedStaleRoute, _rejectedInvalidPath;
+    private long _rejectedTooLarge, _rejectedCapacity, _rejectedOldTick;
+    private long _attemptedWirelessHops;
 
     public SharedMediumNetwork(NetworkRuntime runtime, long bytesPerTick = 8_192)
     {
@@ -73,7 +79,13 @@ public sealed class SharedMediumNetwork
         return new SharedMediumStatistics(snapshot.Version, snapshot.Physical.Version,
             snapshot.Devices.Count, domains.Count, snapshot.Cells.Count, 0,
             Interlocked.Read(ref _accepted), Interlocked.Read(ref _rejected),
-            Interlocked.Read(ref _acceptedBytes), Interlocked.Read(ref _rejectedBytes));
+            Interlocked.Read(ref _acceptedBytes), Interlocked.Read(ref _rejectedBytes),
+            Interlocked.Read(ref _rejectedStaleRoute),
+            Interlocked.Read(ref _rejectedInvalidPath),
+            Interlocked.Read(ref _rejectedTooLarge),
+            Interlocked.Read(ref _rejectedCapacity),
+            Interlocked.Read(ref _rejectedOldTick),
+            Interlocked.Read(ref _attemptedWirelessHops));
     }
 
     /// <summary>
@@ -309,12 +321,18 @@ public sealed class SharedMediumNetwork
         ArgumentOutOfRangeException.ThrowIfNegative(tick);
         var snapshot = Snapshot;
         var needed = new Dictionary<RadioDomainKey, long>();
-        if (!route.Found || route.Version != snapshot.Version)
+        if (route.Version != snapshot.Version)
         {
-            RegisterRejection(payloadBytes);
+            RegisterRejection(payloadBytes, ref _rejectedStaleRoute);
+            return false;
+        }
+        if (!route.Found || route.Path.Count == 0)
+        {
+            RegisterRejection(payloadBytes, ref _rejectedInvalidPath);
             return false;
         }
 
+        long radioHops = 0;
         for (var i = 1; i < route.Path.Count; i++)
         {
             var a = route.Path[i - 1]; var b = route.Path[i];
@@ -323,16 +341,18 @@ public sealed class SharedMediumNetwork
             var wireless = RadioCost(snapshot, a, b, out var domain);
             if (wireless is null && wired == ulong.MaxValue)
             {
-                RegisterRejection(payloadBytes);
+                RegisterRejection(payloadBytes, ref _rejectedInvalidPath);
                 return false;
             }
             if (wireless is { } w && (ulong)w < wired)
             {
+                radioHops++;
                 needed.TryGetValue(domain, out var total);
                 needed[domain] = checked(total + payloadBytes);
             }
         }
 
+        Interlocked.Add(ref _attemptedWirelessHops, radioHops);
         lock (_airtimeLock)
         {
             // Never partially debit a multi-hop transfer.
@@ -340,10 +360,21 @@ public sealed class SharedMediumNetwork
             {
                 var slot = _airtime.TryGetValue(domain, out var existing)
                     ? existing : (Tick: -1L, Used: 0L);
-                if (slot.Tick > tick || bytes > _bytesPerTick ||
-                    (slot.Tick == tick && slot.Used + bytes > _bytesPerTick))
+                if (slot.Tick > tick)
                 {
-                    RegisterRejection(payloadBytes);
+                    RegisterRejection(payloadBytes, ref _rejectedOldTick);
+                    return false;
+                }
+                // A single transfer consumes one airtime allocation PER radio hop.
+                // Distinguish packets that can never fit from temporary saturation.
+                if (bytes > _bytesPerTick)
+                {
+                    RegisterRejection(payloadBytes, ref _rejectedTooLarge);
+                    return false;
+                }
+                if (slot.Tick == tick && slot.Used + bytes > _bytesPerTick)
+                {
+                    RegisterRejection(payloadBytes, ref _rejectedCapacity);
                     return false;
                 }
             }
@@ -486,8 +517,9 @@ public sealed class SharedMediumNetwork
         else cells[cell] = remaining;
     }
 
-    private void RegisterRejection(int bytes)
+    private void RegisterRejection(int bytes, ref long reasonCounter)
     {
+        Interlocked.Increment(ref reasonCounter);
         Interlocked.Increment(ref _rejected);
         Interlocked.Add(ref _rejectedBytes, bytes);
     }

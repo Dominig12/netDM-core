@@ -363,3 +363,43 @@ It does not eliminate worst-case quadratic *query* complexity for
 large, sparse hop-separated connected domains. Hierarchical routing,
 portal nodes and spatially organized cost bounds remain candidates
 for future experiments.
+
+## M6: interpret stress measurements without false speedups
+
+The uploaded real-world 12k-node benchmark had 28,369 completed route
+queries in ~120.35s versus a target of 1,500/s, with 4,618 found
+routes and only 246 accepted airtime reservations. Final radio
+membership was 9,647 active devices; the fast final window coincided
+with reduced live radio participation. This is **not yet proof** of
+network fragmentation: component count/connectivity is not recorded,
+so the observation is a strong hypothesis only.
+
+Use `foundPercent` and `mediumConfiguredDevices` alongside
+actual throughput to discriminate expensive connected routing from
+fast disconnected searches. Treat startup latency separately from the
+steady state (JIT, warm caches and network connectivity all change).
+
+The `SharedMediumStatistics` rejection counters now distinguish
+stale snapshots, invalid paths, impossible per-packet radio-hop
+budgets, temporarily exhausted capacity, and regressed ticks.
+Each failed transmission increments exactly one reason, and the
+sum must equal `RejectedTransfers`. A long radio path consumes
+airtime for every hop, so 8,192 bytes/tick cannot necessarily carry
+even one moderate payload end-to-end.
+
+Route-latency p50/p95/p99 describe the last rolling window of
+completed searches; queue-wait p95 describes scheduling delay.
+They are NOT interchangeable, and the total user response latency
+is not simply the latest values of both percentiles added together.
+The scheduler itself reported zero admission rejections in the
+uploaded scenario, so do not claim CPU exhaustion solely from
+failed radio transmissions.
+
+Next experiments:
+1. Hold node positions/radio profiles fixed for a static routing baseline.
+2. Enable movement with zero outages, then enable outages with the same seed.
+3. Add sampled connected-component estimators or bounded landmark
+   reachability diagnostics for the shared-medium model.
+4. Calibrate airtime against hop count, payload size, and realistic
+   game network latency; introduce explicit packet queues and
+   contention instead of interpreting every denial as a routing error.
