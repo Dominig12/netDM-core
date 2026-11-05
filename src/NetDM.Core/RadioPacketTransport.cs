@@ -23,7 +23,8 @@ public sealed record PacketTransportOptions(
     int MaxTickWorkMilliseconds = 25,
     int MaxNoRouteRetryDelayTicks = 96,
     int RerouteQueueRetryDelayTicks = 8,
-    bool AdaptivePacketVisits = false)
+    bool AdaptivePacketVisits = false,
+    bool EventDrivenPacketWaiting = false)
 {
     public void Validate()
     {
@@ -77,7 +78,9 @@ public sealed record PacketTransportCounters(
     long ForwardingVisits, long VisitBudgetStops,
     int CurrentVisitLimit, long AdaptiveLimitIncreases,
     long AdaptiveLimitDecreases, long PreRouteBackpressureRejections,
-    int ReservedAdmissions, long AdmissionReservations);
+    int ReservedAdmissions, long AdmissionReservations,
+    int ReadyPackets, int DelayedPackets, int AwaitingReroutePackets,
+    long TimerWakeups, long TopologyWakeups, long ExpiredWhileParked);
 
 /// <summary>
 /// Bounded round-robin store-and-forward. Advance never calculates a route:
@@ -120,12 +123,22 @@ public sealed class RadioPacketTransport
         public int NoRouteStreak;
         public long LastRouteAttemptTick = -1;
         public long SeenLocalRevision;
+        public PacketWaitState WaitState;
+        public int WaitVersion;
     }
 
     private readonly SharedMediumNetwork _network;
     private readonly PacketTransportOptions _settings;
     private readonly object _gate = new();
+    // The legacy FIFO is preserved for controlled G/H comparisons.
+    private enum PacketWaitState : byte { None, Ready, Delayed, Rerouting }
     private readonly Queue<PendingPacket> _queue = new();
+    private readonly Queue<PendingPacket> _ready = new();
+    private readonly PriorityQueue<(PendingPacket Packet, int Version), (long Tick, long Sequence)> _delayed = new();
+    private readonly PriorityQueue<PendingPacket, long> _expirations = new();
+    private readonly Dictionary<NodeId, HashSet<long>> _waitingByNode = new();
+    private long _timerSequence, _timerWakeups, _topologyWakeups, _expiredWhileParked;
+    private int _delayedCount, _reroutingCount;
     private readonly Dictionary<long, PendingPacket> _active = new();
     private readonly Queue<PacketRerouteRequest> _rerouteQueue = new();
     private readonly Dictionary<long, PendingPacket> _inflight = new();
@@ -164,6 +177,108 @@ public sealed class RadioPacketTransport
     }
 
     public PacketTransportOptions Options => _settings;
+    private int QueuedCount => _settings.EventDrivenPacketWaiting ? _active.Count : _queue.Count;
+
+    // All scheduler transitions are protected by _gate.
+    private void IndexWaiting(PendingPacket packet, bool add)
+    {
+        if (packet.Index >= packet.Path.Count - 1) return;
+        NodeId from = packet.Path[packet.Index], to = packet.Path[packet.Index + 1];
+        Change(from);
+        if (to != from) Change(to);
+        void Change(NodeId id)
+        {
+            if (add)
+            {
+                if (!_waitingByNode.TryGetValue(id, out var ids))
+                    _waitingByNode[id] = ids = new HashSet<long>();
+                ids.Add(packet.Id);
+            }
+            else if (_waitingByNode.TryGetValue(id, out var ids))
+            {
+                ids.Remove(packet.Id);
+                if (ids.Count == 0) _waitingByNode.Remove(id);
+            }
+        }
+    }
+
+    private void LeaveWait(PendingPacket packet)
+    {
+        if (packet.WaitState is PacketWaitState.Delayed or PacketWaitState.Rerouting)
+        {
+            IndexWaiting(packet, false);
+            if (packet.WaitState == PacketWaitState.Delayed) _delayedCount--;
+            else _reroutingCount--;
+        }
+        packet.WaitVersion++;
+        packet.WaitState = PacketWaitState.None;
+    }
+
+    private void Ready(PendingPacket packet)
+    {
+        if (!_settings.EventDrivenPacketWaiting) { _queue.Enqueue(packet); return; }
+        if (!packet.Active || packet.WaitState == PacketWaitState.Ready) return;
+        LeaveWait(packet);
+        packet.WaitState = PacketWaitState.Ready;
+        _ready.Enqueue(packet);
+    }
+
+    private void WaitUntil(PendingPacket packet, long tick)
+    {
+        if (!_settings.EventDrivenPacketWaiting) { _queue.Enqueue(packet); return; }
+        LeaveWait(packet);
+        packet.WaitState = PacketWaitState.Delayed;
+        packet.NextRetryTick = tick;
+        _delayedCount++;
+        IndexWaiting(packet, true);
+        _delayed.Enqueue((packet, packet.WaitVersion), (tick, ++_timerSequence));
+        CompactDelayedQueue();
+    }
+
+    private void AwaitReroute(PendingPacket packet)
+    {
+        if (!_settings.EventDrivenPacketWaiting) { _queue.Enqueue(packet); return; }
+        LeaveWait(packet);
+        packet.WaitState = PacketWaitState.Rerouting;
+        _reroutingCount++;
+        IndexWaiting(packet, true);
+    }
+
+    private void CompactDelayedQueue()
+    {
+        // Event-driven wakeups invalidate heap entries. Bound stale storage.
+        if (_delayed.Count <= Math.Max(512, _active.Count * 4)) return;
+        var old = _delayed.UnorderedItems.ToArray();
+        _delayed.Clear();
+        foreach (var entry in old)
+        {
+            var (packet, version) = entry.Element;
+            if (packet.Active && packet.WaitState == PacketWaitState.Delayed &&
+                packet.WaitVersion == version)
+                _delayed.Enqueue(entry.Element, entry.Priority);
+        }
+    }
+
+    private void WakeTimers(long tick)
+    {
+        while (_expirations.TryPeek(out var packet, out var expiry) && expiry <= tick)
+        {
+            _expirations.Dequeue();
+            if (!packet.Active) continue;
+            if (packet.WaitState is PacketWaitState.Delayed or PacketWaitState.Rerouting)
+                _expiredWhileParked++;
+            _expired++;
+            Retire(packet);
+        }
+        while (_delayed.TryPeek(out _, out var due) && due.Tick <= tick)
+        {
+            var (packet, version) = _delayed.Dequeue();
+            if (!packet.Active || packet.WaitState != PacketWaitState.Delayed ||
+                packet.WaitVersion != version) continue;
+            _timerWakeups++;
+            Ready(packet);
+        }
+    }
 
     public PacketTransportCounters Capture()
     {
@@ -190,7 +305,7 @@ public sealed class RadioPacketTransport
                 sorted[(int)Math.Ceiling((sorted.Length - 1) * factor)];
             return new PacketTransportCounters(
                 _enqueued, _rejected, _delivered, _dropped, _expired, _reroutes,
-                _busy, _radioHops, _cableHops, _bytesDelivered, _queue.Count,
+                _busy, _radioHops, _cableHops, _bytesDelivered, QueuedCount,
                 _peak, _lastTick, _noRouteDeferrals, _linkFailureDrops, _oversizeDrops,
                 _fullRejects, _invalidRejects, Percentile(ages, .5),
                 Percentile(ages, .95),
@@ -206,7 +321,10 @@ public sealed class RadioPacketTransport
                 _staleNegativeResults, _localRevisions.Count,
                 _forwardingVisits, _visitBudgetStops, _currentVisitLimit,
                 _adaptiveIncreases, _adaptiveDecreases, _preRouteRejects,
-                _reservedAdmissions, _admissionReservations);
+                _reservedAdmissions, _admissionReservations,
+                _settings.EventDrivenPacketWaiting ? _active.Count - _delayedCount - _reroutingCount : _queue.Count,
+                _delayedCount, _reroutingCount, _timerWakeups, _topologyWakeups,
+                _expiredWhileParked);
         }
     }
 
@@ -219,7 +337,7 @@ public sealed class RadioPacketTransport
     {
         lock (_gate)
         {
-            if (_queue.Count + _reservedAdmissions >= _settings.Capacity)
+            if (QueuedCount + _reservedAdmissions >= _settings.Capacity)
             {
                 _preRouteRejects++;
                 return null;
@@ -279,7 +397,7 @@ public sealed class RadioPacketTransport
             _invalidRejects++;
             return false;
         }
-        if (_queue.Count + _reservedAdmissions >= _settings.Capacity)
+        if (QueuedCount + _reservedAdmissions >= _settings.Capacity)
         {
             _rejected++;
             _fullRejects++;
@@ -287,10 +405,12 @@ public sealed class RadioPacketTransport
         }
         var detached = route with { Path = route.Path.ToArray() };
         var packet = new PendingPacket(detached, bytes, tick, ++_nextPacketId);
-        _queue.Enqueue(packet);
         _active.Add(packet.Id, packet);
+        Ready(packet);
+        if (_settings.EventDrivenPacketWaiting)
+            _expirations.Enqueue(packet, checked(tick + _settings.MaxAgeTicks));
         _enqueued++;
-        _peak = Math.Max(_peak, _queue.Count);
+        _peak = Math.Max(_peak, QueuedCount);
         return true;
     }
 
@@ -308,8 +428,11 @@ public sealed class RadioPacketTransport
         lock (_gate)
         {
             var revision = ++_topologyChangeRevision;
+            HashSet<long>? affected = _settings.EventDrivenPacketWaiting ? new() : null;
             foreach (var update in updates)
             {
+                if (affected is not null && _waitingByNode.TryGetValue(update.Id, out var ids))
+                    affected.UnionWith(ids);
                 if (_localRevisions.Count >= MaxRememberedChangedNodes &&
                     !_localRevisions.ContainsKey(update.Id))
                 {
@@ -320,6 +443,14 @@ public sealed class RadioPacketTransport
                 }
                 _localRevisions[update.Id] = revision;
             }
+            if (affected is not null)
+                foreach (var id in affected)
+                    if (_active.TryGetValue(id, out var packet) &&
+                        packet.WaitState is PacketWaitState.Delayed or PacketWaitState.Rerouting)
+                    {
+                        Ready(packet);
+                        _topologyWakeups++;
+                    }
         }
     }
 
@@ -362,7 +493,8 @@ public sealed class RadioPacketTransport
             _lastTick = tick;
             int visitLimit = _settings.AdaptivePacketVisits
                 ? _currentVisitLimit : _settings.MaxAdvancesPerTick;
-            int count = Math.Min(_queue.Count, visitLimit);
+            if (_settings.EventDrivenPacketWaiting) WakeTimers(tick);
+            int count = Math.Min(_settings.EventDrivenPacketWaiting ? _ready.Count : _queue.Count, visitLimit);
             int forwarded = 0;
             int visited = 0;
             for (var i = 0; i < count; i++)
@@ -374,7 +506,12 @@ public sealed class RadioPacketTransport
                     break;
                 }
                 visited++;
-                var packet = _queue.Dequeue();
+                var packet = _settings.EventDrivenPacketWaiting ? _ready.Dequeue() : _queue.Dequeue();
+                if (_settings.EventDrivenPacketWaiting)
+                {
+                    if (!packet.Active || packet.WaitState != PacketWaitState.Ready) continue;
+                    packet.WaitState = PacketWaitState.None;
+                }
                 if (tick - packet.CreatedTick >= _settings.MaxAgeTicks)
                 {
                     _expired++;
@@ -412,7 +549,7 @@ public sealed class RadioPacketTransport
                     if (tick < packet.NextRetryTick)
                     {
                         _cooldownSkips++;
-                        _queue.Enqueue(packet);
+                        WaitUntil(packet, packet.NextRetryTick);
                         continue;
                     }
                 }
@@ -443,19 +580,19 @@ public sealed class RadioPacketTransport
                         else _cableHops++;
                         if (packet.Index == packet.Path.Count - 1)
                             Delivered(packet, tick);
-                        else _queue.Enqueue(packet);
+                        else Ready(packet);
                         break;
 
                     case RadioHopOutcome.ChannelBusy:
                     case RadioHopOutcome.OldTick:
                         _busy++;
-                        _queue.Enqueue(packet);
+                        Ready(packet);
                         break;
 
                     case RadioHopOutcome.LinkUnavailable:
                         if (packet.PendingRerouteId != 0)
                         {
-                            _queue.Enqueue(packet);
+                            AwaitReroute(packet);
                             break;
                         }
                         if (packet.Reroutes >= _settings.MaxReroutes)
@@ -470,14 +607,14 @@ public sealed class RadioPacketTransport
                         {
                             _rerouteQueueDeferrals++;
                             packet.NextRetryTick = tick + _settings.RerouteQueueRetryDelayTicks;
-                            _queue.Enqueue(packet);
+                            WaitUntil(packet, packet.NextRetryTick);
                             break;
                         }
                         var ticket = new PacketRerouteRequest(++_nextRequestId,
                             packet.Id, from, packet.Destination, tick);
                         packet.PendingRerouteId = ticket.Id;
                         _rerouteQueue.Enqueue(ticket);
-                        _queue.Enqueue(packet);
+                        AwaitReroute(packet);
                         break;
 
                     case RadioHopOutcome.PacketTooLarge:
@@ -491,7 +628,7 @@ public sealed class RadioPacketTransport
             var elapsedUs = (long)((Stopwatch.GetTimestamp() - started) *
                 1_000_000.0 / Stopwatch.Frequency);
             _forwardingVisits += visited;
-            if (visited == visitLimit && _queue.Count != 0)
+            if (visited == visitLimit && (_settings.EventDrivenPacketWaiting ? _ready.Count : _queue.Count) != 0)
                 _visitBudgetStops++;
             if (_settings.AdaptivePacketVisits && visited > 0)
             {
@@ -509,7 +646,7 @@ public sealed class RadioPacketTransport
                         _adaptiveDecreases++;
                     }
                 }
-                else if (visited == visitLimit && _queue.Count > 0 &&
+                else if (visited == visitLimit && (_settings.EventDrivenPacketWaiting ? _ready.Count : _queue.Count) > 0 &&
                     elapsedUs <= budgetUs * 6 / 10)
                 {
                     int increased = Math.Min(_settings.MaxAdvancesPerTick,
@@ -585,6 +722,7 @@ public sealed class RadioPacketTransport
                 {
                     _staleNegativeResults++;
                     packet.NextRetryTick = _lastTick + _settings.NoRouteRetryDelayTicks;
+                    if (_settings.EventDrivenPacketWaiting) WaitUntil(packet, packet.NextRetryTick);
                     return true;
                 }
                 _noRouteDeferrals++;
@@ -594,6 +732,7 @@ public sealed class RadioPacketTransport
                 _noRouteBackoffTicks += delay;
                 packet.NextRetryTick = _lastTick + delay;
                 packet.SeenLocalRevision = LocalRevision(packet);
+                if (_settings.EventDrivenPacketWaiting) WaitUntil(packet, packet.NextRetryTick);
                 return true;
             }
             // Detached from the router's reusable collections, if any.
@@ -601,6 +740,7 @@ public sealed class RadioPacketTransport
             packet.Index = 0;
             packet.NoRouteStreak = 0;
             packet.NextRetryTick = _lastTick + 1;
+            if (_settings.EventDrivenPacketWaiting) WaitUntil(packet, packet.NextRetryTick);
             return true;
         }
     }
@@ -622,6 +762,7 @@ public sealed class RadioPacketTransport
                 return false;
             packet.PendingRerouteId = 0;
             packet.NextRetryTick = _lastTick + 1;
+            if (_settings.EventDrivenPacketWaiting) WaitUntil(packet, packet.NextRetryTick);
             return true;
         }
     }
@@ -640,6 +781,7 @@ public sealed class RadioPacketTransport
     private void Retire(PendingPacket packet)
     {
         packet.Active = false;
+        if (_settings.EventDrivenPacketWaiting) LeaveWait(packet);
         _active.Remove(packet.Id);
         // Tickets already in progress are harmless; result application checks
         // Active. Pending tickets are skipped when the worker next drains them.
