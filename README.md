@@ -1038,6 +1038,36 @@ faster read-side searches; measure actual movement rate, original
 route throughput, p95, allocations, GC, and packet delivery before
 changing the default.
 
+## M18 — Event-driven packet waiting (opt-in)
+
+The `eventDrivenPacketWaiting` option is disabled by default to preserve
+the original FIFO as a reproducible control. When enabled, ready packets
+run through a round-robin FIFO while packets delayed by negative-route
+backoff and reroute-queue saturation are parked in a min-heap.
+Packets awaiting reroute are also parked; a safety probe every eight
+ticks detects unreported cable recovery. An index from failed-hop
+endpoints to waiting packet IDs wakes only affected packets when
+`NotifyRadioUpdates` reports a local change.
+
+An independent expiry heap enforces TTL while packets sleep. Parked
+packets and in-flight admission leases still consume the same bounded
+capacity. Generation checks reject stale heap/ready entries and heap
+compaction bounds retained references after frequent changes.
+An admitted packet can make at most one hop per simulation tick.
+Radio airtime and channel capacity are unchanged.
+
+**H** is identical to **G** (Dense A*, 4096-capacity queue, adaptive
+4096 visits/tick, pre-route backpressure, two reroute workers,
+96-tick backoff cap, TTL 900, 12k nodes, 1500 offered/s, seed 1337)
+except for `eventDrivenPacketWaiting=true`.
+ZIP names contain `-eventwait` or `-fifo` to avoid overwriting controls.
+
+New packet counters report ready, delayed and awaiting-reroute
+packets, timer/topology wakeups and expiry during parking.
+Compare G and H over all three 120-second scenarios and evaluate
+delivery, TTL, visit efficiency, reroute pressure and tick execution
+before changing the default. No throughput improvement is presumed.
+
 ## M17 — Adaptive packet forwarding and pre-route backpressure
 
 The Dense A* 12k-node test found that a static network can calculate
