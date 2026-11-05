@@ -223,6 +223,8 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
     private async Task MutationWorkerAsync(BenchmarkOptions options, NodePosition[] positions, CancellationToken ct)
     {
         var rng = new Random(options.Seed + 7331);
+        // Only synthetic shortcut links are removed. The base grid stays connected.
+        var dynamicLinks = new List<(NodeId A, NodeId B)>();
         double moveDue = 0, linksDue = 0;
         while (true)
         {
@@ -248,12 +250,21 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
             var snapshot = runtime.Topology.Snapshot;
             for (var i = 0; i < links; i++)
             {
+                if (dynamicLinks.Count > 0 && rng.Next(2) == 0)
+                {
+                    var index = rng.Next(dynamicLinks.Count);
+                    var (from, to) = dynamicLinks[index];
+                    dynamicLinks[index] = dynamicLinks[^1];
+                    dynamicLinks.RemoveAt(dynamicLinks.Count - 1);
+                    changes.Add(new TopologyChange(TopologyOperation.Disconnect, from, to));
+                    continue;
+                }
+
                 var a = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
                 var b = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
-                if (a == b) continue;
-                var linked = snapshot.Nodes[a].Links.ContainsKey(b);
-                changes.Add(new TopologyChange(
-                    linked ? TopologyOperation.Disconnect : TopologyOperation.Connect,
+                if (a == b || snapshot.Nodes[a].Links.ContainsKey(b)) continue;
+                dynamicLinks.Add((a, b));
+                changes.Add(new TopologyChange(TopologyOperation.Connect,
                     a, b, (uint)rng.Next(4, 14)));
             }
             if (changes.Count > 0) runtime.Apply(changes);
