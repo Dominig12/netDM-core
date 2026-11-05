@@ -313,10 +313,10 @@ public sealed class DynamicRadioNetwork(NetworkRuntime runtime)
         int radius,
         Dictionary<GridCell, List<NodeId>> staged)
     {
-        var x0 = FloorCell(Math.Max(int.MinValue, (long)origin.X - radius));
-        var x1 = FloorCell(Math.Min(int.MaxValue, (long)origin.X + radius));
-        var y0 = FloorCell(Math.Max(int.MinValue, (long)origin.Y - radius));
-        var y1 = FloorCell(Math.Min(int.MaxValue, (long)origin.Y + radius));
+        var x0 = FloorCell((int)Math.Clamp((long)origin.X - radius, int.MinValue, int.MaxValue));
+        var x1 = FloorCell((int)Math.Clamp((long)origin.X + radius, int.MinValue, int.MaxValue));
+        var y0 = FloorCell((int)Math.Clamp((long)origin.Y - radius, int.MinValue, int.MaxValue));
+        var y1 = FloorCell((int)Math.Clamp((long)origin.Y + radius, int.MinValue, int.MaxValue));
         var seen = new HashSet<NodeId>();
         for (long x = x0; x <= x1; x++)
         for (long y = y0; y <= y1; y++)
