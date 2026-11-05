@@ -18,7 +18,8 @@ public sealed record ThreeScenarioSuiteOptions(
     int Seed = 1337,
     int RadioRange = 14,
     int MediumBytesPerTick = 8192,
-    string SharedSearch = "dijkstra")
+    string SharedSearch = "dijkstra",
+    bool PacketTransportEnabled = false)
 {
     public void Validate()
     {
@@ -34,7 +35,8 @@ public sealed record ThreeScenarioSuiteOptions(
             DurationSeconds: DurationSeconds, Seed: Seed,
             WirelessEnabled: true, RadioRange: RadioRange,
             RadioModel: "shared", MediumBytesPerTick: MediumBytesPerTick,
-            SharedSearch: SharedSearch);
+            SharedSearch: SharedSearch,
+            PacketTransportEnabled: PacketTransportEnabled);
 }
 
 public sealed record ScenarioResultSummary(

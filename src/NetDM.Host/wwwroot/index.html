@@ -34,6 +34,16 @@
           <div id="medium-budget-row" hidden>
             <label for="medium-budget">Shared capacity <small>bytes / 100 ms tick</small></label>
             <input id="medium-budget" type="number" min="1" max="1000000" value="8192" required>
+            <label for="shared-search">Shortest-path solver</label>
+            <select id="shared-search" class="workload-select">
+              <option value="dijkstra">DIJKSTRA · Exact baseline</option>
+              <option value="astar">A* · Admissible spatial heuristic</option>
+            </select>
+            <label for="packet-delivery">Delivery simulation</label>
+            <select id="packet-delivery" class="workload-select">
+              <option value="legacy">LEGACY · Reserve entire route / tick</option>
+              <option value="hopwise">HOPWISE · One hop per simulation tick</option>
+            </select>
           </div>
           <p class="radio-description">Nodes form links automatically when both radios are in range and on the same channel. Link changes simulate temporary radio outages.</p>
         </div>
@@ -85,6 +95,20 @@
           <span class="lab-tag">REPRODUCIBLE · OPEN-LOOP · SHARED RADIO</span>
         </div>
         <div class="suite-body">
+          <div class="suite-choices">
+            <label for="suite-search">Routing
+              <select id="suite-search" class="workload-select">
+                <option value="dijkstra">Dijkstra baseline</option>
+                <option value="astar">A* spatial search</option>
+              </select>
+            </label>
+            <label for="suite-delivery">Transport
+              <select id="suite-delivery" class="workload-select">
+                <option value="legacy">Legacy full-route reservation</option>
+                <option value="hopwise">Hop-by-hop packet forwarding</option>
+              </select>
+            </label>
+          </div>
           <div class="suite-actions">
             <button id="suite-start" type="button" class="primary">▶ RUN ALL THREE SCENARIOS</button>
             <button id="suite-stop" type="button" class="secondary" disabled>■ STOP SUITE</button>
@@ -146,6 +170,8 @@
         <div class="chart-panel"><div class="chart-heading"><div><strong>Routing latency</strong><small>P50 / P95 / P99 in µs</small></div><span class="chart-value" id="chart-latency">—</span></div><canvas id="latency-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
         <div class="chart-panel"><div class="chart-heading"><div><strong>Managed memory</strong><small>GC managed heap estimate</small></div><span class="chart-value" id="chart-memory">—</span></div><canvas id="memory-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
         <div class="chart-panel"><div class="chart-heading"><div><strong>Route reachability</strong><small>Found routes / all computed routes</small></div><span class="chart-value" id="chart-reachability">—</span></div><canvas id="reachability-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
+        <div class="chart-panel"><div class="chart-heading"><div><strong>Packet delivery</strong><small>Delivered / dropped / expired packets per second</small></div><span class="chart-value" id="chart-packets">—</span></div><canvas id="packets-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
+        <div class="chart-panel"><div class="chart-heading"><div><strong>Packet queue</strong><small>Queued packets and wireless hops per second</small></div><span class="chart-value" id="chart-packet-queue">—</span></div><canvas id="packet-queue-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
         <div class="chart-panel"><div class="chart-heading"><div><strong>Radio rejection reasons</strong><small>Too many hops · contention · stale route · other</small></div><span class="chart-value" id="chart-radio-reasons">—</span></div><canvas id="rejections-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
         <div class="chart-panel"><div class="chart-heading"><div><strong id="churn-title">Link churn</strong><small id="churn-subtitle">New / lost proximity links per second</small></div><span class="chart-value" id="chart-link-churn">—</span></div><canvas id="links-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
       </section>
