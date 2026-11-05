@@ -10,7 +10,9 @@ public sealed record BenchmarkOptions(
     int MovesPerSecond = 120,
     int LinkChangesPerSecond = 4,
     int DurationSeconds = 60,
-    int Seed = 1337)
+    int Seed = 1337,
+    bool WirelessEnabled = false,
+    int RadioRange = 14)
 {
     public void Validate()
     {
@@ -19,18 +21,21 @@ public sealed record BenchmarkOptions(
         if (MovesPerSecond is < 0 or > 10_000) throw new ArgumentOutOfRangeException(nameof(MovesPerSecond));
         if (LinkChangesPerSecond is < 0 or > 1_000) throw new ArgumentOutOfRangeException(nameof(LinkChangesPerSecond));
         if (DurationSeconds is < 2 or > 1800) throw new ArgumentOutOfRangeException(nameof(DurationSeconds));
+        if (RadioRange is < 1 or > 128) throw new ArgumentOutOfRangeException(nameof(RadioRange));
     }
 }
 
 public sealed record BenchmarkState(
     string Status, BenchmarkOptions? Options, DateTimeOffset? StartedUtc,
-    double ElapsedSeconds, int WorldWidth, int WorldHeight, string? Error);
+    double ElapsedSeconds, int WorldWidth, int WorldHeight, string? Error,
+    RadioStats? Radio);
 
 public sealed record BenchmarkSample(
     DateTimeOffset At, double ElapsedSeconds, double ActualRoutesPerSecond,
     double ActualMovesPerSecond, double ActualMutationsPerSecond,
     double P50Us, double P95Us, double P99Us, double CacheHitPercent,
-    long ManagedBytes, int NodeCount, long Version, long ConnectivityVersion);
+    long ManagedBytes, int NodeCount, long Version, long ConnectivityVersion,
+    int RadioLinks, double RadioLinksAddedPerSecond, double RadioLinksRemovedPerSecond);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -48,6 +53,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
     private DateTimeOffset? _started;
     private int _width, _height;
     private double _elapsed;
+    private DynamicRadioNetwork? _radioEngine;
 
     public BenchmarkState State()
     {
@@ -71,6 +77,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
             _elapsed = 0;
             _error = null;
             _width = _height = 0;
+            _radioEngine = null;
             while (_history.TryDequeue(out _)) { }
             _task = Task.Run(() => RunAsync(options, _cts.Token));
             return true;
@@ -106,7 +113,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
                     TopologyOperation.AddNode, new NodeId((ulong)(i + 1)), Position: positions[i]));
             }
 
-            // Connected 2-D grid, with some redundant cross-links for routing diversity.
+            // Wired baseline: connected grid with redundant shortcuts.
+            // Wireless mode derives links from proximity (no permanent grid edges).
+            if (!options.WirelessEnabled)
             for (var i = 0; i < options.Nodes; i++)
             {
                 var from = new NodeId((ulong)(i + 1));
@@ -129,10 +138,21 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
 
             ct.ThrowIfCancellationRequested();
             runtime.Apply(commands);
+            DynamicRadioNetwork? radio = null;
+            if (options.WirelessEnabled)
+            {
+                radio = new DynamicRadioNetwork(runtime);
+                var profile = new RadioProfile(options.RadioRange, 1, 8);
+                var registrations = Enumerable.Range(1, options.Nodes)
+                    .Select(i => new RadioNodeUpdate(new NodeId((ulong)i),
+                        Profile: profile, ChangeProfile: true)).ToArray();
+                radio.Update(registrations);
+            }
             lock (_gate)
             {
                 _width = columns * 12;
                 _height = ((options.Nodes + columns - 1) / columns) * 12;
+                _radioEngine = radio;
                 _status = "running";
             }
 
@@ -142,9 +162,10 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
             var workers = Enumerable.Range(0, workerCount).Select(worker =>
                 Task.Run(() => RouteWorkerAsync(options, worker, workerCount, ct), ct)).ToList();
             if (options.MovesPerSecond > 0 || options.LinkChangesPerSecond > 0)
-                workers.Add(Task.Run(() => MutationWorkerAsync(options, positions, ct), ct));
+                workers.Add(Task.Run(() => MutationWorkerAsync(options, positions, radio, ct), ct));
 
             var previous = runtime.Metrics.Capture(runtime.Cache.Count);
+            var previousRadio = radio?.Stats();
             var previousTime = clock.Elapsed.TotalSeconds;
             var finishedNaturally = false;
 
@@ -154,6 +175,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
                 var seconds = clock.Elapsed.TotalSeconds;
                 var current = runtime.Metrics.Capture(runtime.Cache.Count);
                 var snapshot = runtime.Topology.Snapshot;
+                var radioSnapshot = radio?.Stats();
                 var interval = Math.Max(0.001, seconds - previousTime);
                 var deltaRoutes = current.Routes - previous.Routes;
                 var deltaMoves = current.Moves - previous.Moves;
@@ -164,11 +186,15 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
                     current.P50Microseconds, current.P95Microseconds, current.P99Microseconds,
                     deltaRoutes == 0 ? 0 : 100.0 * (current.CacheHits - previous.CacheHits) / deltaRoutes,
                     current.ManagedBytes, snapshot.Nodes.Count, snapshot.Version,
-                    snapshot.ConnectivityVersion);
+                    snapshot.ConnectivityVersion,
+                    radioSnapshot?.ActiveWirelessLinks ?? 0,
+                    ((radioSnapshot?.TotalWirelessLinksAdded ?? 0) - (previousRadio?.TotalWirelessLinksAdded ?? 0)) / interval,
+                    ((radioSnapshot?.TotalWirelessLinksRemoved ?? 0) - (previousRadio?.TotalWirelessLinksRemoved ?? 0)) / interval);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;
                 previous = current;
+                previousRadio = radioSnapshot;
                 previousTime = seconds;
                 if (seconds >= options.DurationSeconds) { finishedNaturally = true; break; }
             }
@@ -220,16 +246,20 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
         }
     }
 
-    private async Task MutationWorkerAsync(BenchmarkOptions options, NodePosition[] positions, CancellationToken ct)
+    private async Task MutationWorkerAsync(BenchmarkOptions options, NodePosition[] positions,
+        DynamicRadioNetwork? radio, CancellationToken ct)
     {
         var rng = new Random(options.Seed + 7331);
         // Only synthetic shortcut links are removed. The base grid stays connected.
         var dynamicLinks = new List<(NodeId A, NodeId B)>();
         double moveDue = 0, linksDue = 0;
+        var radioActive = Enumerable.Repeat(true, options.Nodes).ToArray();
+        var profile = new RadioProfile(options.RadioRange, 1, 8);
         while (true)
         {
             ct.ThrowIfCancellationRequested();
             var changes = new List<TopologyChange>();
+            var radioUpdates = new Dictionary<NodeId, RadioNodeUpdate>();
             moveDue += (double)options.MovesPerSecond / 10;
             var moves = (int)moveDue;
             moveDue -= moves;
@@ -240,14 +270,40 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
                 var next = new NodePosition(last.X + rng.Next(-2, 3),
                     last.Y + rng.Next(-2, 3), last.Z);
                 positions[index] = next;
-                changes.Add(new TopologyChange(TopologyOperation.MoveNode,
-                    new NodeId((ulong)(index + 1)), Position: next));
+                var id = new NodeId((ulong)(index + 1));
+                if (radio is null)
+                    changes.Add(new TopologyChange(TopologyOperation.MoveNode, id, Position: next));
+                else if (radioUpdates.TryGetValue(id, out var prior))
+                    radioUpdates[id] = prior with { Position = next };
+                else
+                    radioUpdates[id] = new RadioNodeUpdate(id, Position: next);
             }
 
             linksDue += (double)options.LinkChangesPerSecond / 10;
             var links = (int)linksDue;
             linksDue -= links;
             var snapshot = runtime.Topology.Snapshot;
+            if (radio is not null)
+            {
+                for (var i = 0; i < links; i++)
+                {
+                    var index = rng.Next(options.Nodes);
+                    radioActive[index] = !radioActive[index];
+                    var id = new NodeId((ulong)(index + 1));
+                    var change = radioUpdates.TryGetValue(id, out var existing)
+                        ? existing
+                        : new RadioNodeUpdate(id);
+                    radioUpdates[id] = change with
+                    {
+                        Profile = radioActive[index] ? profile : null,
+                        ChangeProfile = true
+                    };
+                }
+                if (radioUpdates.Count > 0)
+                    radio.Update(radioUpdates.Values.ToArray());
+                await Task.Delay(100, ct);
+                continue;
+            }
             for (var i = 0; i < links; i++)
             {
                 if (dynamicLinks.Count > 0 && rng.Next(2) == 0)
