@@ -398,7 +398,7 @@ public sealed class SharedMediumNetwork
             double dy = (double)position.Value.Y - targetPosition.Value.Y;
             // Every radio hop moves at most maximumRadioRange units and costs
             // at least minimumRadioCost. floor() rounds toward a *lower* bound.
-            return Math.Floor(Math.Hypot(dx, dy) / maximumRadioRange) *
+            return Math.Floor(Math.Sqrt(dx * dx + dy * dy) / maximumRadioRange) *
                 minimumRadioCost;
         }
 
