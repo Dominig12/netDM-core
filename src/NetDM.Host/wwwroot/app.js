@@ -6,7 +6,7 @@ const frame = $("map-frame");
 const format = value => Number(value || 0).toLocaleString("en-US",{maximumFractionDigits:1});
 const compact = value => Number(value || 0).toLocaleString("en-US",{notation:"compact",maximumFractionDigits:1});
 const mb = bytes => (Number(bytes || 0)/1048576).toFixed(1)+" MB";
-let currentMap = {nodes:[],edges:[],version:0,totalNodes:0,displayedNodes:0};
+let currentMap = {nodes:[],edges:[],domainCells:[],version:0,totalNodes:0,displayedNodes:0};
 let currentMetrics = null;
 let history = [];
 let selected = null;
@@ -64,7 +64,11 @@ async function loadMap() {
     heat=nextHeat;
     currentMap=map;
     $("map-count").textContent=format(map.displayedNodes)+" / "+format(map.totalNodes)+" visible nodes";
-    $("map-status").textContent=map.truncated?"VIEWPORT LIMIT REACHED · ZOOM IN":"SPATIAL INDEX · VIEWPORT QUERY";
+    $("map-status").textContent=map.truncated
+      ? "VIEWPORT LIMIT REACHED · ZOOM IN"
+      : map.domainCells?.length
+        ? "SHARED MEDIUM · INDEXED DOMAIN CELLS"
+        : "SPATIAL INDEX · VIEWPORT QUERY";
     $("graph-version").textContent=format(map.version);
     $("map-empty").style.display=map.totalNodes?"none":"block";
     drawMap();
@@ -87,6 +91,25 @@ function drawMap(){
     const py=(y-camera.y)*camera.scale+h/2;ctx.moveTo(0,py);ctx.lineTo(w,py);
   }
   ctx.stroke();
+  // Shared medium shows occupied channel cells, not imaginary N×N radio edges.
+  // The physical network graph remains sparse even for thousands of co-located devices.
+  if(currentMap.domainCells?.length){
+    const tileSize=32*camera.scale;
+    for(const cell of currentMap.domainCells){
+      const p=screen({x:cell.x*32,y:cell.y*32},w,h);
+      if(p.x>w||p.y>h||p.x+tileSize<0||p.y+tileSize<0)continue;
+      const strength=Math.min(.38,.10+Math.log2(cell.count+1)*.035);
+      const cool=cell.channel%2===0;
+      ctx.fillStyle=cool
+        ? "rgba(91,146,253,"+strength+")"
+        : "rgba(47,213,191,"+strength+")";
+      ctx.fillRect(p.x,p.y,tileSize,tileSize);
+      if(tileSize>12){
+        ctx.strokeStyle=cool?"rgba(93,151,255,.34)":"rgba(67,230,202,.32)";
+        ctx.lineWidth=1;ctx.strokeRect(p.x,p.y,tileSize,tileSize);
+      }
+    }
+  }
   if(!currentMap.nodes.length){$("viewport-text").textContent="NO ACTIVE CELLS";return;}
   const byId=new Map(currentMap.nodes.map(n=>[n.id,n]));
   const stroke=Math.max(.5,Math.min(1.25,camera.scale*.7));
@@ -135,7 +158,9 @@ function drawMap(){
   if(selected!==null){
     const node=byId.get(selected);
     $("node-details").textContent=node
-      ? "NODE #"+node.id+" · "+node.links+" LINKS · "+node.traffic+" TRAFFIC SAMPLES · "+node.x+", "+node.y
+      ? "NODE #"+node.id+" · "+node.links+
+        (currentMetrics?.benchmark?.options?.radioModel==="shared"?" WIRED LINKS":" LINKS")+
+        " · "+node.traffic+" TRAFFIC SAMPLES · "+node.x+", "+node.y
       : "SELECTED NODE OUTSIDE VIEWPORT";
   }
 }
@@ -206,15 +231,24 @@ function drawCharts(){
     {values:history.map(x=>x.p99Us),color:"#f3a572",width:1.3}
   ],"#5bd5db");
   plot("memory-chart",[{values:history.map(x=>x.managedBytes/1048576),color:"#87a5ff"}],"#87a5ff");
+  const shared=currentMetrics?.benchmark?.options?.radioModel==="shared";
+  const accepted=history.map(x=>x.acceptedTransfersPerSecond||0);
+  const rejected=history.map(x=>x.rejectedTransfersPerSecond||0);
   plot("links-chart",[
-    {values:history.map(x=>x.radioLinksAddedPerSecond||0),color:"#5adaba"},
-    {values:history.map(x=>x.radioLinksRemovedPerSecond||0),color:"#f1aa82"}
+    {values:shared?accepted:history.map(x=>x.radioLinksAddedPerSecond||0),color:"#5adaba"},
+    {values:shared?rejected:history.map(x=>x.radioLinksRemovedPerSecond||0),color:"#f1aa82"}
   ],"#5adaba");
+  $("churn-title").textContent=shared?"Shared airtime":"Link churn";
+  $("churn-subtitle").textContent=shared
+    ? "Accepted / rejected transfers per second"
+    : "New / lost proximity links per second";
   $("chart-rps").textContent=last?format(last.actualRoutesPerSecond)+"/s":"—";
   $("chart-latency").textContent=last?format(last.p95Us)+" µs":"—";
   $("chart-memory").textContent=last?mb(last.managedBytes):"—";
   $("chart-link-churn").textContent=last
-    ? "+"+format(last.radioLinksAddedPerSecond||0)+" / -"+format(last.radioLinksRemovedPerSecond||0)
+    ? shared
+      ? format(last.acceptedTransfersPerSecond||0)+" / "+format(last.rejectedTransfersPerSecond||0)
+      : "+"+format(last.radioLinksAddedPerSecond||0)+" / -"+format(last.radioLinksRemovedPerSecond||0)
     : "—";
 }
 async function pollMetrics(){
@@ -234,10 +268,17 @@ async function pollMetrics(){
     $("kpi-edges").textContent=format(data.edgeCount)+" connections";
     $("kpi-p95").textContent=format(data.runtime.p95Microseconds)+" µs";
     $("kpi-cache-count").textContent=format(data.runtime.cacheEntries)+" cached routes";
-    $("kpi-radio").textContent=bench.radio ? compact(bench.radio.activeWirelessLinks) : "—";
-    $("kpi-radio-events").textContent=bench.radio
-      ? "+"+format(bench.radio.totalWirelessLinksAdded)+" / -"+format(bench.radio.totalWirelessLinksRemoved)+" lifetime"
-      : "Wired graph / no proximity links";
+    const shared=bench.sharedMedium;
+    $("kpi-radio-label").textContent=shared?"RADIO DOMAINS":"RADIO LINKS";
+    $("kpi-radio").textContent=shared
+      ? format(shared.domains)
+      : bench.radio?compact(bench.radio.activeWirelessLinks):"—";
+    $("kpi-radio-events").textContent=shared
+      ? format(shared.configuredDevices)+" devices · "+format(shared.occupiedCells)+" cells · "+
+        format(shared.rejectedTransfers)+" denied transfers"
+      : bench.radio
+        ? "+"+format(bench.radio.totalWirelessLinksAdded)+" / -"+format(bench.radio.totalWirelessLinksRemoved)+" lifetime"
+        : "Wired graph / no proximity links";
     $("kpi-version").textContent="topology v"+format(data.version);
     $("connectivity-version").textContent=format(data.connectivityVersion);
     $("kpi-target").textContent="target "+format(bench.options?.routesPerSecond||0)+"/s";
@@ -272,7 +313,9 @@ $("bench-form").addEventListener("submit",async event=>{
     nodes:Number($("nodes").value),routesPerSecond:Number($("routes").value),
     movesPerSecond:Number($("moves").value),linkChangesPerSecond:Number($("links").value),
     durationSeconds:Number($("duration").value),seed:Number($("seed").value),
-    wirelessEnabled:$("network-mode").value==="radio",
+    wirelessEnabled:$("network-mode").value!=="wired",
+    radioModel:$("network-mode").value==="shared"?"shared":"pairwise",
+    mediumBytesPerTick:Number($("medium-budget").value),
     radioRange:Number($("radio-range").value)
   };
   try{
@@ -435,8 +478,14 @@ setInterval(pollComparison,1300);
 pollComparison();
 
 $("network-mode").addEventListener("change",()=>{
-  const enabled=$("network-mode").value==="radio";
+  const selectedMode=$("network-mode").value;
+  const enabled=selectedMode!=="wired";
   $("radio-options").hidden=!enabled;
+  $("medium-budget-row").hidden=selectedMode!=="shared";
   $("links").labels[0].querySelector("small").textContent=enabled
     ? "radio toggles / sec" : "0 – 1,000";
+  document.querySelector(".radio-description").textContent=
+    selectedMode==="shared"
+      ? "Radio devices share channel airtime without generating pairwise graph edges. View domain tiles, routing, and congestion."
+      : "Nodes connect through physical proximity. Link changes simulate radio outages.";
 });

@@ -124,3 +124,8 @@ h1{font-size:27px;font-weight:650;letter-spacing:-.6px;margin:7px 0 0}
 @media(min-width:1450px){.chart-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media(max-width:1020px){.chart-grid{grid-template-columns:1fr}}
 @media(max-width:680px){.kpi-grid{grid-template-columns:1fr 1fr}}
+
+#medium-budget-row[hidden]{display:none}
+#medium-budget-row{margin-top:8px}
+#medium-budget-row label{font-size:11px}
+.legend-domain{width:10px;height:10px;background:rgba(47,213,191,.35);border:1px solid #2fd5bf}
