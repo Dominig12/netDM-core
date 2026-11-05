@@ -217,11 +217,16 @@ public sealed class RadioPacketTransport
                     Delivered(packet, tick);
                     continue;
                 }
-                if (packet.PendingRerouteId != 0 || tick < packet.NextRetryTick)
+                if (packet.PendingRerouteId == 0 && tick < packet.NextRetryTick)
                 {
                     _queue.Enqueue(packet);
                     continue;
                 }
+                // A temporarily broken hop may heal while its reroute is
+                // queued or running. Recheck the cheap single-hop path so
+                // it can recover without waiting for an expensive search.
+                // A successful hop invalidates the ticket generation; any
+                // late reroute result is ignored.
 
                 var from = packet.Path[packet.Index];
                 var to = packet.Path[packet.Index + 1];
@@ -230,6 +235,7 @@ public sealed class RadioPacketTransport
                 {
                     case RadioHopOutcome.TransmittedRadio:
                     case RadioHopOutcome.TransmittedCable:
+                        packet.PendingRerouteId = 0; // Cancel logical ticket on healing.
                         if (packet.SuccessfulHops == 0)
                             _firstHopAges[(int)(_firstHopSampleCount++ % SampleWindow)] =
                                 Math.Max(0, tick - packet.CreatedTick);
@@ -250,6 +256,11 @@ public sealed class RadioPacketTransport
                         break;
 
                     case RadioHopOutcome.LinkUnavailable:
+                        if (packet.PendingRerouteId != 0)
+                        {
+                            _queue.Enqueue(packet);
+                            break;
+                        }
                         if (packet.Reroutes >= _settings.MaxReroutes)
                         {
                             _dropped++;

@@ -614,3 +614,14 @@ Compare against the previous run:
 - reroute scheduler's own CPU admission and work p95.
 
 A full 12k-node benchmark has **not** been rerun by the CI tests.
+
+### Healing during an outstanding reroute
+
+An outstanding reroute ticket does not freeze packet forwarding when
+the original radio hop becomes reachable again. The tick worker still
+rechecks that inexpensive next-hop condition. If it succeeds, the
+packet advances and invalidates its reroute request generation. An
+already-running A* result then fails validation and cannot replace
+the progressed or delivered packet. Ticket ownership is released
+when the scheduled search completes; this preserves concurrency
+limits on the actual reroute executor.

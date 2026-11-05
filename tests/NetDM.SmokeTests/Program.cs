@@ -524,6 +524,24 @@ static void CheckPacketTransport()
     Check(gaps.Capture().FirstHopSamples==1);
     Check(gaps.Capture().ForwardingP95Milliseconds>=0);
 
+    // A reroute already in-flight must not prevent a physically healed link
+    // from advancing. Its late result is ignored by the generation guard.
+    var (healedMedium, healedRoute)=MakeChain(600);
+    var healedQueue=new RadioPacketTransport(healedMedium,
+        new PacketTransportOptions(MaxConcurrentReroutes:1));
+    Check(healedQueue.Enqueue(healedRoute,300,0));
+    Check(healedQueue.Advance(1)==1);
+    healedMedium.Update([new RadioNodeUpdate(new NodeId(3),
+        Profile:null,ChangeProfile:true)]);
+    healedQueue.Advance(2);
+    Check(healedQueue.TryTakeReroute(out var healingTicket));
+    healedMedium.Update([new RadioNodeUpdate(new NodeId(3),
+        Profile:new RadioProfile(14,1,8),ChangeProfile:true)]);
+    Check(healedQueue.Advance(3)==1);
+    Check(healedQueue.Capture().Delivered==1);
+    Check(!healedQueue.CompleteReroute(healingTicket,healedRoute));
+    Check(healedQueue.Capture().RerouteInFlight==0);
+
     // A physical cable can restore the missing hop while a packet is
     // already en route. The final hop uses the cable, not shared airtime.
     var (cableMedium, cablePath) = MakeChain(400);
