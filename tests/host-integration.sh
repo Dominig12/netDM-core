@@ -160,6 +160,8 @@ reasons=[
 ]
 assert sum(reasons)==radio["rejectedTransfers"],radio
 assert radio["attemptedWirelessHops"]>=radio["acceptedTransfers"],radio
+assert radio["acceptedRevalidatedTransfers"]>=0,radio
+assert all(sample["revalidatedTransfersPerSecond"]>=0 for sample in h),h
 assert all(0<=sample["foundPercent"]<=100 for sample in h),h
 assert all(0<=sample["mediumConfiguredDevices"]<=180 for sample in h),h
 assert all(sample["schedulerQueued"]>=0 for sample in h),h

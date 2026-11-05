@@ -198,6 +198,10 @@ static void CheckSharedMedium()
 
     Check(medium.SetCable(new NodeId(2), new NodeId(3), 2));
     Check(medium.Route(new NodeId(1), new NodeId(3)).Cost == 10);
+    // Global snapshot advanced because a different cable changed. The original
+    // 1 -> 2 radio route still exists and can be delivered without re-routing.
+    Check(medium.TryTransmit(toTwo, 100, 3));
+    Check(medium.Stats().AcceptedRevalidatedTransfers == 1);
     var lastVersion = medium.Snapshot.Version;
     var update = medium.Update([new RadioNodeUpdate(new NodeId(2),
         Position: new NodePosition(-25, 0))]);
@@ -206,9 +210,19 @@ static void CheckSharedMedium()
     Check(medium.Route(new NodeId(2), new NodeId(3)).Cost == 2);
     Check(!medium.TryTransmit(toTwo, 100, 3)); // stale route cannot send
     Check(medium.Stats().RejectedStaleRoute == 1);
+    // An untrusted/synthetic route with a removed endpoint must never throw.
+    var nonexistent = toTwo with { Path = new[] { new NodeId(1), new NodeId(9999) } };
+    Check(!medium.TryTransmit(nonexistent, 100, 4));
+    Check(medium.Stats().RejectedStaleRoute == 2);
     Check(medium.SetCable(new NodeId(1), new NodeId(2), 1));
     Check(medium.Route(new NodeId(1), new NodeId(3)).Cost == 3);
     Check(medium.TryTransmit(medium.Route(new NodeId(1), new NodeId(3)), 900, 3));
+    // After radio has disappeared, an older route remains deliverable if a
+    // cable has replaced its hop. Actual current cable cost is used.
+    var formerRadioRoute = medium.Route(new NodeId(1), new NodeId(3));
+    Check(medium.SetCable(new NodeId(1), new NodeId(3), 1));
+    Check(medium.TryTransmit(formerRadioRoute, 900, 4));
+    Check(medium.Stats().AcceptedRevalidatedTransfers == 2);
     // One two-hop wireless packet larger than the shared channel's entire
     // tick cannot succeed even when the channel is otherwise idle.
     var oversizedRuntime = new NetworkRuntime();
@@ -242,6 +256,7 @@ static void CheckSharedMedium()
         radioStats.RejectedTransferTooLarge + radioStats.RejectedCapacity +
         radioStats.RejectedStaleRoute + radioStats.RejectedInvalidPath +
         radioStats.RejectedOldTick);
+    Check(medium.SetCable(new NodeId(1), new NodeId(3), null));
     Check(medium.RemoveNodes([new NodeId(2)]) == 1);
     Check(!medium.Route(new NodeId(1), new NodeId(3)).Found);
     Check(medium.Stats().ConfiguredDevices == 3);

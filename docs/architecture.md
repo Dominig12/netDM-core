@@ -403,3 +403,28 @@ Next experiments:
 4. Calibrate airtime against hop count, payload size, and realistic
    game network latency; introduce explicit packet queues and
    contention instead of interpreting every denial as a routing error.
+
+## M8: local route validation vs global snapshot epochs
+
+A snapshot generation advance does not imply that every previously found
+path has become disconnected. For a 12k-node radio world with 1k moves/s,
+strict whole-network version equality caused thousands of unnecessary
+transmission rejections.
+
+`SharedMediumNetwork.TryTransmit` now pins one current snapshot, walks
+the supplied route and verifies that **every endpoint still exists**
+and that every consecutive pair is connected by a current cable or an
+eligible same-channel, same-Z, mutual-range radio hop. It recomputes
+radio-airtime usage from the current topology and atomically reserves
+the resulting channel budget. It does **not** trust the old route cost
+as the transmission cost. If the original route version is older but
+every hop survives, it can be transmitted; a successful such reservation
+increments `AcceptedRevalidatedTransfers`.
+
+If an obsolete path actually contains a missing node or invalid hop,
+`RejectedStaleRoute` increments. Malformed paths at the current epoch
+increment `RejectedInvalidPath`. Any future-version path is rejected.
+Packet routing and transmission are still concurrent: a topology change
+after the pinned snapshot is read is not synchronously prevented. The
+next milestone is reliable per-hop packet progression with bounded queues
+and per-hop version/availability checks.

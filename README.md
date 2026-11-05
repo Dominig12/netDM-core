@@ -438,3 +438,33 @@ distinct from `actualRoutesPerSecond`, which counts completed searches.
 Do not compare results from old closed-loop tests directly to new
 open-loop runs as if they used the same offered load. This change is a
 benchmark-methodology correction, not an algorithm speedup.
+
+## Route validity across unrelated topology updates (M8)
+
+Previous shared-medium transfers categorically rejected any computed route whose
+`RouteResult.Version` was different from the current global
+`SharedMediumSnapshot.Version`. The open-loop movement benchmark showed that
+**5,593 of 8,307 failed transfers** were classified as stale with 1,000
+node moves/s, even though the route's local hops might still have been valid.
+
+The radio transmitter now pins a single current immutable composite snapshot
+and **revalidates every hop** of an older route (physical cable or mutual
+radio reachability). A valid multi-hop route can be delivered without a
+full shortest-path recomputation: it need not remain *optimal*, only
+connected. If any endpoint has been removed or any hop has disappeared,
+the stale route is rejected. Never blindly trust an old route's global
+revision or cost. The existing byte/tick budget is still checked against
+the currently valid medium and selected cable-versus-radio hops.
+
+`AcceptedRevalidatedTransfers` counts successfully delivered routes that
+were calculated under an earlier global version; the history includes
+`revalidatedTransfersPerSecond`. The Observatory shared airtime chart
+overlays these accepted transmissions in blue. The old
+`RejectedStaleRoute` counter now refers to **invalid old paths**, not
+all old revisions, and is therefore **not directly comparable** to
+pre-M8 benchmarks.
+
+This does **not** guarantee that the route will remain valid for the
+entire duration of an eventual multi-tick packet transfer. A future
+per-hop transmission scheduler must revalidate the next hop at its own
+dispatch time, and fail or re-route at the broken hop.

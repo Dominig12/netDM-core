@@ -31,7 +31,8 @@ public readonly record struct SharedMediumStatistics(
     long AcceptedBytes, long RejectedBytes,
     long RejectedStaleRoute, long RejectedInvalidPath,
     long RejectedTransferTooLarge, long RejectedCapacity,
-    long RejectedOldTick, long AttemptedWirelessHops);
+    long RejectedOldTick, long AttemptedWirelessHops,
+    long AcceptedRevalidatedTransfers);
 
 public readonly record struct RadioMediumCellView(
     uint Channel, int Z, int X, int Y, int Count);
@@ -54,6 +55,7 @@ public sealed class SharedMediumNetwork
     private long _rejectedStaleRoute, _rejectedInvalidPath;
     private long _rejectedTooLarge, _rejectedCapacity, _rejectedOldTick;
     private long _attemptedWirelessHops;
+    private long _acceptedRevalidated;
 
     public SharedMediumNetwork(NetworkRuntime runtime, long bytesPerTick = 8_192)
     {
@@ -85,7 +87,8 @@ public sealed class SharedMediumNetwork
             Interlocked.Read(ref _rejectedTooLarge),
             Interlocked.Read(ref _rejectedCapacity),
             Interlocked.Read(ref _rejectedOldTick),
-            Interlocked.Read(ref _attemptedWirelessHops));
+            Interlocked.Read(ref _attemptedWirelessHops),
+            Interlocked.Read(ref _acceptedRevalidated));
     }
 
     /// <summary>
@@ -312,23 +315,41 @@ public sealed class SharedMediumNetwork
     /// <summary>
     /// Reserve shared bytes/tick on every radio hop atomically. A cable hop
     /// costs zero wireless airtime. Each domain shares one quota across devices.
+    /// A route computed on an older snapshot can still be used if EVERY hop is
+    /// valid under the current immutable snapshot. It may no longer be shortest;
+    /// physical delivery requires reachability, not a new global route version.
     /// Tick is a nondecreasing caller-defined simulation counter.
     /// </summary>
     public bool TryTransmit(RouteResult route, int payloadBytes, long tick)
     {
+        ArgumentNullException.ThrowIfNull(route);
         if (payloadBytes < 1 || payloadBytes > 1_000_000)
             throw new ArgumentOutOfRangeException(nameof(payloadBytes));
         ArgumentOutOfRangeException.ThrowIfNegative(tick);
         var snapshot = Snapshot;
         var needed = new Dictionary<RadioDomainKey, long>();
-        if (route.Version != snapshot.Version)
+        var needsRevalidation = route.Version != snapshot.Version;
+        if (route.Version > snapshot.Version)
         {
             RegisterRejection(payloadBytes, ref _rejectedStaleRoute);
             return false;
         }
-        if (!route.Found || route.Path.Count == 0)
+        if (!route.Found || route.Path is null || route.Path.Count == 0 ||
+            route.Path.Count > snapshot.Physical.Nodes.Count)
         {
             RegisterRejection(payloadBytes, ref _rejectedInvalidPath);
+            return false;
+        }
+
+        // Even a same-version route supplied to the public API must contain
+        // existing endpoints. Avoid KeyNotFoundException when nodes are removed.
+        foreach (var id in route.Path)
+        {
+            if (snapshot.Physical.Nodes.ContainsKey(id)) continue;
+            if (needsRevalidation)
+                RegisterRejection(payloadBytes, ref _rejectedStaleRoute);
+            else
+                RegisterRejection(payloadBytes, ref _rejectedInvalidPath);
             return false;
         }
 
@@ -336,12 +357,23 @@ public sealed class SharedMediumNetwork
         for (var i = 1; i < route.Path.Count; i++)
         {
             var a = route.Path[i - 1]; var b = route.Path[i];
+            if (a == b)
+            {
+                if (needsRevalidation)
+                    RegisterRejection(payloadBytes, ref _rejectedStaleRoute);
+                else
+                    RegisterRejection(payloadBytes, ref _rejectedInvalidPath);
+                return false;
+            }
             var wired = snapshot.Physical.Nodes[a].Links.TryGetValue(b, out var edge)
                 ? (ulong)edge.Cost : ulong.MaxValue;
             var wireless = RadioCost(snapshot, a, b, out var domain);
             if (wireless is null && wired == ulong.MaxValue)
             {
-                RegisterRejection(payloadBytes, ref _rejectedInvalidPath);
+                if (needsRevalidation)
+                    RegisterRejection(payloadBytes, ref _rejectedStaleRoute);
+                else
+                    RegisterRejection(payloadBytes, ref _rejectedInvalidPath);
                 return false;
             }
             if (wireless is { } w && (ulong)w < wired)
@@ -387,6 +419,8 @@ public sealed class SharedMediumNetwork
             }
             Interlocked.Increment(ref _accepted);
             Interlocked.Add(ref _acceptedBytes, payloadBytes);
+            if (needsRevalidation)
+                Interlocked.Increment(ref _acceptedRevalidated);
             return true;
         }
     }
