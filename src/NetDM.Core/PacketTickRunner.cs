@@ -103,7 +103,10 @@ public sealed class PacketTickRunner
             var skipped = observedTick - nextTick;
             if (skipped > 0)
                 Interlocked.Add(ref _skipped, skipped);
-            var lag = (long)Math.Max(0, (now - observedTick * _periodTicks) *
+            // Measure against the tick we intended to run, not observedTick.
+            // The old formula always reported < one period even after a
+            // multi-second stall and masked the 48/68 skipped intervals.
+            var lag = (long)Math.Max(0, (now - nextTick * _periodTicks) *
                 1_000_000.0 / Stopwatch.Frequency);
             InterlockedExtensions.Max(ref _maxLagUs, lag);
 
