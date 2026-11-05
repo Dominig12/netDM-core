@@ -207,7 +207,7 @@ mapCanvas.addEventListener("wheel",event=>{
 $("fit").addEventListener("click",fitMap);
 const observe=new ResizeObserver(()=>{drawMap();drawCharts();drawSchedulerCharts();drawComparisonPlot();});
 observe.observe(frame);
-for(const id of ["routes-chart","load-chart","latency-chart","explored-chart","gc-chart","memory-chart","links-chart","reachability-chart","packets-chart","packet-queue-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
+for(const id of ["routes-chart","load-chart","latency-chart","explored-chart","gc-chart","memory-chart","links-chart","reachability-chart","packets-chart","packet-queue-chart","reroute-pressure-chart","tick-health-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
 
 function plot(id,series,color,extra){
   const canvas=$(id),{ctx,w,h}=resizeCanvas(canvas);
@@ -269,6 +269,22 @@ function drawCharts(){
     format(last.packetsDroppedPerSecond||0)+" · p95 "+
     format((last.deliveryP95AgeTicks||0)/10)+"s":"—";
   $("chart-packet-queue").textContent=last?format(last.packetsQueued||0)+" queued":"—";
+  plot("reroute-pressure-chart",[
+    {values:history.map(x=>x.reroutesQueued||0),color:"#8d9dff"},
+    {values:history.map(x=>x.reroutesInFlight||0),color:"#77d8d6"},
+    {values:history.map(x=>x.rerouteStartedPerSecond||0),color:"#eab47e"}
+  ],"#8d9dff");
+  plot("tick-health-chart",[
+    {values:history.map(x=>x.packetSkippedTicksPerSecond||0),color:"#ef9e78"},
+    {values:history.map(x=>x.packetTickAdmissionFailuresPerSecond||0),color:"#ee658b"}
+  ],"#ef9e78");
+  $("chart-reroute-pressure").textContent=last
+    ?format(last.reroutesQueued||0)+" pending · "+format(last.reroutesInFlight||0)+
+      " running · wait p95 "+format((last.rerouteWaitP95Ticks||0)/10)+"s"
+    :"—";
+  $("chart-tick-health").textContent=last
+    ?format(last.packetSkippedTicksPerSecond||0)+" missed/s · forwarding p95 "+
+      format(last.packetForwardingP95Milliseconds||0)+"ms":"—";
   plot("rejections-chart",[
     {values:history.map(x=>x.rejectedTooLargePerSecond||0),color:"#f19f72"},
     {values:history.map(x=>x.rejectedCapacityPerSecond||0),color:"#e76373"},
@@ -366,7 +382,8 @@ async function pollMetrics(){
       : bench.radio?compact(bench.radio.activeWirelessLinks):"—";
     $("kpi-radio-events").textContent=shared&&bench.packetTransport
       ? format(bench.packetTransport.delivered)+" delivered · "+
-        format(bench.packetTransport.queued)+" queued · p95 "+
+        format(bench.packetTransport.queued)+" queued · "+
+        format(bench.packetTransport.rerouteQueued||0)+" reroute pending · p95 "+
         format((bench.packetTransport.deliveryAgeP95Ticks||0)/10)+"s · "+
         format(shared?.spatialActiveCells||0)+" airtime cells"
       : shared
@@ -418,6 +435,8 @@ $("bench-form").addEventListener("submit",async event=>{
       $("network-mode").value==="shared",
     spatialReuseEnabled:$("packet-airtime").value==="spatial",
     packetMaxAgeTicks:Number($("packet-ttl").value),
+    packetRerouteCpuBudgetMs:Number($("packet-reroute-budget").value),
+    packetRerouteWorkers:Number($("packet-reroute-workers").value),
     radioRange:Number($("radio-range").value)
   };
   try{
@@ -615,7 +634,9 @@ async function pollSuite(){
         (opts.sharedSearch==="astar"?"A*":"Dijkstra")+" · "+
         (opts.packetTransportEnabled?"hop-by-hop packets":"legacy airtime")+" · "+
         (opts.spatialReuseEnabled?"spatial sharing":"global channel")+
-        " · TTL "+opts.packetMaxAgeTicks+" ticks.";
+        " · TTL "+opts.packetMaxAgeTicks+" ticks · "+
+        "reroute "+opts.packetRerouteWorkers+" workers / "+
+        opts.packetRerouteCpuBudgetMs+"ms per 100ms.";
     }
     const rows=document.querySelectorAll("[data-suite-case]");
     for(const row of rows){
@@ -672,7 +693,9 @@ $("suite-start").addEventListener("click",async()=>{
         sharedSearch:$("suite-search").value,
         packetTransportEnabled:$("suite-delivery").value==="hopwise",
         spatialReuseEnabled:$("suite-airtime").value==="spatial",
-        packetMaxAgeTicks:Number($("suite-ttl").value)
+        packetMaxAgeTicks:Number($("suite-ttl").value),
+        packetRerouteCpuBudgetMs:Number($("suite-reroute-budget").value),
+        packetRerouteWorkers:Number($("suite-reroute-workers").value)
       })
     });
     if(!response.ok){

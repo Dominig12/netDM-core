@@ -22,7 +22,10 @@ public sealed record ThreeScenarioSuiteOptions(
     bool PacketTransportEnabled = false,
     bool SpatialReuseEnabled = true,
     int PacketMaxAgeTicks = 900,
-    int PacketMaxAdvancesPerTick = 1024)
+    int PacketMaxAdvancesPerTick = 1024,
+    int PacketRerouteWorkers = 1,
+    int PacketRerouteQueueCapacity = 32,
+    int PacketRerouteCpuBudgetMs = 25)
 {
     public void Validate()
     {
@@ -42,7 +45,10 @@ public sealed record ThreeScenarioSuiteOptions(
             PacketTransportEnabled: PacketTransportEnabled,
             SpatialReuseEnabled: SpatialReuseEnabled,
             PacketMaxAgeTicks: PacketMaxAgeTicks,
-            PacketMaxAdvancesPerTick: PacketMaxAdvancesPerTick);
+            PacketMaxAdvancesPerTick: PacketMaxAdvancesPerTick,
+            PacketRerouteWorkers: PacketRerouteWorkers,
+            PacketRerouteQueueCapacity: PacketRerouteQueueCapacity,
+            PacketRerouteCpuBudgetMs: PacketRerouteCpuBudgetMs);
 }
 
 public sealed record ScenarioResultSummary(
