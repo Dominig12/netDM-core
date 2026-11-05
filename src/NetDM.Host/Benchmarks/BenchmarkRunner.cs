@@ -53,7 +53,8 @@ public sealed record BenchmarkSample(
     double RejectedOldTickPerSecond,
     int SchedulerQueued, double SchedulerQueueWaitP95Us,
     double OfferedRoutesPerSecond, double AdmittedRoutesPerSecond,
-    double RejectedRoutesPerSecond);
+    double RejectedRoutesPerSecond,
+    double RevalidatedTransfersPerSecond);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -256,7 +257,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     schedulerSnapshot.Queued, schedulerSnapshot.QueueWaitP95Us,
                     (loadSnapshot.Offered - previousLoad.Offered) / interval,
                     (loadSnapshot.Admitted - previousLoad.Admitted) / interval,
-                    (loadSnapshot.Rejected - previousLoad.Rejected) / interval);
+                    (loadSnapshot.Rejected - previousLoad.Rejected) / interval,
+                    ((mediumSnapshot?.AcceptedRevalidatedTransfers ?? 0) -
+                     (previousMedium?.AcceptedRevalidatedTransfers ?? 0)) / interval);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;

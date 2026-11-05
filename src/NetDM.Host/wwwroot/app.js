@@ -265,7 +265,8 @@ function drawCharts(){
   const rejected=history.map(x=>x.rejectedTransfersPerSecond||0);
   plot("links-chart",[
     {values:shared?accepted:history.map(x=>x.radioLinksAddedPerSecond||0),color:"#5adaba"},
-    {values:shared?rejected:history.map(x=>x.radioLinksRemovedPerSecond||0),color:"#f1aa82"}
+    {values:shared?rejected:history.map(x=>x.radioLinksRemovedPerSecond||0),color:"#f1aa82"},
+    {values:shared?history.map(x=>x.revalidatedTransfersPerSecond||0):[],color:"#79a8ff",width:1.4}
   ],"#5adaba");
   $("churn-title").textContent=shared?"Shared airtime":"Link churn";
   $("churn-subtitle").textContent=shared
@@ -345,7 +346,8 @@ async function pollMetrics(){
       : bench.radio?compact(bench.radio.activeWirelessLinks):"—";
     $("kpi-radio-events").textContent=shared
       ? format(shared.configuredDevices)+" devices · "+format(shared.occupiedCells)+" cells · "+
-        format(shared.rejectedTransfers)+" denied transfers"
+        format(shared.acceptedRevalidatedTransfers)+" revalidated · "+
+        format(shared.rejectedTransfers)+" denied"
       : bench.radio
         ? "+"+format(bench.radio.totalWirelessLinksAdded)+" / -"+format(bench.radio.totalWirelessLinksRemoved)+" lifetime"
         : "Wired graph / no proximity links";
