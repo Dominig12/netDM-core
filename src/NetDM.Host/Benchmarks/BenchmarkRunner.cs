@@ -12,7 +12,9 @@ public sealed record BenchmarkOptions(
     int DurationSeconds = 60,
     int Seed = 1337,
     bool WirelessEnabled = false,
-    int RadioRange = 14)
+    int RadioRange = 14,
+    string RadioModel = "pairwise",
+    int MediumBytesPerTick = 8192)
 {
     public void Validate()
     {
@@ -22,20 +24,26 @@ public sealed record BenchmarkOptions(
         if (LinkChangesPerSecond is < 0 or > 1_000) throw new ArgumentOutOfRangeException(nameof(LinkChangesPerSecond));
         if (DurationSeconds is < 2 or > 1800) throw new ArgumentOutOfRangeException(nameof(DurationSeconds));
         if (RadioRange is < 1 or > 128) throw new ArgumentOutOfRangeException(nameof(RadioRange));
+        if (RadioModel is not ("pairwise" or "shared"))
+            throw new ArgumentException("RadioModel must be pairwise or shared.", nameof(RadioModel));
+        if (MediumBytesPerTick is < 1 or > 1_000_000)
+            throw new ArgumentOutOfRangeException(nameof(MediumBytesPerTick));
     }
 }
 
 public sealed record BenchmarkState(
     string Status, BenchmarkOptions? Options, DateTimeOffset? StartedUtc,
     double ElapsedSeconds, int WorldWidth, int WorldHeight, string? Error,
-    RadioStats? Radio);
+    RadioStats? Radio, SharedMediumStatistics? SharedMedium);
 
 public sealed record BenchmarkSample(
     DateTimeOffset At, double ElapsedSeconds, double ActualRoutesPerSecond,
     double ActualMovesPerSecond, double ActualMutationsPerSecond,
     double P50Us, double P95Us, double P99Us, double CacheHitPercent,
     long ManagedBytes, int NodeCount, long Version, long ConnectivityVersion,
-    int RadioLinks, double RadioLinksAddedPerSecond, double RadioLinksRemovedPerSecond);
+    int RadioLinks, double RadioLinksAddedPerSecond, double RadioLinksRemovedPerSecond,
+    int MediumDomains, int MediumCells, double AcceptedTransfersPerSecond,
+    double RejectedTransfersPerSecond);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -54,12 +62,19 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
     private int _width, _height;
     private double _elapsed;
     private DynamicRadioNetwork? _radioEngine;
+    private SharedMediumNetwork? _sharedMedium;
+
+    /// <summary>Only for read-only observability; the service remains benchmark-owned.</summary>
+    public SharedMediumNetwork? ActiveSharedMedium
+    {
+        get { lock (_gate) return _sharedMedium; }
+    }
 
     public BenchmarkState State()
     {
         lock (_gate)
             return new BenchmarkState(_status, _options, _started, _elapsed, _width, _height, _error,
-                _radioEngine?.Stats());
+                _radioEngine?.Stats(), _sharedMedium?.Stats());
     }
 
     public BenchmarkSample[] History() => _history.ToArray();
@@ -79,6 +94,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
             _error = null;
             _width = _height = 0;
             _radioEngine = null;
+            _sharedMedium = null;
             while (_history.TryDequeue(out _)) { }
             _task = Task.Run(() => RunAsync(options, _cts.Token));
             return true;
@@ -140,20 +156,30 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
             ct.ThrowIfCancellationRequested();
             runtime.Apply(commands);
             DynamicRadioNetwork? radio = null;
+            SharedMediumNetwork? medium = null;
             if (options.WirelessEnabled)
             {
-                radio = new DynamicRadioNetwork(runtime);
                 var profile = new RadioProfile(options.RadioRange, 1, 8);
                 var registrations = Enumerable.Range(1, options.Nodes)
                     .Select(i => new RadioNodeUpdate(new NodeId((ulong)i),
                         Profile: profile, ChangeProfile: true)).ToArray();
-                radio.Update(registrations, ct);
+                if (options.RadioModel == "shared")
+                {
+                    medium = new SharedMediumNetwork(runtime, options.MediumBytesPerTick);
+                    medium.Update(registrations, ct);
+                }
+                else
+                {
+                    radio = new DynamicRadioNetwork(runtime);
+                    radio.Update(registrations, ct);
+                }
             }
             lock (_gate)
             {
                 _width = columns * 12;
                 _height = ((options.Nodes + columns - 1) / columns) * 12;
                 _radioEngine = radio;
+                _sharedMedium = medium;
                 _status = "running";
             }
 
@@ -161,12 +187,13 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
             var workerCount = options.RoutesPerSecond == 0 ? 0 :
                 Math.Min(4, Math.Max(1, Environment.ProcessorCount / 2));
             var workers = Enumerable.Range(0, workerCount).Select(worker =>
-                Task.Run(() => RouteWorkerAsync(options, worker, workerCount, ct), ct)).ToList();
+                Task.Run(() => RouteWorkerAsync(options, worker, workerCount, medium, ct), ct)).ToList();
             if (options.MovesPerSecond > 0 || options.LinkChangesPerSecond > 0)
-                workers.Add(Task.Run(() => MutationWorkerAsync(options, positions, radio, ct), ct));
+                workers.Add(Task.Run(() => MutationWorkerAsync(options, positions, radio, medium, ct), ct));
 
             var previous = runtime.Metrics.Capture(runtime.Cache.Count);
             var previousRadio = radio?.Stats();
+            var previousMedium = medium?.Stats();
             var previousTime = clock.Elapsed.TotalSeconds;
             var finishedNaturally = false;
 
@@ -177,6 +204,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
                 var current = runtime.Metrics.Capture(runtime.Cache.Count);
                 var snapshot = runtime.Topology.Snapshot;
                 var radioSnapshot = radio?.Stats();
+                var mediumSnapshot = medium?.Stats();
                 var interval = Math.Max(0.001, seconds - previousTime);
                 var deltaRoutes = current.Routes - previous.Routes;
                 var deltaMoves = current.Moves - previous.Moves;
@@ -190,12 +218,16 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
                     snapshot.ConnectivityVersion,
                     radioSnapshot?.ActiveWirelessLinks ?? 0,
                     ((radioSnapshot?.TotalWirelessLinksAdded ?? 0) - (previousRadio?.TotalWirelessLinksAdded ?? 0)) / interval,
-                    ((radioSnapshot?.TotalWirelessLinksRemoved ?? 0) - (previousRadio?.TotalWirelessLinksRemoved ?? 0)) / interval);
+                    ((radioSnapshot?.TotalWirelessLinksRemoved ?? 0) - (previousRadio?.TotalWirelessLinksRemoved ?? 0)) / interval,
+                    mediumSnapshot?.Domains ?? 0, mediumSnapshot?.OccupiedCells ?? 0,
+                    ((mediumSnapshot?.AcceptedTransfers ?? 0) - (previousMedium?.AcceptedTransfers ?? 0)) / interval,
+                    ((mediumSnapshot?.RejectedTransfers ?? 0) - (previousMedium?.RejectedTransfers ?? 0)) / interval);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;
                 previous = current;
                 previousRadio = radioSnapshot;
+                previousMedium = mediumSnapshot;
                 previousTime = seconds;
                 if (seconds >= options.DurationSeconds) { finishedNaturally = true; break; }
             }
@@ -225,7 +257,8 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
         }
     }
 
-    private async Task RouteWorkerAsync(BenchmarkOptions options, int worker, int workers, CancellationToken ct)
+    private async Task RouteWorkerAsync(BenchmarkOptions options, int worker, int workers,
+        SharedMediumNetwork? medium, CancellationToken ct)
     {
         var rng = new Random(options.Seed + 10_001 + worker);
         var quota = (double)options.RoutesPerSecond / workers / 10;
@@ -241,14 +274,24 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
                 ct.ThrowIfCancellationRequested();
                 var a = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
                 var b = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
-                runtime.Route(a, b, cancellationToken: ct);
+                if (medium is null)
+                    runtime.Route(a, b, cancellationToken: ct);
+                else
+                {
+                    var route = medium.Route(a, b, cancellationToken: ct);
+                    if (route.Found)
+                    {
+                        var tick = Stopwatch.GetTimestamp() / Math.Max(1, Stopwatch.Frequency / 10);
+                        medium.TryTransmit(route, rng.Next(128, 1025), tick);
+                    }
+                }
             }
             await Task.Delay(100, ct);
         }
     }
 
     private async Task MutationWorkerAsync(BenchmarkOptions options, NodePosition[] positions,
-        DynamicRadioNetwork? radio, CancellationToken ct)
+        DynamicRadioNetwork? radio, SharedMediumNetwork? medium, CancellationToken ct)
     {
         var rng = new Random(options.Seed + 7331);
         // Only synthetic shortcut links are removed. The base grid stays connected.
@@ -272,7 +315,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
                     last.Y + rng.Next(-2, 3), last.Z);
                 positions[index] = next;
                 var id = new NodeId((ulong)(index + 1));
-                if (radio is null)
+                if (radio is null && medium is null)
                     changes.Add(new TopologyChange(TopologyOperation.MoveNode, id, Position: next));
                 else if (radioUpdates.TryGetValue(id, out var prior))
                     radioUpdates[id] = prior with { Position = next };
@@ -284,7 +327,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
             var links = (int)linksDue;
             linksDue -= links;
             var snapshot = runtime.Topology.Snapshot;
-            if (radio is not null)
+            if (radio is not null || medium is not null)
             {
                 for (var i = 0; i < links; i++)
                 {
@@ -301,7 +344,11 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
                     };
                 }
                 if (radioUpdates.Count > 0)
-                    radio.Update(radioUpdates.Values.ToArray(), ct);
+                {
+                    var updates = radioUpdates.Values.ToArray();
+                    if (radio is not null) radio.Update(updates, ct);
+                    else medium!.Update(updates, ct);
+                }
                 await Task.Delay(100, ct);
                 continue;
             }
