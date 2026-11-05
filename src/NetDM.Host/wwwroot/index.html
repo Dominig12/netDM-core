@@ -78,6 +78,11 @@
               <option value="off">OFF · Compute route before enqueue (control)</option>
               <option value="on">ON · Reserve packet slot before A*</option>
             </select>
+            <label for="packet-wait-mode">Waiting packet scheduler</label>
+            <select id="packet-wait-mode" class="workload-select">
+              <option value="fifo">FIFO · Scan waiting packets (G)</option>
+              <option value="event">EVENT · Park until wakeup (H)</option>
+            </select>
             <label for="packet-backoff-cap">No-route retry cap <small>100ms ticks</small></label>
             <input id="packet-backoff-cap" type="number" min="3" max="10000" value="96">
             <label for="packet-reroute-cooldown">Full reroute queue retry <small>100ms ticks</small></label>
@@ -144,8 +149,9 @@
               <option value="transport-control">E · Dense + fixed 1024 visits + 2048 packet queue (control)</option>
               <option value="transport-adaptive">F · Dense + adaptive 4096 visits + 4096 packet queue</option>
               <option value="transport-backpressure">G · Dense + adaptive 4096 visits + pre-route backpressure</option>
+              <option value="transport-eventwait">H · G + event-driven packet waiting</option>
             </select>
-            <small>For transport experiments compare E/F/G. E keeps the original 1024 visits, F tests adaptive forwarding, G adds pre-route backpressure. Each generates three reports.</small>
+            <small>Compare E/F/G/H. H matches G except for event-driven waiting. Each generates three reports.</small>
           </div>
           <div class="suite-choices">
             <label for="suite-search">Routing
@@ -202,6 +208,12 @@
               <select id="suite-backpressure" class="workload-select">
                 <option value="off">Off — original routing workload</option>
                 <option value="on">On — reserve packet slot before search</option>
+              </select>
+            </label>
+            <label for="suite-wait-mode">Waiting packet scheduler
+              <select id="suite-wait-mode" class="workload-select">
+                <option value="fifo">FIFO (G control)</option>
+                <option value="event">Event-driven (H)</option>
               </select>
             </label>
             <label for="suite-backoff-cap">Max no-route retry delay (ticks)
