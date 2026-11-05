@@ -312,11 +312,11 @@ public sealed class RadioPacketTransport
                     if (revision > packet.SeenLocalRevision)
                     {
                         packet.SeenLocalRevision = revision;
-                        var from = packet.Path[packet.Index];
-                        var to = packet.Path[packet.Index + 1];
+                        var probeFrom = packet.Path[packet.Index];
+                        var probeTo = packet.Path[packet.Index + 1];
                         // Local recovery does not need another full A* search
                         // and must not wait for an exponential backoff deadline.
-                        if (_network.HasUsableHop(from, to) ||
+                        if (_network.HasUsableHop(probeFrom, probeTo) ||
                             (packet.LastRouteAttemptTick >= 0 &&
                              tick - packet.LastRouteAttemptTick >=
                                  _settings.NoRouteRetryDelayTicks))
