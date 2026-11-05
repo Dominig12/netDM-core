@@ -76,6 +76,8 @@ for (var i = 0; i < 250; i++)
 Task.WaitAll(tasks);
 Check(errors.IsEmpty);
 
+CheckSharedMedium();
+CheckSharedMediumOracle();
 CheckRadioSafety();
 CheckWirelessTopology();
 CheckRadioOracle();
@@ -84,6 +86,167 @@ CheckRouteCacheBudgets();
 Console.WriteLine("All netDM-core smoke tests passed.");
 
 
+
+
+static void CheckSharedMedium()
+{
+    var runtime = new NetworkRuntime();
+    runtime.Apply([
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(1), Position: new NodePosition(0, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(2), Position: new NodePosition(10, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(3), Position: new NodePosition(24, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(4), Position: new NodePosition(1, 1, 1))
+    ]);
+    var medium = new SharedMediumNetwork(runtime, bytesPerTick: 1024);
+    var radio = new RadioProfile(15, 7, 8);
+    var changed = medium.Update([
+        new RadioNodeUpdate(new NodeId(1), Profile: radio, ChangeProfile: true),
+        new RadioNodeUpdate(new NodeId(2), Profile: radio, ChangeProfile: true),
+        new RadioNodeUpdate(new NodeId(3), Profile: radio, ChangeProfile: true),
+        new RadioNodeUpdate(new NodeId(4), Profile: radio, ChangeProfile: true)
+    ]);
+    Check(changed.ChangedRadios == 4 && changed.Moves == 0);
+    Check(medium.Stats().Domains == 2);
+    Check(medium.Stats().ConfiguredDevices == 4);
+    Check(medium.Stats().PairwiseRadioEdges == 0);
+    Check(runtime.Topology.Snapshot.Nodes.Values.All(node => node.Links.Count == 0));
+    Check(!medium.Route(new NodeId(1), new NodeId(3)).Found || medium.Route(new NodeId(1), new NodeId(3)).Cost == 16);
+    Check(medium.Route(new NodeId(1), new NodeId(3)).Cost == 16);
+    Check(!medium.Route(new NodeId(1), new NodeId(4)).Found); // Z separation
+
+    var toTwo = medium.Route(new NodeId(1), new NodeId(2));
+    Check(toTwo.Found && toTwo.Cost == 8);
+    Check(medium.TryTransmit(toTwo, 400, 1));
+    Check(medium.TryTransmit(toTwo, 400, 1));
+    Check(!medium.TryTransmit(toTwo, 400, 1));
+    Check(medium.TryTransmit(toTwo, 400, 2));
+    Check(medium.Stats().AcceptedTransfers == 3);
+    Check(medium.Stats().RejectedTransfers == 1);
+
+    Check(medium.SetCable(new NodeId(2), new NodeId(3), 2));
+    Check(medium.Route(new NodeId(1), new NodeId(3)).Cost == 10);
+    var lastVersion = medium.Snapshot.Version;
+    var update = medium.Update([new RadioNodeUpdate(new NodeId(2),
+        Position: new NodePosition(-25, 0))]);
+    Check(update.Version > lastVersion);
+    Check(!medium.Route(new NodeId(1), new NodeId(3)).Found);
+    Check(medium.Route(new NodeId(2), new NodeId(3)).Cost == 2);
+    Check(!medium.TryTransmit(toTwo, 100, 3)); // stale route cannot send
+    Check(medium.SetCable(new NodeId(1), new NodeId(2), 1));
+    Check(medium.Route(new NodeId(1), new NodeId(3)).Cost == 3);
+    Check(medium.TryTransmit(medium.Route(new NodeId(1), new NodeId(3)), 900, 3));
+    Check(medium.RemoveNodes([new NodeId(2)]) == 1);
+    Check(!medium.Route(new NodeId(1), new NodeId(3)).Found);
+    Check(medium.Stats().ConfiguredDevices == 3);
+
+    // Dense channel: a single shared cell stores 400 memberships, no pairwise edges.
+    var dense = new NetworkRuntime();
+    dense.Apply(Enumerable.Range(1, 400)
+        .Select(i => new TopologyChange(TopologyOperation.AddNode,
+            new NodeId((ulong)i), Position: new NodePosition(0, 0))).ToArray());
+    var domain = new SharedMediumNetwork(dense);
+    domain.Update(Enumerable.Range(1, 400)
+        .Select(i => new RadioNodeUpdate(new NodeId((ulong)i),
+            Profile: new RadioProfile(14, 1), ChangeProfile: true)).ToArray());
+    Check(domain.Snapshot.Cells.Count == 1);
+    Check(domain.Stats().ConfiguredDevices == 400);
+    Check(dense.Topology.Snapshot.Nodes.Values.All(n => n.Links.Count == 0));
+    Check(domain.Route(new NodeId(1), new NodeId(400)).Cost == 8);
+
+    // Snapshot remains consistent after movement / profile updates.
+    var frozen = domain.Snapshot;
+    domain.Update([new RadioNodeUpdate(new NodeId(400),
+        Position: new NodePosition(100, 100))]);
+    Check(!domain.Route(new NodeId(1), new NodeId(400)).Found);
+    Check(SharedMediumNetwork.RouteCore(frozen, new NodeId(1), new NodeId(400)).Found);
+    using var cts = new CancellationTokenSource();
+    cts.Cancel();
+    var oldVersion = domain.Snapshot.Version;
+    bool cancelled = false;
+    try
+    {
+        domain.Update([new RadioNodeUpdate(new NodeId(1),
+            Position: new NodePosition(12, 12))], cts.Token);
+    }
+    catch (OperationCanceledException) { cancelled = true; }
+    Check(cancelled && domain.Snapshot.Version == oldVersion);
+}
+
+static void CheckSharedMediumOracle()
+{
+    for (var seed = 0; seed < 3; seed++)
+    {
+        var random = new Random(seed + 9654);
+        var oracleStore = new NetworkRuntime();
+        var sharedStore = new NetworkRuntime();
+        var nodes = new List<TopologyChange>();
+        for (var i = 0; i < 72; i++)
+        {
+            var point = new NodePosition(random.Next(-50, 50),
+                random.Next(-50, 50), random.Next(0, 2));
+            nodes.Add(new TopologyChange(TopologyOperation.AddNode,
+                new NodeId((ulong)(i + 1)), Position: point));
+        }
+        oracleStore.Apply(nodes);
+        sharedStore.Apply(nodes);
+        var oldRadio = new DynamicRadioNetwork(oracleStore);
+        var medium = new SharedMediumNetwork(sharedStore);
+        var updates = new List<RadioNodeUpdate>();
+        for (var i = 1; i <= 72; i++)
+        {
+            var profile = new RadioProfile(random.Next(12, 24),
+                (uint)random.Next(1, 5), (uint)random.Next(3, 15));
+            updates.Add(new RadioNodeUpdate(new NodeId((ulong)i),
+                Profile: profile, ChangeProfile: true));
+        }
+        oldRadio.Update(updates);
+        medium.Update(updates);
+        Compare();
+
+        for (var batch = 0; batch < 15; batch++)
+        {
+            var ids = new HashSet<int>();
+            var delta = new List<RadioNodeUpdate>();
+            for (var n = 0; n < 7; n++)
+            {
+                var id = random.Next(1, 73);
+                if (!ids.Add(id)) continue;
+                if (random.Next(4) == 0)
+                {
+                    var profile = random.Next(6) == 0 ? (RadioProfile?)null :
+                        new RadioProfile(random.Next(12, 24),
+                            (uint)random.Next(1, 5), (uint)random.Next(3, 15));
+                    delta.Add(new RadioNodeUpdate(new NodeId((ulong)id),
+                        Profile: profile, ChangeProfile: true));
+                }
+                else
+                {
+                    var p = sharedStore.Topology.Snapshot.Nodes[new NodeId((ulong)id)].Position!.Value;
+                    delta.Add(new RadioNodeUpdate(new NodeId((ulong)id),
+                        Position: new NodePosition(p.X + random.Next(-14, 15),
+                            p.Y + random.Next(-14, 15), random.Next(0, 2))));
+                }
+            }
+            oldRadio.Update(delta);
+            medium.Update(delta);
+            Compare();
+        }
+
+        void Compare()
+        {
+            var reference = oracleStore.Topology.Snapshot;
+            for (var sample = 0; sample < 25; sample++)
+            {
+                var from = new NodeId((ulong)random.Next(1, 73));
+                var to = new NodeId((ulong)random.Next(1, 73));
+                var expected = Router.Find(reference, from, to);
+                var actual = medium.Route(from, to);
+                Check(actual.Found == expected.Found);
+                Check(actual.Cost == expected.Cost);
+            }
+        }
+    }
+}
 
 static void CheckRadioSafety()
 {
