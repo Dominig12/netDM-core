@@ -82,6 +82,7 @@ CheckSharedMedium();
 CheckSharedMediumOracle();
 CheckRadioAStar();
 CheckPacketTransport();
+CheckRerouteAdaptiveBackoff();
 await CheckDedicatedPacketTicksAsync();
 CheckSpatialRadioAirtime();
 CheckRadioSafety();
@@ -445,7 +446,9 @@ static void CheckPacketTransport()
     Check(disconnected.CompleteReroute(ticket1,
         broken.Route(ticket1.Source,ticket1.Destination)));
     Check(disconnected.Capture().NoRouteDeferrals==1);
-    for (var tick=3; tick<=10; tick++)
+    // Exponential no-route backoff: second failed attempt is at tick 5,
+    // followed by a 6-tick pause before the final bounded drop at tick 11.
+    for (var tick=3; tick<=11; tick++)
     {
         disconnected.Advance(tick);
         if (disconnected.TryTakeReroute(out var next))
@@ -568,6 +571,130 @@ static void CheckPacketTransport()
     Check(ttlQueue.Enqueue(same,100,2));
     ttlQueue.Advance(3);
     Check(ttlQueue.Capture().Delivered==1);
+}
+
+static void CheckRerouteAdaptiveBackoff()
+{
+    static (SharedMediumNetwork Medium, RadioPacketTransport Transport,
+        RouteResult Original) Setup()
+    {
+        var runtime = new NetworkRuntime();
+        runtime.Apply([
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+                Position: new NodePosition(0, 0)),
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+                Position: new NodePosition(10, 0)),
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(3),
+                Position: new NodePosition(20, 0)),
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(4),
+                Position: new NodePosition(100, 100))
+        ]);
+        var radio = new SharedMediumNetwork(runtime, bytesPerTick: 8192);
+        radio.Update(Enumerable.Range(1, 4).Select(i =>
+            new RadioNodeUpdate(new NodeId((ulong)i),
+                Profile: new RadioProfile(14, 1, 8),
+                ChangeProfile: true)).ToArray());
+        var original = radio.Route(new NodeId(1), new NodeId(3));
+        Check(original.Found && original.Path.Count == 3);
+        return (radio, new RadioPacketTransport(radio,
+            new PacketTransportOptions(MaxAgeTicks: 100,
+                MaxReroutes: 8, MaxNoRouteRetryDelayTicks: 12,
+                RerouteQueueRetryDelayTicks: 8)), original);
+    }
+
+    var (radio, packets, route) = Setup();
+    Check(packets.Enqueue(route, 256, 0));
+    Check(packets.Advance(1) == 1);
+    var disabled = new RadioNodeUpdate(new NodeId(3),
+        Profile: null, ChangeProfile: true);
+    radio.Update([disabled]);
+    packets.NotifyRadioUpdates([disabled]);
+    Check(!radio.HasUsableHop(new NodeId(2), new NodeId(3)));
+    packets.Advance(2);
+    Check(packets.TryTakeReroute(out var first));
+    Check(packets.CompleteReroute(first, radio.Route(first.Source, first.Destination)));
+    Check(packets.Capture().NoRouteBackoffs == 1);
+    Check(packets.Capture().NoRouteBackoffTicks == 3);
+    // The first failure skips two interim ticks instead of invoking the
+    // expensive shortest-path algorithm on every pass.
+    packets.Advance(3);
+    packets.Advance(4);
+    Check(packets.Capture().Reroutes == 1);
+    Check(packets.Capture().CooldownSkips == 2);
+    packets.Advance(5);
+    Check(packets.TryTakeReroute(out var second));
+    Check(packets.CompleteReroute(second, radio.Route(second.Source, second.Destination)));
+    Check(packets.Capture().NoRouteBackoffs == 2);
+    Check(packets.Capture().NoRouteBackoffTicks == 9); // 3 + 6
+
+    // A global change to a DIFFERENT node does not wake this packet.
+    var unrelated = new RadioNodeUpdate(new NodeId(4),
+        Position: new NodePosition(101, 101));
+    radio.Update([unrelated]);
+    packets.NotifyRadioUpdates([unrelated]);
+    packets.Advance(8);
+    Check(packets.Capture().Reroutes == 2);
+    Check(packets.Capture().LocalChangeWakeups == 0);
+    // A move of the packet's current source does trigger an early retry,
+    // but repeated changes are rate-limited by NoRouteRetryDelayTicks.
+    var moved = new RadioNodeUpdate(new NodeId(2),
+        Position: new NodePosition(11, 0));
+    radio.Update([moved]);
+    packets.NotifyRadioUpdates([moved]);
+    packets.Advance(9);
+    Check(packets.TryTakeReroute(out var third));
+    Check(packets.Capture().LocalChangeWakeups == 1);
+    Check(packets.CompleteReroute(third, radio.Route(third.Source, third.Destination)));
+    Check(packets.Capture().NoRouteBackoffTicks == 21); // 3+6+12
+
+    // Repairing the original radio hop must bypass the remaining 12-tick
+    // negative backoff. This is a local, non-reserving availability check.
+    var repaired = new RadioNodeUpdate(new NodeId(3),
+        Profile: new RadioProfile(14, 1, 8), ChangeProfile: true);
+    radio.Update([repaired]);
+    packets.NotifyRadioUpdates([repaired]);
+    Check(radio.HasUsableHop(new NodeId(2), new NodeId(3)));
+    Check(packets.Advance(10) == 1);
+    var recovered = packets.Capture();
+    Check(recovered.Delivered == 1 && recovered.RecoveredOriginalHops == 1);
+    Check(recovered.LocalChangeWakeups == 2);
+    Check(recovered.Queued == 0 && recovered.NoRouteBackoffs == 3);
+
+    // No-path answers from an old immutable snapshot must not become
+    // authoritative negative cache entries after topology changes.
+    var (staleRadio, staleTransport, stalePath) = Setup();
+    Check(staleTransport.Enqueue(stalePath, 200, 0));
+    Check(staleTransport.Advance(1) == 1);
+    staleRadio.Update([disabled]);
+    staleTransport.Advance(2);
+    Check(staleTransport.TryTakeReroute(out var oldTicket));
+    var oldNegative = staleRadio.Route(oldTicket.Source, oldTicket.Destination);
+    Check(!oldNegative.Found);
+    staleRadio.Update([repaired]);
+    Check(staleTransport.CompleteReroute(oldTicket, oldNegative));
+    Check(staleTransport.Capture().StaleNegativeResults == 1);
+    Check(staleTransport.Capture().NoRouteBackoffs == 0);
+    // Its old hop is already restored, and must be deliverable.
+    Check(staleTransport.Advance(5) == 1);
+    Check(staleTransport.Capture().Delivered == 1);
+
+    // Rejecting a ticket due to full reroute capacity must not generate
+    // a new ticket every subsequent tick while the capacity is still full.
+    var (fullRadio, fullTransport, fullPath) = Setup();
+    var constrained = new RadioPacketTransport(fullRadio,
+        new PacketTransportOptions(
+            MaxPendingReroutes: 1, MaxConcurrentReroutes: 1,
+            RerouteQueueRetryDelayTicks: 8));
+    Check(constrained.Enqueue(fullPath, 200, 0));
+    Check(constrained.Enqueue(fullPath, 200, 0));
+    Check(constrained.Advance(1) == 2);
+    fullRadio.Update([disabled]);
+    constrained.Advance(2);
+    Check(constrained.Capture().RerouteQueueDeferrals == 1);
+    constrained.Advance(3);
+    constrained.Advance(4);
+    Check(constrained.Capture().RerouteQueueDeferrals == 1);
+    Check(constrained.Capture().Queued == 2);
 }
 
 static async Task CheckDedicatedPacketTicksAsync()

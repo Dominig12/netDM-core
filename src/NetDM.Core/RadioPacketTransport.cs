@@ -20,7 +20,9 @@ public sealed record PacketTransportOptions(
     int NoRouteRetryDelayTicks = 3,
     int MaxPendingReroutes = 64,
     int MaxConcurrentReroutes = 2,
-    int MaxTickWorkMilliseconds = 25)
+    int MaxTickWorkMilliseconds = 25,
+    int MaxNoRouteRetryDelayTicks = 96,
+    int RerouteQueueRetryDelayTicks = 8)
 {
     public void Validate()
     {
@@ -40,6 +42,11 @@ public sealed record PacketTransportOptions(
             throw new ArgumentOutOfRangeException(nameof(MaxConcurrentReroutes));
         if (MaxTickWorkMilliseconds is < 1 or > 1000)
             throw new ArgumentOutOfRangeException(nameof(MaxTickWorkMilliseconds));
+        if (MaxNoRouteRetryDelayTicks < NoRouteRetryDelayTicks ||
+            MaxNoRouteRetryDelayTicks > 10_000)
+            throw new ArgumentOutOfRangeException(nameof(MaxNoRouteRetryDelayTicks));
+        if (RerouteQueueRetryDelayTicks is < 1 or > 1000)
+            throw new ArgumentOutOfRangeException(nameof(RerouteQueueRetryDelayTicks));
     }
 }
 
@@ -61,7 +68,11 @@ public sealed record PacketTransportCounters(
     long SkippedTicks, long TickAdmissionFailures,
     double ForwardingP95Milliseconds,
     double FirstHopAgeP50Ticks, double FirstHopAgeP95Ticks,
-    long FirstHopSamples, long TickBudgetStops);
+    long FirstHopSamples, long TickBudgetStops,
+    long NoRouteBackoffs, long NoRouteBackoffTicks,
+    long CooldownSkips, long LocalChangeWakeups,
+    long RecoveredOriginalHops, long StaleNegativeResults,
+    int TrackedChangedNodes);
 
 /// <summary>
 /// Bounded round-robin store-and-forward. Advance never calculates a route:
@@ -72,6 +83,7 @@ public sealed record PacketTransportCounters(
 public sealed class RadioPacketTransport
 {
     private const int SampleWindow = 1024;
+    private const int MaxRememberedChangedNodes = 65_536;
 
     private sealed class PendingPacket(RouteResult route, int size, long tick, long id)
     {
@@ -86,6 +98,9 @@ public sealed class RadioPacketTransport
         public int SuccessfulHops;
         public bool Active = true;
         public long PendingRerouteId;
+        public int NoRouteStreak;
+        public long LastRouteAttemptTick = -1;
+        public long SeenLocalRevision;
     }
 
     private readonly SharedMediumNetwork _network;
@@ -95,6 +110,11 @@ public sealed class RadioPacketTransport
     private readonly Dictionary<long, PendingPacket> _active = new();
     private readonly Queue<PacketRerouteRequest> _rerouteQueue = new();
     private readonly Dictionary<long, PendingPacket> _inflight = new();
+    // Local node-change revisions are bounded by the size of the network.
+    // They let an affected waiting packet retry early without waking every
+    // packet for each unrelated topology update elsewhere in the graph.
+    private readonly Dictionary<NodeId, long> _localRevisions = new();
+    private long _topologyChangeRevision;
     private readonly long[] _completedAges = new long[SampleWindow];
     private readonly long[] _firstHopAges = new long[SampleWindow];
     private readonly long[] _rerouteWaitAges = new long[SampleWindow];
@@ -107,6 +127,8 @@ public sealed class RadioPacketTransport
     private long _rerouteSchedulerRejections, _skippedTicks, _tickAdmissionFailures;
     private long _rerouteSampleCount, _forwardSampleCount, _firstHopSampleCount;
     private long _tickBudgetStops;
+    private long _noRouteBackoffs, _noRouteBackoffTicks, _cooldownSkips;
+    private long _localWakes, _recoveredHops, _staleNegativeResults;
     private long _lastTick = -1, _nextPacketId, _nextRequestId;
     private int _peak;
 
@@ -154,7 +176,10 @@ public sealed class RadioPacketTransport
                 _rerouteSchedulerRejections, Percentile(rerouteAges, .95),
                 _skippedTicks, _tickAdmissionFailures, Percentile(forwardUs, .95) / 1000.0,
                 Percentile(firstHopAges, .5), Percentile(firstHopAges, .95),
-                _firstHopSampleCount, _tickBudgetStops);
+                _firstHopSampleCount, _tickBudgetStops,
+                _noRouteBackoffs, _noRouteBackoffTicks,
+                _cooldownSkips, _localWakes, _recoveredHops,
+                _staleNegativeResults, _localRevisions.Count);
         }
     }
 
@@ -187,6 +212,52 @@ public sealed class RadioPacketTransport
             _peak = Math.Max(_peak, _queue.Count);
             return true;
         }
+    }
+
+    /// <summary>
+    /// Reports a batch of locally changed radio devices. The packet loop checks
+    /// only the endpoints of its failed next hop, not the global topology epoch.
+    /// This avoids retry storms when unrelated nodes move elsewhere.
+    /// Alternative paths can emerge without either endpoint changing; bounded
+    /// periodic retry still handles those changes.
+    /// </summary>
+    public void NotifyRadioUpdates(IReadOnlyList<RadioNodeUpdate> updates)
+    {
+        ArgumentNullException.ThrowIfNull(updates);
+        if (updates.Count == 0) return;
+        lock (_gate)
+        {
+            var revision = ++_topologyChangeRevision;
+            foreach (var update in updates)
+            {
+                if (_localRevisions.Count >= MaxRememberedChangedNodes &&
+                    !_localRevisions.ContainsKey(update.Id))
+                {
+                    // No correctness relies on this hint cache. Clearing it
+                    // bounds memory if node IDs churn over a long-lived host.
+                    // Affected packets still retry on the periodic timeout.
+                    _localRevisions.Clear();
+                }
+                _localRevisions[update.Id] = revision;
+            }
+        }
+    }
+
+    private long LocalRevision(PendingPacket packet)
+    {
+        var from = packet.Path[packet.Index];
+        var to = packet.Path[packet.Index + 1];
+        _localRevisions.TryGetValue(from, out var a);
+        _localRevisions.TryGetValue(to, out var b);
+        return Math.Max(a, b);
+    }
+
+    private long RetryDelay(int noRouteFailures)
+    {
+        // Bounded exponential backoff: 3, 6, 12, 24, ... up to the cap.
+        var shift = Math.Min(noRouteFailures - 1, 12);
+        var delay = (long)_settings.NoRouteRetryDelayTicks << shift;
+        return Math.Min(delay, _settings.MaxNoRouteRetryDelayTicks);
     }
 
     /// <summary>
@@ -233,8 +304,33 @@ public sealed class RadioPacketTransport
                 }
                 if (packet.PendingRerouteId == 0 && tick < packet.NextRetryTick)
                 {
-                    _queue.Enqueue(packet);
-                    continue;
+                    // An endpoint may have moved or changed its radio profile.
+                    // Wake only that packet, with a minimum retry interval,
+                    // rather than invalidating every disconnected route after
+                    // any unrelated global snapshot update.
+                    var revision = LocalRevision(packet);
+                    if (revision > packet.SeenLocalRevision)
+                    {
+                        packet.SeenLocalRevision = revision;
+                        var probeFrom = packet.Path[packet.Index];
+                        var probeTo = packet.Path[packet.Index + 1];
+                        // Local recovery does not need another full A* search
+                        // and must not wait for an exponential backoff deadline.
+                        if (_network.HasUsableHop(probeFrom, probeTo) ||
+                            (packet.LastRouteAttemptTick >= 0 &&
+                             tick - packet.LastRouteAttemptTick >=
+                                 _settings.NoRouteRetryDelayTicks))
+                        {
+                            packet.NextRetryTick = tick;
+                            _localWakes++;
+                        }
+                    }
+                    if (tick < packet.NextRetryTick)
+                    {
+                        _cooldownSkips++;
+                        _queue.Enqueue(packet);
+                        continue;
+                    }
                 }
                 // A temporarily broken hop may heal while its reroute is
                 // queued or running. Recheck the cheap single-hop path so
@@ -249,6 +345,9 @@ public sealed class RadioPacketTransport
                 {
                     case RadioHopOutcome.TransmittedRadio:
                     case RadioHopOutcome.TransmittedCable:
+                        if (packet.NoRouteStreak > 0) _recoveredHops++;
+                        packet.NoRouteStreak = 0;
+                        packet.NextRetryTick = 0;
                         packet.PendingRerouteId = 0; // Cancel logical ticket on healing.
                         if (packet.SuccessfulHops == 0)
                             _firstHopAges[(int)(_firstHopSampleCount++ % SampleWindow)] =
@@ -286,7 +385,7 @@ public sealed class RadioPacketTransport
                             _settings.MaxPendingReroutes)
                         {
                             _rerouteQueueDeferrals++;
-                            packet.NextRetryTick = tick + 1;
+                            packet.NextRetryTick = tick + _settings.RerouteQueueRetryDelayTicks;
                             _queue.Enqueue(packet);
                             break;
                         }
@@ -331,6 +430,8 @@ public sealed class RadioPacketTransport
                     packet.PendingRerouteId != ticket.Id) continue;
                 _inflight.Add(ticket.Id, packet);
                 packet.Reroutes++;
+                packet.LastRouteAttemptTick = _lastTick;
+                packet.SeenLocalRevision = LocalRevision(packet);
                 _reroutes++;
                 return true;
             }
@@ -362,13 +463,28 @@ public sealed class RadioPacketTransport
             if (!route.Found || route.Path is null || route.Path.Count == 0 ||
                 route.Path[0] != ticket.Source || route.Path[^1] != ticket.Destination)
             {
+                // A failed search from an older snapshot is not evidence that
+                // the present graph is still disconnected. Retry soon, with
+                // a minimum spacing, and do not poison the backoff streak.
+                if (route.Version != _network.Snapshot.Version)
+                {
+                    _staleNegativeResults++;
+                    packet.NextRetryTick = _lastTick + _settings.NoRouteRetryDelayTicks;
+                    return true;
+                }
                 _noRouteDeferrals++;
-                packet.NextRetryTick = _lastTick + _settings.NoRouteRetryDelayTicks;
+                packet.NoRouteStreak++;
+                var delay = RetryDelay(packet.NoRouteStreak);
+                _noRouteBackoffs++;
+                _noRouteBackoffTicks += delay;
+                packet.NextRetryTick = _lastTick + delay;
+                packet.SeenLocalRevision = LocalRevision(packet);
                 return true;
             }
             // Detached from the router's reusable collections, if any.
             packet.Path = route.Path.ToArray();
             packet.Index = 0;
+            packet.NoRouteStreak = 0;
             packet.NextRetryTick = _lastTick + 1;
             return true;
         }

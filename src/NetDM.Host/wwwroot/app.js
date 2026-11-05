@@ -207,7 +207,7 @@ mapCanvas.addEventListener("wheel",event=>{
 $("fit").addEventListener("click",fitMap);
 const observe=new ResizeObserver(()=>{drawMap();drawCharts();drawSchedulerCharts();drawComparisonPlot();});
 observe.observe(frame);
-for(const id of ["routes-chart","load-chart","latency-chart","explored-chart","gc-chart","memory-chart","links-chart","reachability-chart","packets-chart","packet-queue-chart","reroute-pressure-chart","tick-health-chart","tick-timing-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
+for(const id of ["routes-chart","load-chart","latency-chart","explored-chart","gc-chart","memory-chart","links-chart","reachability-chart","packets-chart","packet-queue-chart","reroute-pressure-chart","retry-backoff-chart","tick-health-chart","tick-timing-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
 
 function plot(id,series,color,extra){
   const canvas=$(id),{ctx,w,h}=resizeCanvas(canvas);
@@ -275,6 +275,16 @@ function drawCharts(){
     {values:history.map(x=>x.reroutesInFlight||0),color:"#77d8d6"},
     {values:history.map(x=>x.rerouteStartedPerSecond||0),color:"#eab47e"}
   ],"#8d9dff");
+  plot("retry-backoff-chart",[
+    {values:history.map(x=>x.noRouteBackoffsPerSecond||0),color:"#e9a674"},
+    {values:history.map(x=>x.localChangeWakeupsPerSecond||0),color:"#64d9c6"},
+    {values:history.map(x=>x.rerouteCooldownSkipsPerSecond||0),color:"#8d9dff"}
+  ],"#e9a674");
+  $("chart-retry-backoff").textContent=last
+    ?format(last.noRouteBackoffsPerSecond||0)+" backoffs/s · "+
+      format(last.localChangeWakeupsPerSecond||0)+" wakes/s · "+
+      format(last.averageNoRouteBackoffTicks||0)+" ticks avg"
+    :"—";
   plot("tick-health-chart",[
     {values:history.map(x=>x.tickExecutedPerSecond||0),color:"#5adaca"},
     {values:history.map(x=>x.packetSkippedTicksPerSecond||0),color:"#ef9e78"},
@@ -451,6 +461,8 @@ $("bench-form").addEventListener("submit",async event=>{
     packetRerouteWorkers:Number($("packet-reroute-workers").value),
     dedicatedPacketTicks:$("packet-tick-mode").value==="dedicated",
     packetTickWorkBudgetMs:Number($("packet-tick-budget").value),
+    packetMaxNoRouteRetryDelayTicks:Number($("packet-backoff-cap").value),
+    packetRerouteQueueRetryDelayTicks:Number($("packet-reroute-cooldown").value),
     radioRange:Number($("radio-range").value)
   };
   try{
@@ -652,7 +664,8 @@ async function pollSuite(){
         "reroute "+opts.packetRerouteWorkers+" workers / "+
         opts.packetRerouteCpuBudgetMs+"ms per 100ms · ticks "+
         (opts.dedicatedPacketTicks?"dedicated":"global queue")+
-        " · tick work "+opts.packetTickWorkBudgetMs+"ms.";
+        " · tick work "+opts.packetTickWorkBudgetMs+"ms · "+
+        "no-route cap "+opts.packetMaxNoRouteRetryDelayTicks+" ticks.";
     }
     const rows=document.querySelectorAll("[data-suite-case]");
     for(const row of rows){
@@ -713,7 +726,9 @@ $("suite-start").addEventListener("click",async()=>{
         packetRerouteCpuBudgetMs:Number($("suite-reroute-budget").value),
         packetRerouteWorkers:Number($("suite-reroute-workers").value),
         dedicatedPacketTicks:$("suite-tick-mode").value==="dedicated",
-        packetTickWorkBudgetMs:Number($("suite-tick-budget").value)
+        packetTickWorkBudgetMs:Number($("suite-tick-budget").value),
+        packetMaxNoRouteRetryDelayTicks:Number($("suite-backoff-cap").value),
+        packetRerouteQueueRetryDelayTicks:Number($("suite-reroute-cooldown").value)
       })
     });
     if(!response.ok){

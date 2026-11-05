@@ -842,3 +842,56 @@ Linux/Windows smoke tests include a deliberately saturated
 `PriorityWorkScheduler` while a separate packet tick thread continues
 to forward packets. HTTP integration exercises all three scenario
 exports and tick runner fields.
+
+## M14 — Adaptive reroute backoff with local recovery notifications
+
+Under 12k-node mobility tests, many packets repeatedly paid for A*
+searches even when their destination was temporarily disconnected.
+The new **bounded negative-result backoff** applies separately to
+each packet's repeated *completed searches which found no path*:
+`3, 6, 12, 24, 48, 96, …` simulation ticks, capped at the
+configurable `packetMaxNoRouteRetryDelayTicks` (default 96, or 9.6s).
+The maximum reroute attempts and packet TTL remain unchanged; a
+disconnected packet can never perform unbounded searches.
+
+When the bounded reroute ticket buffer is full, the packet waits
+`packetRerouteQueueRetryDelayTicks` (default 8 ticks), reducing
+repeated queue-admission probes. Packets continue to count toward
+the 2,048-slot hard queue limit throughout waiting.
+
+A radio update now calls
+`RadioPacketTransport.NotifyRadioUpdates(updates)`, recording which
+node IDs actually moved or changed radio profiles. Only a packet whose
+**current failed next-hop endpoints** have changed may wake early for
+a full search, and such wakeups have a minimum interval between
+search attempts. If its original hop has directly recovered,
+`SharedMediumNetwork.HasUsableHop` allows immediate forwarding without
+running A*. The probe does not reserve airtime; real forwarding still
+uses `TryTransmitHop` and the current spatial interference budget.
+Unrelated global topology changes do not wake every waiting packet.
+
+A failure result from an old snapshot version does not poison the
+negative backoff: topology may have become connected while A* was
+running. Such results are retried after a short minimum delay.
+The existing per-snapshot exact-key route cache is retained and
+continues to reuse safe same-version routing results. No negative
+result is reused after a topology epoch change without recomputation.
+The bounded local-change hint table clears when its 65,536 entry
+limit would be exceeded, and periodic retries remain a fallback.
+
+The new exported counters are `noRouteBackoffs`,
+`noRouteBackoffTicks`, `cooldownSkips`,
+`localChangeWakeups`, `recoveredOriginalHops`,
+`staleNegativeResults` and `trackedChangedNodes`.
+Network Observatory shows **No-route retry suppression** and supports
+configuring the backoff cap and full-ticket-queue cooldown in both
+manual and three-scenario benchmarks.
+
+**These are performance/latency tradeoffs, not a proven speedup.**
+Longer waiting between attempts may improve CPU admission at the
+cost of slower recovery if alternate connectivity appears far from
+the affected packet's two next-hop nodes. Use the same 3-scenario
+suite to measure original routes/sec, reroutes/sec, delivered fraction,
+TTL expiry, first-hop/delivery p95, and queue pressure. A/B
+comparison with a low cap is recommended before making this default
+in the production BYOND adapter.
