@@ -273,7 +273,10 @@ public sealed class RadioPacketTransport
     {
         if (!_settings.EventDrivenRerouteCapacity)
         {
-            WaitUntil(packet, tick + _settings.RerouteQueueRetryDelayTicks);
+            // Legacy FIFO requires this field before WaitUntil (which only
+            // enqueues in legacy mode). Preserve the original cooldown.
+            packet.NextRetryTick = tick + _settings.RerouteQueueRetryDelayTicks;
+            WaitUntil(packet, packet.NextRetryTick);
             return;
         }
 
