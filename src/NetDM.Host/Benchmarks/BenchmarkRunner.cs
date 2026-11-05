@@ -58,7 +58,8 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
     public BenchmarkState State()
     {
         lock (_gate)
-            return new BenchmarkState(_status, _options, _started, _elapsed, _width, _height, _error);
+            return new BenchmarkState(_status, _options, _started, _elapsed, _width, _height, _error,
+                _radioEngine?.Stats());
     }
 
     public BenchmarkSample[] History() => _history.ToArray();
