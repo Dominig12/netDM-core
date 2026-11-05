@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a101d">
+  <title>netDM · Network Observatory</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div id="shell">
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">N<span>•</span></span><span><strong>netDM</strong><small>NETWORK OBSERVATORY / 0.2</small></span></div>
+    <div class="top-info">
+      <span class="top-label">ENGINE <strong>.NET 10</strong></span>
+      <span class="top-label">TRANSPORT <strong>LOCAL IPC</strong></span>
+      <span id="connection" class="connection"><span class="status-dot"></span> CONNECTING</span>
+    </div>
+  </header>
+  <div class="workspace">
+    <aside class="sidebar">
+      <div class="section-label"><span>01</span> WORKLOAD CONFIGURATION</div>
+      <p class="aside-intro">Generate a real mutable network and load the routing engine.</p>
+      <form id="bench-form">
+        <label for="nodes">Network nodes <small>9 – 30,000</small></label>
+        <input id="nodes" type="number" min="9" max="30000" value="2500" required>
+        <label for="routes">Target routing / sec <small>0 – 20,000</small></label>
+        <input id="routes" type="number" min="0" max="20000" value="300" required>
+        <label for="moves">Node movements / sec <small>0 – 10,000</small></label>
+        <input id="moves" type="number" min="0" max="10000" value="120" required>
+        <label for="links">Link changes / sec <small>0 – 1,000</small></label>
+        <input id="links" type="number" min="0" max="1000" value="4" required>
+        <label for="duration">Duration <small>seconds</small></label>
+        <input id="duration" type="number" min="2" max="1800" value="60" required>
+        <label for="seed">Random seed <small>reproducible</small></label>
+        <input id="seed" type="number" value="1337" required>
+        <div class="presets">
+          <button type="button" data-preset="small">LIGHT</button>
+          <button type="button" data-preset="medium" class="active">STANDARD</button>
+          <button type="button" data-preset="heavy">STRESS</button>
+        </div>
+        <button type="submit" id="start" class="primary"><span>▶</span> START BENCHMARK</button>
+        <button type="button" id="stop" class="secondary">■ STOP RUN</button>
+      </form>
+      <div class="sidebar-bottom">
+        <div class="section-label"><span>02</span> EXPERIMENT DATA</div>
+        <a class="export" id="export" href="#" download="netdm-benchmark.json">EXPORT RESULTS <span>↗</span></a>
+        <p>All metrics are measured by the host. Requested load and observed throughput may differ.</p>
+      </div>
+    </aside>
+    <main class="main">
+      <div class="dashboard-heading">
+        <div><div class="eyebrow">LIVE SYSTEM TELEMETRY</div><h1>Network overview</h1></div>
+        <div class="run-state"><span id="benchmark-indicator" class="pulse"></span><div><strong id="run-status">IDLE</strong><small id="run-elapsed">NO ACTIVE TEST</small></div></div>
+      </div>
+      <section class="kpi-grid" aria-label="Key metrics">
+        <div class="kpi"><div class="kpi-label">TOTAL NODES <span>◈</span></div><strong id="kpi-nodes">—</strong><small id="kpi-edges">0 connections</small></div>
+        <div class="kpi"><div class="kpi-label">ROUTES / SEC <span>↗</span></div><strong id="kpi-rps">—</strong><small id="kpi-target">target 0/s</small></div>
+        <div class="kpi"><div class="kpi-label">P95 LATENCY <span>◷</span></div><strong id="kpi-p95">—</strong><small>microseconds, rolling window</small></div>
+        <div class="kpi"><div class="kpi-label">CACHE HIT RATE <span>⟳</span></div><strong id="kpi-cache">—</strong><small id="kpi-cache-count">0 cached routes</small></div>
+        <div class="kpi"><div class="kpi-label">MUTATIONS / SEC <span>⤨</span></div><strong id="kpi-mps">—</strong><small id="kpi-version">topology v0</small></div>
+      </section>
+      <section class="network-panel">
+        <div class="panel-head">
+          <div><strong>Topology explorer</strong><span id="map-count">Waiting for snapshot</span></div>
+          <div class="map-tools">
+            <span class="legend"><i class="legend-line"></i> LINK</span>
+            <span class="legend"><i class="legend-node"></i> NODE</span>
+            <span class="legend"><i class="legend-hot"></i> ROUTE ACTIVITY</span>
+            <button type="button" id="fit" title="Fit network to viewport">⊡ FIT</button>
+          </div>
+        </div>
+        <div id="map-frame" class="map-frame">
+          <canvas id="map" aria-label="Interactive graph of live network topology"></canvas>
+          <div class="map-overlay top-left"><span class="mini-label">VIEWPORT</span><strong id="viewport-text">–</strong></div>
+          <div class="map-overlay bottom-left"><span class="mini-label">TOPOLOGY VERSION</span><strong id="graph-version">0</strong><span class="mini-label">CONNECTIVITY VERSION</span><strong id="connectivity-version">0</strong></div>
+          <div class="map-overlay bottom-right"><span>SCROLL TO ZOOM</span><span>DRAG TO PAN</span><span>CLICK A NODE</span></div>
+          <div id="map-empty" class="map-empty"><span class="map-empty-symbol">◎</span><strong>No topology loaded</strong><p>Start a benchmark to build the network.</p></div>
+        </div>
+        <div class="map-footer"><span id="map-status">SPATIAL INDEX · IDLE</span><span id="node-details">SELECT A NODE TO INSPECT IT</span></div>
+      </section>
+      <section class="chart-grid">
+        <div class="chart-panel"><div class="chart-heading"><div><strong>Route throughput</strong><small>Observed queries per second</small></div><span class="chart-value" id="chart-rps">—</span></div><canvas id="routes-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
+        <div class="chart-panel"><div class="chart-heading"><div><strong>Routing latency</strong><small>P50 / P95 / P99 in µs</small></div><span class="chart-value" id="chart-latency">—</span></div><canvas id="latency-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
+        <div class="chart-panel"><div class="chart-heading"><div><strong>Managed memory</strong><small>GC managed heap estimate</small></div><span class="chart-value" id="chart-memory">—</span></div><canvas id="memory-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
+      </section>
+      <footer class="footer"><span>NETDM / CORE MONITOR</span><span>LOCAL DEVELOPMENT DASHBOARD · NOT AUTHENTICATED · KEEP ON LOOPBACK</span></footer>
+    </main>
+  </div>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="/app.js" defer></script>
+</body>
+</html>

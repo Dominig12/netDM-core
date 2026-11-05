@@ -1,0 +1,18 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build
+        run: dotnet build src/NetDM.Host/NetDM.Host.csproj --configuration Release
+      - name: Core concurrency and consistency tests
+        run: dotnet run --project tests/NetDM.SmokeTests --configuration Release
+      - name: HTTP host, benchmark and visualizer integration
+        run: bash tests/host-integration.sh
