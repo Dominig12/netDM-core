@@ -207,7 +207,7 @@ mapCanvas.addEventListener("wheel",event=>{
 $("fit").addEventListener("click",fitMap);
 const observe=new ResizeObserver(()=>{drawMap();drawCharts();drawSchedulerCharts();drawComparisonPlot();});
 observe.observe(frame);
-for(const id of ["routes-chart","load-chart","latency-chart","explored-chart","gc-chart","memory-chart","links-chart","reachability-chart","packets-chart","packet-queue-chart","reroute-pressure-chart","tick-health-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
+for(const id of ["routes-chart","load-chart","latency-chart","explored-chart","gc-chart","memory-chart","links-chart","reachability-chart","packets-chart","packet-queue-chart","reroute-pressure-chart","tick-health-chart","tick-timing-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
 
 function plot(id,series,color,extra){
   const canvas=$(id),{ctx,w,h}=resizeCanvas(canvas);
@@ -276,16 +276,27 @@ function drawCharts(){
     {values:history.map(x=>x.rerouteStartedPerSecond||0),color:"#eab47e"}
   ],"#8d9dff");
   plot("tick-health-chart",[
+    {values:history.map(x=>x.tickExecutedPerSecond||0),color:"#5adaca"},
     {values:history.map(x=>x.packetSkippedTicksPerSecond||0),color:"#ef9e78"},
     {values:history.map(x=>x.packetTickAdmissionFailuresPerSecond||0),color:"#ee658b"}
-  ],"#ef9e78");
+  ],"#5adaca");
+  plot("tick-timing-chart",[
+    {values:history.map(x=>x.tickExecutionP95Milliseconds||0),color:"#5adaca"},
+    {values:history.map(x=>x.tickStartLagP95Milliseconds||0),color:"#7b9ff6"},
+    {values:history.map(x=>x.tickBudgetStopsPerSecond||0),color:"#e9a674"}
+  ],"#5adaca");
+  $("chart-tick-timing").textContent=last
+    ?format(last.tickExecutionP95Milliseconds||0)+"ms work · "+
+      format(last.tickStartLagP95Milliseconds||0)+"ms lag · "+
+      format(last.tickBudgetStopsPerSecond||0)+" budget/s":"—";
   $("chart-reroute-pressure").textContent=last
     ?format(last.reroutesQueued||0)+" pending · "+format(last.reroutesInFlight||0)+
       " running · wait p95 "+format((last.rerouteWaitP95Ticks||0)/10)+"s"
     :"—";
   $("chart-tick-health").textContent=last
-    ?format(last.packetSkippedTicksPerSecond||0)+" missed/s · forwarding p95 "+
-      format(last.packetForwardingP95Milliseconds||0)+"ms":"—";
+    ?format(last.tickExecutedPerSecond||0)+" ticks/s · "+
+      format(last.packetSkippedTicksPerSecond||0)+" missed/s · "+
+      format(last.packetForwardingP95Milliseconds||0)+"ms forward p95":"—";
   plot("rejections-chart",[
     {values:history.map(x=>x.rejectedTooLargePerSecond||0),color:"#f19f72"},
     {values:history.map(x=>x.rejectedCapacityPerSecond||0),color:"#e76373"},
@@ -438,6 +449,8 @@ $("bench-form").addEventListener("submit",async event=>{
     packetMaxAgeTicks:Number($("packet-ttl").value),
     packetRerouteCpuBudgetMs:Number($("packet-reroute-budget").value),
     packetRerouteWorkers:Number($("packet-reroute-workers").value),
+    dedicatedPacketTicks:$("packet-tick-mode").value==="dedicated",
+    packetTickWorkBudgetMs:Number($("packet-tick-budget").value),
     radioRange:Number($("radio-range").value)
   };
   try{
@@ -637,7 +650,9 @@ async function pollSuite(){
         (opts.spatialReuseEnabled?"spatial sharing":"global channel")+
         " · TTL "+opts.packetMaxAgeTicks+" ticks · "+
         "reroute "+opts.packetRerouteWorkers+" workers / "+
-        opts.packetRerouteCpuBudgetMs+"ms per 100ms.";
+        opts.packetRerouteCpuBudgetMs+"ms per 100ms · ticks "+
+        (opts.dedicatedPacketTicks?"dedicated":"global queue")+
+        " · tick work "+opts.packetTickWorkBudgetMs+"ms.";
     }
     const rows=document.querySelectorAll("[data-suite-case]");
     for(const row of rows){
@@ -696,7 +711,9 @@ $("suite-start").addEventListener("click",async()=>{
         spatialReuseEnabled:$("suite-airtime").value==="spatial",
         packetMaxAgeTicks:Number($("suite-ttl").value),
         packetRerouteCpuBudgetMs:Number($("suite-reroute-budget").value),
-        packetRerouteWorkers:Number($("suite-reroute-workers").value)
+        packetRerouteWorkers:Number($("suite-reroute-workers").value),
+        dedicatedPacketTicks:$("suite-tick-mode").value==="dedicated",
+        packetTickWorkBudgetMs:Number($("suite-tick-budget").value)
       })
     });
     if(!response.ok){
