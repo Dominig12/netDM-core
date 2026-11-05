@@ -487,6 +487,23 @@ public sealed class SharedMediumNetwork
     /// per-channel airtime ledger. Cable links need no channel allocation.
     /// This is intentionally distinct from legacy whole-route TryTransmit.
     /// </summary>
+    /// <summary>
+    /// Pure, lock-free next-hop reachability check on one pinned snapshot.
+    /// It does not reserve channel airtime and does not guarantee that a later
+    /// transmission will succeed. Used to wake a waiting packet when its
+    /// original wireless/cable hop has physically recovered.
+    /// </summary>
+    public bool HasUsableHop(NodeId from, NodeId to)
+    {
+        var snapshot = Snapshot;
+        if (from == to ||
+            !snapshot.Physical.Nodes.TryGetValue(from, out var node) ||
+            !snapshot.Physical.Nodes.ContainsKey(to))
+            return false;
+        return node.Links.ContainsKey(to) ||
+            RadioCost(snapshot, from, to, out _) is not null;
+    }
+
     public RadioHopOutcome TryTransmitHop(NodeId from, NodeId to, int bytes, long tick)
     {
         if (bytes is < 1 or > 1_000_000)
