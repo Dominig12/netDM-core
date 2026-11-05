@@ -446,7 +446,9 @@ static void CheckPacketTransport()
     Check(disconnected.CompleteReroute(ticket1,
         broken.Route(ticket1.Source,ticket1.Destination)));
     Check(disconnected.Capture().NoRouteDeferrals==1);
-    for (var tick=3; tick<=10; tick++)
+    // Exponential no-route backoff: second failed attempt is at tick 5,
+    // followed by a 6-tick pause before the final bounded drop at tick 11.
+    for (var tick=3; tick<=11; tick++)
     {
         disconnected.Advance(tick);
         if (disconnected.TryTakeReroute(out var next))
