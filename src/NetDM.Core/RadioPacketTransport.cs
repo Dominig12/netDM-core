@@ -83,6 +83,7 @@ public sealed record PacketTransportCounters(
 public sealed class RadioPacketTransport
 {
     private const int SampleWindow = 1024;
+    private const int MaxRememberedChangedNodes = 65_536;
 
     private sealed class PendingPacket(RouteResult route, int size, long tick, long id)
     {
@@ -228,7 +229,17 @@ public sealed class RadioPacketTransport
         {
             var revision = ++_topologyChangeRevision;
             foreach (var update in updates)
+            {
+                if (_localRevisions.Count >= MaxRememberedChangedNodes &&
+                    !_localRevisions.ContainsKey(update.Id))
+                {
+                    // No correctness relies on this hint cache. Clearing it
+                    // bounds memory if node IDs churn over a long-lived host.
+                    // Affected packets still retry on the periodic timeout.
+                    _localRevisions.Clear();
+                }
                 _localRevisions[update.Id] = revision;
+            }
         }
     }
 

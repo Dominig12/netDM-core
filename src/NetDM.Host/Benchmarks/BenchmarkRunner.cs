@@ -24,7 +24,9 @@ public sealed record BenchmarkOptions(
     int PacketRerouteQueueCapacity = 32,
     int PacketRerouteCpuBudgetMs = 25,
     bool DedicatedPacketTicks = true,
-    int PacketTickWorkBudgetMs = 25)
+    int PacketTickWorkBudgetMs = 25,
+    int PacketMaxNoRouteRetryDelayTicks = 96,
+    int PacketRerouteQueueRetryDelayTicks = 8)
 {
     public void Validate()
     {
@@ -46,6 +48,10 @@ public sealed record BenchmarkOptions(
             throw new ArgumentOutOfRangeException(nameof(PacketRerouteCpuBudgetMs));
         if (PacketTickWorkBudgetMs is < 1 or > 1000)
             throw new ArgumentOutOfRangeException(nameof(PacketTickWorkBudgetMs));
+        if (PacketMaxNoRouteRetryDelayTicks is < 3 or > 10_000)
+            throw new ArgumentOutOfRangeException(nameof(PacketMaxNoRouteRetryDelayTicks));
+        if (PacketRerouteQueueRetryDelayTicks is < 1 or > 1000)
+            throw new ArgumentOutOfRangeException(nameof(PacketRerouteQueueRetryDelayTicks));
         if (PacketTransportEnabled && (!WirelessEnabled || RadioModel != "shared"))
             throw new ArgumentException(
                 "Hop-by-hop packets require wireless Shared Medium mode.",
@@ -103,7 +109,11 @@ public sealed record BenchmarkSample(
     double PacketFirstHopP50Ticks, double PacketFirstHopP95Ticks,
     double TickExecutedPerSecond, double TickRunnerSkippedPerSecond,
     double TickBudgetStopsPerSecond, double TickStartLagP95Milliseconds,
-    double TickExecutionP95Milliseconds, long TickRunnerFailed);
+    double TickExecutionP95Milliseconds, long TickRunnerFailed,
+    double NoRouteBackoffsPerSecond, double RerouteCooldownSkipsPerSecond,
+    double LocalChangeWakeupsPerSecond, double RecoveredOriginalHopsPerSecond,
+    double StaleNegativeResultsPerSecond, double AverageNoRouteBackoffTicks,
+    int TrackedChangedRadioNodes);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -297,7 +307,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     MaxAgeTicks: options.PacketMaxAgeTicks,
                     MaxAdvancesPerTick: options.PacketMaxAdvancesPerTick,
                     MaxConcurrentReroutes: options.PacketRerouteWorkers,
-                    MaxTickWorkMilliseconds: options.PacketTickWorkBudgetMs))
+                    MaxTickWorkMilliseconds: options.PacketTickWorkBudgetMs,
+                    MaxNoRouteRetryDelayTicks: options.PacketMaxNoRouteRetryDelayTicks,
+                    RerouteQueueRetryDelayTicks: options.PacketRerouteQueueRetryDelayTicks))
                 : null;
             // Reroute computation is never executed while holding the packet
             // queue lock. A separate bounded CPU executor prevents it from
@@ -328,7 +340,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             var workers = Enumerable.Range(0, workerCount).Select(worker =>
                 Task.Run(() => RouteWorkerAsync(options, worker, workerCount, medium, packets, ct), ct)).ToList();
             if (options.MovesPerSecond > 0 || options.LinkChangesPerSecond > 0)
-                workers.Add(Task.Run(() => MutationWorkerAsync(options, positions, radio, medium, ct), ct));
+                workers.Add(Task.Run(() => MutationWorkerAsync(options, positions, radio, medium, packets, ct), ct));
             if (packets is not null)
             {
                 workers.Add(tickRunner is null
@@ -436,7 +448,24 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                         (previousPackets?.TickBudgetStops ?? 0)) / interval,
                     tickRunnerSnapshot?.StartLagP95Milliseconds ?? 0,
                     tickRunnerSnapshot?.ExecutionP95Milliseconds ?? 0,
-                    tickRunnerSnapshot?.FailedTicks ?? 0);
+                    tickRunnerSnapshot?.FailedTicks ?? 0,
+                    ((packetSnapshot?.NoRouteBackoffs ?? 0) -
+                        (previousPackets?.NoRouteBackoffs ?? 0)) / interval,
+                    ((packetSnapshot?.CooldownSkips ?? 0) -
+                        (previousPackets?.CooldownSkips ?? 0)) / interval,
+                    ((packetSnapshot?.LocalChangeWakeups ?? 0) -
+                        (previousPackets?.LocalChangeWakeups ?? 0)) / interval,
+                    ((packetSnapshot?.RecoveredOriginalHops ?? 0) -
+                        (previousPackets?.RecoveredOriginalHops ?? 0)) / interval,
+                    ((packetSnapshot?.StaleNegativeResults ?? 0) -
+                        (previousPackets?.StaleNegativeResults ?? 0)) / interval,
+                    (packetSnapshot?.NoRouteBackoffs ?? 0) == (previousPackets?.NoRouteBackoffs ?? 0)
+                        ? 0
+                        : (double)((packetSnapshot?.NoRouteBackoffTicks ?? 0) -
+                            (previousPackets?.NoRouteBackoffTicks ?? 0)) /
+                            ((packetSnapshot?.NoRouteBackoffs ?? 0) -
+                            (previousPackets?.NoRouteBackoffs ?? 0)),
+                    packetSnapshot?.TrackedChangedNodes ?? 0);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;
@@ -637,7 +666,8 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     }
 
     private async Task MutationWorkerAsync(BenchmarkOptions options, NodePosition[] positions,
-        DynamicRadioNetwork? radio, SharedMediumNetwork? medium, CancellationToken ct)
+        DynamicRadioNetwork? radio, SharedMediumNetwork? medium,
+        RadioPacketTransport? packets, CancellationToken ct)
     {
         var rng = new Random(options.Seed + 7331);
         // Only synthetic shortcut links are removed. The base grid stays connected.
@@ -693,7 +723,11 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 {
                     var updates = radioUpdates.Values.ToArray();
                     if (radio is not null) radio.Update(updates, ct);
-                    else medium!.Update(updates, ct);
+                    else
+                    {
+                        medium!.Update(updates, ct);
+                        packets?.NotifyRadioUpdates(updates);
+                    }
                 }
                 await Task.Delay(100, ct);
                 continue;
