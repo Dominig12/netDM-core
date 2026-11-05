@@ -81,6 +81,7 @@ CheckSharedMedium();
 CheckSharedMediumOracle();
 CheckRadioAStar();
 CheckPacketTransport();
+CheckSpatialRadioAirtime();
 CheckRadioSafety();
 CheckWirelessTopology();
 CheckRadioOracle();
@@ -415,9 +416,12 @@ static void CheckPacketTransport()
     Check(stats.WirelessHops == 4);
     Check(stats.BusyDeferrals > 0);
     Check(stats.DeliveredBytes == 800);
+    Check(stats.DeliveryAgeP95Ticks >= 2);
+    Check(stats.MeanDeliveredHops == 2);
+    Check(stats.QueueFullRejections == 1);
 
-    // One disconnected hop triggers rerouting from the packet's current
-    // position. An absent alternative is dropped rather than delivered.
+    // A disconnected hop waits for recovery, but retries and TTL remain
+    // finite so a permanently isolated endpoint cannot fill memory forever.
     var (broken, original) = MakeChain(600);
     var disconnected = new RadioPacketTransport(broken,
         new PacketTransportOptions(MaxReroutes:2));
@@ -426,9 +430,32 @@ static void CheckPacketTransport()
     broken.Update([new RadioNodeUpdate(new NodeId(3),Profile:null,
         ChangeProfile:true)]);
     disconnected.Advance(2);
+    Check(disconnected.Capture().Dropped==0);
+    Check(disconnected.Capture().NoRouteDeferrals==1);
+    for (var tick=3; tick<=10; tick++) disconnected.Advance(tick);
     Check(disconnected.Capture().Dropped==1);
-    Check(disconnected.Capture().Reroutes==1);
+    Check(disconnected.Capture().LinkFailureDrops==1);
+    Check(disconnected.Capture().Reroutes==2);
     Check(disconnected.Capture().Delivered==0);
+
+    // Transient outages can heal before the next scheduled reroute.
+    var (recovering, recoveringRoute) = MakeChain(600);
+    var recovery = new RadioPacketTransport(recovering,
+        new PacketTransportOptions(MaxReroutes:3, NoRouteRetryDelayTicks:2));
+    Check(recovery.Enqueue(recoveringRoute,300,0));
+    Check(recovery.Advance(1)==1);
+    recovering.Update([new RadioNodeUpdate(new NodeId(3),
+        Profile:null, ChangeProfile:true)]);
+    Check(recovery.Advance(2)==0);
+    recovering.Update([new RadioNodeUpdate(new NodeId(3),
+        Profile:new RadioProfile(14,1,8),ChangeProfile:true)]);
+    Check(recovery.Advance(3)==0);
+    // Once a previously broken hop becomes valid, it can be sent directly
+    // without spending a second search after the retry backoff.
+    Check(recovery.Advance(4)==1);
+    Check(recovery.Advance(5)==0);
+    Check(recovery.Capture().Delivered==1);
+    Check(recovery.Capture().Dropped==0);
 
     // A physical cable can restore the missing hop while a packet is
     // already en route. The final hop uses the cable, not shared airtime.
@@ -454,6 +481,58 @@ static void CheckPacketTransport()
     Check(ttlQueue.Enqueue(same,100,2));
     ttlQueue.Advance(3);
     Check(ttlQueue.Capture().Delivered==1);
+}
+
+static void CheckSpatialRadioAirtime()
+{
+    var runtime = new NetworkRuntime();
+    var points = new[]{
+        new NodePosition(0, 0), new NodePosition(10, 0),
+        new NodePosition(500, 0), new NodePosition(510, 0),
+        new NodePosition(29, 0), new NodePosition(39, 0)
+    };
+    runtime.Apply(Enumerable.Range(1, points.Length).Select(i =>
+        new TopologyChange(TopologyOperation.AddNode,
+            new NodeId((ulong)i),Position:points[i-1])).ToArray());
+    var medium = new SharedMediumNetwork(runtime, bytesPerTick:400,
+        airtimeScope:RadioAirtimeScope.SpatialCells);
+    medium.Update(Enumerable.Range(1,points.Length).Select(i =>
+        new RadioNodeUpdate(new NodeId((ulong)i),
+            Profile:new RadioProfile(14,1,8),ChangeProfile:true)).ToArray());
+    Check(medium.AirtimeScope==RadioAirtimeScope.SpatialCells);
+    Check(medium.TryTransmitHop(new NodeId(1),new NodeId(2),400,100)
+        ==RadioHopOutcome.TransmittedRadio);
+    Check(medium.TryTransmitHop(new NodeId(3),new NodeId(4),400,100)
+        ==RadioHopOutcome.TransmittedRadio); // Distant area, same channel/tick.
+    Check(medium.TryTransmitHop(new NodeId(5),new NodeId(6),400,100)
+        ==RadioHopOutcome.ChannelBusy); // Overlapping interference cells.
+    Check(medium.TryTransmitHop(new NodeId(5),new NodeId(6),400,101)
+        ==RadioHopOutcome.TransmittedRadio);
+    Check(medium.TryTransmitHop(new NodeId(1),new NodeId(2),400,100)
+        ==RadioHopOutcome.OldTick);
+    Check(medium.TryTransmitHop(new NodeId(1),new NodeId(2),401,102)
+        ==RadioHopOutcome.PacketTooLarge);
+    var stats = medium.Stats();
+    Check(stats.SpatialSuccessfulHops==3);
+    Check(stats.SpatialBusyHops==1);
+    Check(stats.SpatialPayloadBytes==1200);
+    Check(stats.SpatialCellReservations>=3);
+    Check(stats.SpatialActiveCells>0 && stats.SpatialLastTick==101);
+
+    var baselineRuntime = new NetworkRuntime();
+    baselineRuntime.Apply(Enumerable.Range(1,points.Length).Select(i =>
+        new TopologyChange(TopologyOperation.AddNode,
+            new NodeId((ulong)i),Position:points[i-1])).ToArray());
+    var global = new SharedMediumNetwork(baselineRuntime,bytesPerTick:400,
+        airtimeScope:RadioAirtimeScope.ChannelWide);
+    global.Update(Enumerable.Range(1,points.Length).Select(i =>
+        new RadioNodeUpdate(new NodeId((ulong)i),
+            Profile:new RadioProfile(14,1,8),ChangeProfile:true)).ToArray());
+    Check(global.TryTransmitHop(new NodeId(1),new NodeId(2),400,100)
+        ==RadioHopOutcome.TransmittedRadio);
+    Check(global.TryTransmitHop(new NodeId(3),new NodeId(4),400,100)
+        ==RadioHopOutcome.ChannelBusy);
+    Check(global.Stats().SpatialSuccessfulHops==0);
 }
 
 static void CheckRadioAStar()

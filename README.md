@@ -610,3 +610,80 @@ curl -X POST http://127.0.0.1:5087/api/benchmark/start \
   -d '{"nodes":10000,"routesPerSecond":1000,"movesPerSecond":0,"linkChangesPerSecond":0,"durationSeconds":60,"seed":1337,"wirelessEnabled":true,"radioModel":"shared","radioRange":14,"mediumBytesPerTick":8192,"sharedSearch":"astar","packetTransportEnabled":true}'
 curl http://127.0.0.1:5087/api/packets
 ```
+
+## M11 — Spatial airtime reuse and packet queue fairness
+
+The previous 12k-node **A* + Hop-by-hop** run revealed only 2 packet
+deliveries in the static case, with ~205k deferrals and over 10k TTL
+expirations. The radio model used one global 8,192-byte capacity for
+every device on the same channel and Z-level, so spatially separated
+transmissions unnecessarily blocked one another.
+
+### New airtime scope
+
+Shared Medium now provides two alternative `RadioAirtimeScope` modes:
+
+- **ChannelWide** is the original model. Every radio hop using the same
+  channel/Z spends the same global budget for that simulation tick.
+- **SpatialCells** is the new logical interference model. Each hop
+  reserves the requested bytes **atomically in every spatial cell**
+  intersecting a conservative interference rectangle around both
+  endpoints. Overlapping footprints contend; distant non-overlapping
+  transmissions can reuse the same channel and tick.
+
+The spatial model uses the existing 32-unit cell grid, channel and Z,
+and the larger of both endpoints' radio ranges. It is intentionally
+conservative and may reserve more cells than a precise circular
+interference model. Cell reservations are kept **only for the current
+simulation tick**, so the ledger does not grow across the full benchmark.
+
+The model is still **not** an RF signal/interference simulation. It
+does not include walls, hidden terminal problems, antenna patterns,
+capture effect, collisions, retransmit ACKs or interference-free
+non-overlapping frequency bands. Compare both modes using the same
+scenario and hardware before drawing performance conclusions.
+
+### Fair bounded store-and-forward
+
+`RadioPacketTransport` still has a hard admission limit of 2,048
+queued packets, and packets progress by **at most one hop per tick**.
+The per-tick round-robin processing budget now defaults to 1,024 packet
+visits, rather than 512. The default TTL increases from 180 to
+**900 ticks (90 seconds at a 100 ms tick)**, avoiding an automatic
+expiry of 70-hop routes that receive a turn only every 2–4 ticks.
+Neither change guarantees delivery under sustained congestion.
+
+When an intermediate radio hop breaks, the packet tries to reroute
+from its *current node*. If no path exists, it waits a configurable
+three-tick retry interval before attempting again; it may recover
+from short outages without being immediately discarded. Each
+packet's reroute count and age remain bounded, so an absent route
+cannot create infinite retry work.
+
+The packet statistics now include `deliveryAgeP50Ticks`,
+`deliveryAgeP95Ticks`, `meanDeliveredHops`,
+`totalDeliveryAgeTicks`, `noRouteDeferrals`,
+`linkFailureDrops`, `oversizeDrops`,
+`queueFullRejections` and `invalidRejections`.
+The medium additionally exposes `spatialSuccessfulHops`,
+`spatialBusyHops`, `spatialCellReservations`,
+`spatialActiveCells`, and `spatialPayloadBytes`.
+
+### Running the three-scenario suite
+
+In **Three-scenario diagnostic suite**, choose
+**A* spatial search → Hop-by-hop packet forwarding → Spatial reuse
+(new)**, leave the TTL at 900 ticks, and press
+**RUN ALL THREE SCENARIOS**. Once complete, export the same three JSON
+files (or the combined ZIP). Each includes routing performance,
+packet delivery, reroutes, delivery latency, spatial airtime pressure
+and old/new network settings for reliable comparisons.
+
+The manual Shared Medium benchmark has the same options, including
+global channel mode for the control experiment.
+
+Configuration fields: `spatialReuseEnabled` (defaults to true for
+hopwise simulations), `packetMaxAgeTicks` (default 900), and
+`packetMaxAdvancesPerTick` (default 1024).
+Legacy whole-route reservation still uses global channel capacity
+and is unaffected by the spatial toggle.

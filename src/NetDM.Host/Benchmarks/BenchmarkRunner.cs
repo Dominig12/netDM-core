@@ -16,7 +16,10 @@ public sealed record BenchmarkOptions(
     string RadioModel = "pairwise",
     int MediumBytesPerTick = 8192,
     string SharedSearch = "dijkstra",
-    bool PacketTransportEnabled = false)
+    bool PacketTransportEnabled = false,
+    bool SpatialReuseEnabled = true,
+    int PacketMaxAgeTicks = 900,
+    int PacketMaxAdvancesPerTick = 1024)
 {
     public void Validate()
     {
@@ -26,6 +29,10 @@ public sealed record BenchmarkOptions(
         if (LinkChangesPerSecond is < 0 or > 1_000) throw new ArgumentOutOfRangeException(nameof(LinkChangesPerSecond));
         if (DurationSeconds is < 2 or > 1800) throw new ArgumentOutOfRangeException(nameof(DurationSeconds));
         if (RadioRange is < 1 or > 128) throw new ArgumentOutOfRangeException(nameof(RadioRange));
+        if (PacketMaxAgeTicks is < 1 or > 1_000_000)
+            throw new ArgumentOutOfRangeException(nameof(PacketMaxAgeTicks));
+        if (PacketMaxAdvancesPerTick is < 1 or > 65_536)
+            throw new ArgumentOutOfRangeException(nameof(PacketMaxAdvancesPerTick));
         if (PacketTransportEnabled && (!WirelessEnabled || RadioModel != "shared"))
             throw new ArgumentException(
                 "Hop-by-hop packets require wireless Shared Medium mode.",
@@ -68,7 +75,10 @@ public sealed record BenchmarkSample(
     double PacketsDroppedPerSecond, double PacketsExpiredPerSecond,
     double PacketWirelessHopsPerSecond, double CapacityDeferralsPerSecond,
     double ExploredPerRoute, double AllocatedBytesPerRoute,
-    double GcPauseMillisecondsPerSecond, int Gen2CollectionsInInterval);
+    double GcPauseMillisecondsPerSecond, int Gen2CollectionsInInterval,
+    double DeliveryP95AgeTicks, double AverageDeliveredHops,
+    double NoRouteDeferralsPerSecond, double SpatialBusyHopsPerSecond,
+    double SpatialSuccessfulHopsPerSecond, int SpatialActiveCells);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -241,7 +251,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                         options.SharedSearch == "astar"
                             ? SharedRadioSearchMode.AStar : SharedRadioSearchMode.Dijkstra,
                         maximumRadioRange: options.RadioRange,
-                        minimumRadioCost: 8);
+                        minimumRadioCost: 8,
+                        airtimeScope: options.PacketTransportEnabled && options.SpatialReuseEnabled
+                            ? RadioAirtimeScope.SpatialCells : RadioAirtimeScope.ChannelWide);
                     medium.Update(registrations, ct);
                 }
                 else
@@ -251,7 +263,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 }
             }
             var packets = medium is not null && options.PacketTransportEnabled
-                ? new RadioPacketTransport(medium)
+                ? new RadioPacketTransport(medium, new PacketTransportOptions(
+                    MaxAgeTicks: options.PacketMaxAgeTicks,
+                    MaxAdvancesPerTick: options.PacketMaxAdvancesPerTick))
                 : null;
             lock (_gate)
             {
@@ -332,7 +346,16 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     deltaRoutes == 0 ? 0 : (double)(current.TotalExploredNodes - previous.TotalExploredNodes) / deltaRoutes,
                     deltaRoutes == 0 ? 0 : (double)(current.TotalRouteAllocatedBytes - previous.TotalRouteAllocatedBytes) / deltaRoutes,
                     Math.Max(0, current.GcTotalPauseMilliseconds - previous.GcTotalPauseMilliseconds) / interval,
-                    Math.Max(0, current.Gen2Collections - previous.Gen2Collections));
+                    Math.Max(0, current.Gen2Collections - previous.Gen2Collections),
+                    packetSnapshot?.DeliveryAgeP95Ticks ?? 0,
+                    packetSnapshot?.MeanDeliveredHops ?? 0,
+                    ((packetSnapshot?.NoRouteDeferrals ?? 0) -
+                        (previousPackets?.NoRouteDeferrals ?? 0)) / interval,
+                    ((mediumSnapshot?.SpatialBusyHops ?? 0) -
+                        (previousMedium?.SpatialBusyHops ?? 0)) / interval,
+                    ((mediumSnapshot?.SpatialSuccessfulHops ?? 0) -
+                        (previousMedium?.SpatialSuccessfulHops ?? 0)) / interval,
+                    mediumSnapshot?.SpatialActiveCells ?? 0);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;

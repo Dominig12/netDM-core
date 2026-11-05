@@ -180,3 +180,7 @@ h1{font-size:27px;font-weight:650;letter-spacing:-.6px;margin:7px 0 0}
 .suite-choices label{display:flex;flex-direction:column;gap:6px;color:#8da7be;font-size:11px;font-weight:600}
 .suite-choices .workload-select{margin:0;padding:9px;height:39px}
 @media(max-width:760px){.suite-choices{grid-template-columns:1fr}}
+
+/* Shared-airtime diagnostic form fields */
+#packet-ttl,#suite-ttl{min-width:0;width:100%;padding:9px;background:#121d2f;color:#e2f2ff;border:1px solid #303f56;border-radius:5px}
+#suite-ttl{height:39px}

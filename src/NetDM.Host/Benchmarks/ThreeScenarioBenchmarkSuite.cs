@@ -19,7 +19,10 @@ public sealed record ThreeScenarioSuiteOptions(
     int RadioRange = 14,
     int MediumBytesPerTick = 8192,
     string SharedSearch = "dijkstra",
-    bool PacketTransportEnabled = false)
+    bool PacketTransportEnabled = false,
+    bool SpatialReuseEnabled = true,
+    int PacketMaxAgeTicks = 900,
+    int PacketMaxAdvancesPerTick = 1024)
 {
     public void Validate()
     {
@@ -36,7 +39,10 @@ public sealed record ThreeScenarioSuiteOptions(
             WirelessEnabled: true, RadioRange: RadioRange,
             RadioModel: "shared", MediumBytesPerTick: MediumBytesPerTick,
             SharedSearch: SharedSearch,
-            PacketTransportEnabled: PacketTransportEnabled);
+            PacketTransportEnabled: PacketTransportEnabled,
+            SpatialReuseEnabled: SpatialReuseEnabled,
+            PacketMaxAgeTicks: PacketMaxAgeTicks,
+            PacketMaxAdvancesPerTick: PacketMaxAdvancesPerTick);
 }
 
 public sealed record ScenarioResultSummary(

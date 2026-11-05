@@ -261,10 +261,13 @@ function drawCharts(){
   ],"#65dbb2");
   plot("packet-queue-chart",[
     {values:history.map(x=>x.packetsQueued||0),color:"#82aafc"},
-    {values:history.map(x=>x.packetWirelessHopsPerSecond||0),color:"#f2be7a"}
+    {values:history.map(x=>x.packetWirelessHopsPerSecond||0),color:"#f2be7a"},
+    {values:history.map(x=>x.spatialSuccessfulHopsPerSecond||0),color:"#5ddbb7"}
   ],"#82aafc");
   $("chart-packets").textContent=last?
-    format(last.packetsDeliveredPerSecond||0)+" / "+format(last.packetsDroppedPerSecond||0):"—";
+    format(last.packetsDeliveredPerSecond||0)+" / "+
+    format(last.packetsDroppedPerSecond||0)+" · p95 "+
+    format((last.deliveryP95AgeTicks||0)/10)+"s":"—";
   $("chart-packet-queue").textContent=last?format(last.packetsQueued||0)+" queued":"—";
   plot("rejections-chart",[
     {values:history.map(x=>x.rejectedTooLargePerSecond||0),color:"#f19f72"},
@@ -363,8 +366,9 @@ async function pollMetrics(){
       : bench.radio?compact(bench.radio.activeWirelessLinks):"—";
     $("kpi-radio-events").textContent=shared&&bench.packetTransport
       ? format(bench.packetTransport.delivered)+" delivered · "+
-        format(bench.packetTransport.queued)+" queued · "+
-        format(bench.packetTransport.dropped)+" dropped"
+        format(bench.packetTransport.queued)+" queued · p95 "+
+        format((bench.packetTransport.deliveryAgeP95Ticks||0)/10)+"s · "+
+        format(shared?.spatialActiveCells||0)+" airtime cells"
       : shared
       ? format(shared.configuredDevices)+" devices · "+format(shared.occupiedCells)+" cells · "+
         format(shared.acceptedRevalidatedTransfers)+" revalidated · "+
@@ -412,6 +416,8 @@ $("bench-form").addEventListener("submit",async event=>{
     sharedSearch:$("shared-search").value,
     packetTransportEnabled:$("packet-delivery").value==="hopwise" &&
       $("network-mode").value==="shared",
+    spatialReuseEnabled:$("packet-airtime").value==="spatial",
+    packetMaxAgeTicks:Number($("packet-ttl").value),
     radioRange:Number($("radio-range").value)
   };
   try{
@@ -607,7 +613,9 @@ async function pollSuite(){
         " · "+format(opts.mediumBytesPerTick)+" bytes/tick · "+
         opts.durationSeconds+" seconds per scenario · "+
         (opts.sharedSearch==="astar"?"A*":"Dijkstra")+" · "+
-        (opts.packetTransportEnabled?"hop-by-hop packets":"legacy airtime")+".";
+        (opts.packetTransportEnabled?"hop-by-hop packets":"legacy airtime")+" · "+
+        (opts.spatialReuseEnabled?"spatial sharing":"global channel")+
+        " · TTL "+opts.packetMaxAgeTicks+" ticks.";
     }
     const rows=document.querySelectorAll("[data-suite-case]");
     for(const row of rows){
@@ -662,7 +670,9 @@ $("suite-start").addEventListener("click",async()=>{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({
         sharedSearch:$("suite-search").value,
-        packetTransportEnabled:$("suite-delivery").value==="hopwise"
+        packetTransportEnabled:$("suite-delivery").value==="hopwise",
+        spatialReuseEnabled:$("suite-airtime").value==="spatial",
+        packetMaxAgeTicks:Number($("suite-ttl").value)
       })
     });
     if(!response.ok){
