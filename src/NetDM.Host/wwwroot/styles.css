@@ -81,3 +81,35 @@ h1{font-size:27px;font-weight:650;letter-spacing:-.6px;margin:7px 0 0}
 @media(max-width:1350px){.kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.top-info{gap:14px}.map-tools .legend{display:none}}
 @media(max-width:1020px){.workspace{grid-template-columns:230px minmax(0,1fr)}.sidebar{padding:22px 15px}.main{padding:23px 16px}.kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.chart-grid{grid-template-columns:1fr}.chart-panel canvas{height:150px}}
 @media(max-width:680px){.topbar{padding:0 14px}.top-label{display:none}.workspace{display:flex;flex-direction:column}.sidebar{border-right:0;border-bottom:1px solid var(--stroke)}#bench-form{display:grid;grid-template-columns:1fr 1fr;column-gap:10px}.presets,.primary,.secondary{grid-column:1/-1}.sidebar-bottom{display:none}.dashboard-heading{margin-top:0}.kpi-grid{grid-template-columns:1fr 1fr}.kpi{padding:11px;min-height:95px}.kpi strong{font-size:23px}.map-overlay.bottom-right{display:none}.footer{display:none}}
+
+/* Routing laboratory: an independent, repeatable profiling workspace. */
+.comparison-panel{margin-top:16px;border:1px solid var(--stroke);border-radius:var(--radius);background:var(--panel);overflow:hidden}
+.comparison-panel .panel-head{padding:16px 18px}
+.lab-tag{color:var(--cyan);font-size:9px;letter-spacing:.8px}
+.comparison-body{padding:19px}
+.comparison-description{color:#8a9fb6;line-height:1.55;margin:0 0 16px;max-width:880px;font-size:12px}
+.comparison-controls{display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) auto auto;gap:10px;align-items:end}
+.comparison-controls label{margin:0 0 8px;color:#c5d8eb}
+.comparison-controls input{height:39px;padding:9px}
+.comparison-controls button{white-space:nowrap;height:39px;padding:8px 13px;margin:0}
+.compare-state{display:flex;align-items:center;gap:13px;border-top:1px solid var(--stroke);border-bottom:1px solid var(--stroke);margin:19px 0;padding:12px 0;font-size:10px;color:#849ab2;letter-spacing:.4px}
+#compare-status{color:var(--cyan);font-weight:700;min-width:85px}
+#compare-stage{flex:1}
+#compare-progress{font-variant-numeric:tabular-nums}
+#compare-export{border:1px solid #34506a;border-radius:4px;background:#17273b;color:#b8cedf;padding:7px 10px;font-size:10px}
+.comparison-layout{display:grid;grid-template-columns:minmax(0,2.15fr) minmax(200px,1fr);gap:16px}
+.comparison-table-wrap{overflow-x:auto}
+.comparison-table{border-collapse:collapse;width:100%;white-space:nowrap;font-size:11px}
+.comparison-table th{text-align:right;font-size:9px;letter-spacing:.5px;color:#7b91a9;font-weight:650;border-bottom:1px solid var(--stroke);padding:10px 9px}
+.comparison-table td{text-align:right;border-bottom:1px solid #223048;color:#d3dfec;padding:13px 9px;font-variant-numeric:tabular-nums}
+.comparison-table th:first-child,.comparison-table td:first-child{text-align:left;padding-left:0}
+.comparison-table tr:last-child td{border-bottom:0}
+.comparison-table td:first-child{font-weight:600;color:#b8d9ed}
+.comparison-table td.best{color:#66e5bd;font-weight:700}
+.comparison-table td.no-data{font-weight:400;color:#7b90a5;padding:20px 0}
+.compare-plot{border-left:1px solid var(--stroke);padding-left:16px}
+.compare-plot canvas{width:100%;height:150px;display:block;margin-top:8px}
+.comparison-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:18px}
+.comparison-stats span{padding:11px 12px;border:1px solid #293c53;border-radius:5px;background:#111d2d;font-size:10px;color:#9bb2c9;font-variant-numeric:tabular-nums}
+@media(max-width:1400px){.comparison-controls{grid-template-columns:repeat(4,minmax(0,1fr))}.comparison-controls button{width:100%}.comparison-layout{grid-template-columns:1fr}.compare-plot{border-left:0;border-top:1px solid var(--stroke);padding:12px 0 0}}
+@media(max-width:700px){.comparison-controls{grid-template-columns:repeat(2,minmax(0,1fr))}.compare-state{flex-wrap:wrap}.comparison-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-tag{display:none}}

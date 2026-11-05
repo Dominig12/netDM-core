@@ -75,7 +75,92 @@ for (var i = 0; i < 250; i++)
     store.MoveNode(a, new NodePosition(i - 125, i - 125));
 Task.WaitAll(tasks);
 Check(errors.IsEmpty);
+
+CheckRoutingEquivalence();
+CheckRouteCacheBudgets();
 Console.WriteLine("All netDM-core smoke tests passed.");
+
+static void CheckRoutingEquivalence()
+{
+    for (var seed = 0; seed < 30; seed++)
+    {
+        var random = new Random(9_601 + seed);
+        var graph = new TopologyStore();
+        var size = 24 + random.Next(70);
+        var changes = new List<TopologyChange>();
+        for (var i = 1; i <= size; i++)
+            changes.Add(new TopologyChange(TopologyOperation.AddNode, new NodeId((ulong)i)));
+        // Mixed connected, disconnected, sparse and redundant-link graphs.
+        for (var i = 2; i <= size; i++)
+        {
+            if (random.NextDouble() > 0.25)
+                changes.Add(new TopologyChange(TopologyOperation.Connect,
+                    new NodeId((ulong)(i - 1)), new NodeId((ulong)i), (uint)random.Next(1, 25)));
+        }
+        for (var i = 0; i < size * 2; i++)
+        {
+            var from = new NodeId((ulong)random.Next(1, size + 1));
+            var to = new NodeId((ulong)random.Next(1, size + 1));
+            if (from == to) continue;
+            changes.Add(new TopologyChange(TopologyOperation.Connect, from, to,
+                (uint)random.Next(1, 25)));
+        }
+        graph.ApplyBatch(changes);
+        var snapshot = graph.Snapshot;
+        var compact = CompactGraph.Build(snapshot);
+        Check(compact.NodeCount == size);
+        Check(compact.DirectedArcCount == snapshot.Nodes.Values.Sum(n => n.Links.Count));
+        for (var i = 0; i < 55; i++)
+        {
+            var from = new NodeId((ulong)random.Next(1, size + 2));
+            var to = new NodeId((ulong)random.Next(1, size + 2));
+            var baseline = Router.Find(snapshot, from, to);
+            var alternatives = new[]
+            {
+                BidirectionalRouter.Find(snapshot, from, to),
+                CompactRouter.Dijkstra(compact, from, to),
+                CompactRouter.Bidirectional(compact, from, to)
+            };
+            foreach (var result in alternatives)
+            {
+                Check(result.Found == baseline.Found);
+                Check(result.Cost == baseline.Cost);
+                Check(result.Version == baseline.Version);
+                if (result.Found) VerifyPath(snapshot, from, to, result);
+            }
+            if (baseline.Found) VerifyPath(snapshot, from, to, baseline);
+        }
+    }
+}
+
+static void VerifyPath(TopologySnapshot graph, NodeId from, NodeId to, RouteResult route)
+{
+    Check(route.Path.Count > 0 && route.Path[0] == from && route.Path[^1] == to);
+    ulong cost = 0;
+    for (var i = 1; i < route.Path.Count; i++)
+    {
+        Check(graph.Nodes[route.Path[i-1]].Links.TryGetValue(route.Path[i], out var edge));
+        cost += edge.Cost;
+    }
+    Check(cost == route.Cost);
+}
+
+static void CheckRouteCacheBudgets()
+{
+    var runtime = new NetworkRuntime();
+    runtime.Apply([
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(1)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(2)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(3)),
+        new TopologyChange(TopologyOperation.Connect, new NodeId(1), new NodeId(2)),
+        new TopologyChange(TopologyOperation.Connect, new NodeId(2), new NodeId(3))
+    ]);
+    Check(!runtime.Route(new NodeId(1), new NodeId(3), maxExplored: 1).Found);
+    Check(runtime.Route(new NodeId(1), new NodeId(3)).Found);
+    Check(runtime.Route(new NodeId(1), new NodeId(3)).Found);
+    Check(runtime.Metrics.Capture(runtime.Cache.Count).CacheHits == 1);
+}
+
 
 static void Check(bool condition)
 {

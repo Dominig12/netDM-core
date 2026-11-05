@@ -121,12 +121,16 @@ public sealed class NetworkRuntime
     {
         var start = Stopwatch.GetTimestamp();
         var snapshot = Topology.Snapshot;
-        var cached = Cache.TryGet(snapshot.ConnectivityVersion, from, to, out var result);
-        if (!cached)
-        {
-            result = Router.Find(snapshot, from, to, maxExplored, cancellationToken);
+        // Exploration-limited requests must not reuse or poison full-budget cached routes.
+        // A bounded search returning Missing may simply have exceeded its work budget.
+        var cacheEligible = maxExplored == 100_000;
+        RouteResult cachedRoute = null!;
+        var cached = cacheEligible &&
+            Cache.TryGet(snapshot.ConnectivityVersion, from, to, out cachedRoute);
+        var result = cached ? cachedRoute! :
+            Router.Find(snapshot, from, to, maxExplored, cancellationToken);
+        if (!cached && cacheEligible && result.Explored <= maxExplored)
             Cache.Store(snapshot.ConnectivityVersion, result, from, to);
-        }
 
         if (cached && result.Version != snapshot.Version)
             result = result with { Version = snapshot.Version };

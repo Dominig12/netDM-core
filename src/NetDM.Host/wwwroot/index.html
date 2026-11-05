@@ -84,6 +84,45 @@
         <div class="chart-panel"><div class="chart-heading"><div><strong>Routing latency</strong><small>P50 / P95 / P99 in µs</small></div><span class="chart-value" id="chart-latency">—</span></div><canvas id="latency-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
         <div class="chart-panel"><div class="chart-heading"><div><strong>Managed memory</strong><small>GC managed heap estimate</small></div><span class="chart-value" id="chart-memory">—</span></div><canvas id="memory-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
       </section>
+
+      <section class="comparison-panel" aria-label="Routing algorithm comparison">
+        <div class="panel-head">
+          <div><strong>Routing laboratory</strong><span>Controlled algorithm comparison</span></div>
+          <span class="lab-tag">COLD CACHE · SAME GRAPH · VERIFIED ROUTES</span>
+        </div>
+        <div class="comparison-body">
+          <p class="comparison-description">Compare four shortest-path implementations on identical requests. A separate graph isolates these results from the live topology explorer. Reported throughput is single-threaded equivalent, not maximum concurrent throughput.</p>
+          <form id="compare-form" class="comparison-controls">
+            <div><label for="compare-nodes">Graph nodes <small>100 – 30,000</small></label><input id="compare-nodes" type="number" min="100" max="30000" value="10000" required></div>
+            <div><label for="compare-routes">Route queries <small>10 – 1,000</small></label><input id="compare-routes" type="number" min="10" max="1000" value="160" required></div>
+            <div><label for="compare-viewports">Viewport queries <small>10 – 1,000</small></label><input id="compare-viewports" type="number" min="10" max="1000" value="120" required></div>
+            <div><label for="compare-seed">Seed <small>repeatable graph</small></label><input id="compare-seed" type="number" value="1337" required></div>
+            <button id="compare-start" class="primary" type="submit">▶ COMPARE</button>
+            <button id="compare-stop" class="secondary" type="button">■ STOP</button>
+          </form>
+          <div class="compare-state">
+            <span id="compare-status">NOT STARTED</span>
+            <span id="compare-stage">No experiment has been executed.</span>
+            <span id="compare-progress">0 / 0</span>
+            <button id="compare-export" type="button">EXPORT JSON</button>
+          </div>
+          <div class="comparison-layout">
+            <div class="comparison-table-wrap">
+              <table class="comparison-table">
+                <thead><tr><th>ALGORITHM</th><th>P50</th><th>P95</th><th>P99</th><th>EXPLORED</th><th>ALLOC / ROUTE</th><th>SERIAL QPS</th></tr></thead>
+                <tbody id="comparison-rows"><tr><td colspan="7" class="no-data">Start a comparison to measure all four algorithms.</td></tr></tbody>
+              </table>
+            </div>
+            <div class="compare-plot">
+              <div class="chart-heading"><div><strong>P95 comparison</strong><small>Lower latency is better · µs</small></div></div>
+              <canvas id="compare-chart"></canvas>
+            </div>
+          </div>
+          <div class="comparison-stats" id="comparison-details">
+            <span>SPATIAL INDEX: —</span><span>FULL SCAN: —</span><span>CSR BUILD: —</span><span>MOVE BATCH: —</span>
+          </div>
+        </div>
+      </section>
       <footer class="footer"><span>NETDM / CORE MONITOR</span><span>LOCAL DEVELOPMENT DASHBOARD · NOT AUTHENTICATED · KEEP ON LOOPBACK</span></footer>
     </main>
   </div>

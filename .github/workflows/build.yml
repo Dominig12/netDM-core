@@ -16,3 +16,19 @@ jobs:
         run: dotnet run --project tests/NetDM.SmokeTests --configuration Release
       - name: HTTP host, benchmark and visualizer integration
         run: bash tests/host-integration.sh
+      - name: Profile script smoke test (Linux)
+        run: pwsh -File scripts/run-profiles.ps1 -Sizes '160' -Seeds '7331' -Routes 20 -ViewportQueries 20 -MoveBatches 4 -LaunchHost
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build on Windows
+        run: dotnet build src/NetDM.Host/NetDM.Host.csproj --configuration Release
+      - name: Core correctness on Windows
+        run: dotnet run --project tests/NetDM.SmokeTests --configuration Release
+      - name: Profile script smoke test (Windows)
+        shell: pwsh
+        run: ./scripts/run-profiles.ps1 -Sizes '160' -Seeds '7331' -Routes 20 -ViewportQueries 20 -MoveBatches 4 -LaunchHost

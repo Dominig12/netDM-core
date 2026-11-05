@@ -135,3 +135,76 @@ than arbitrarily sampling nodes.
    dropped/rejected counts, and P95/P99 instrumentation.
 6. Add reproducible SS13 map traces and realistic benchmark baselines; only
    then choose production SLO targets.
+
+## M2 experiment: graph representations and routing algorithms
+
+Four interchangeable **measurement-only** route implementations are available.
+The mutable graph is an immutable snapshot of dictionaries with structural
+sharing. The experimental CSR projection sorts stable IDs and materializes
+compact contiguous adjacency arrays (`offsets[n + 1]`, `arcs[2m]`) and a
+ID→index lookup. It eliminates per-hop dictionary traversal but has a full
+projection build cost and is *not* incrementally maintained.
+
+`BidirectionalRouter.Find` and `CompactRouter.Bidirectional` expand a
+weighted frontier from each endpoint and stop when the minimal unresolved
+distance lower bound cannot improve the best known connection. They are
+valid for the present **undirected, positive-weight** graph; directed / timed
+links need a reverse index and separate algorithm review.
+
+`RoutingComparisonRunner` constructs deterministic graph topology with a
+weighted 2-D backbone and random shortcuts; then benchmarks identical pairs
+without cached routes, with warmup outside timings. P50/P95/P99 reported in
+µs; average explored nodes; allocated bytes for each synchronous request;
+aggregate serial equivalent QPS; viewport spatial hash vs full scan; 64-node
+movement batches; CSR build time and estimated payload bytes.
+
+**Correctness is a prerequisite, not just a score.** The comparison checks
+existence and shortest-path cost against baseline, and independently validates
+every successful route's exact edge sequence and sum. Smoke tests further
+exercise random weighted and partially disconnected graphs across algorithms.
+
+### Critical interpretation of measurements
+
+- A slower/faster CSR route does not establish a faster *dynamic* engine:
+  amortize CSR rebuild across edge mutations, and account for its extra
+  memory and synchronization cost.
+- `SerialQueriesPerSecond` is derived from measured synchronous query time
+  on one background worker. It is **not** a measured system-wide requests/s
+  under multi-worker load or a BYOND tick budget.
+- The current movement microbench updates an immutable index and records
+  per-batch allocations, but compares no alternative mutable spatial structure.
+  The full-scan comparison verifies the index returns the same nodes.
+- Benchmark numbers depend on CPU, JIT, GC and concurrent activity. Avoid
+  comparing runs across unrelated hardware and workloads.
+- In the live `NetworkRuntime`, deliberately small exploration budgets bypass
+  the shared route cache; they must never poison full-budget route answers.
+- Moving a node affects viewport geometry only in the current model, not
+  wired/radio reachability. This must change when spatial link policies exist.
+
+### Follow-up
+
+Gather experiments on 1k, 10k and 30k nodes with at least three repeated seeds
+and report median and variance. Introduce links that appear/disappear when moving
+within radio range, and replay topology deltas from BlueMoon-Station. Then
+implement a partitioned/compact-hot immutable read projection only if the
+measurements show a net benefit after rebuild and memory costs.
+
+## Benchmark automation / artifacts
+
+To reproduce comparative measurements rather than trusting one result,
+`scripts/run-profiles.ps1` drives the comparison HTTP API across 1k, 10k,
+and 30k nodes and the seeds `1337,42,2026`. It writes one JSON per
+configuration and a consolidated CSV containing the lowest observed p95
+algorithm per run. No actual large-network performance claims have yet been
+established by these implementation changes alone.
+
+The script is cross-platform PowerShell 7. With `-LaunchHost` it starts the
+Release .NET 10 host on loopback and terminates it after testing. Use it
+only when the loopback port `5087` is available and the live benchmark is
+not running. The manual Actions workflow stores the reports as artifacts;
+shared CI runners are not suitable for capacity planning.
+
+Note: the current comparison uses one query worker and isolates its
+synthetic graph from the live network, but competes for process CPU
+and memory if some other workload is started independently. It is intended
+for algorithm selection before integration, not for hard latency guarantees.

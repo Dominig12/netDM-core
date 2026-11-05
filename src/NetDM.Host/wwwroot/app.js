@@ -164,9 +164,9 @@ mapCanvas.addEventListener("wheel",event=>{
   drawMap();scheduleMap();
 },{passive:false});
 $("fit").addEventListener("click",fitMap);
-const observe=new ResizeObserver(()=>{drawMap();drawCharts();});
+const observe=new ResizeObserver(()=>{drawMap();drawCharts();drawComparisonPlot();});
 observe.observe(frame);
-for(const id of ["routes-chart","latency-chart","memory-chart"])observe.observe($(id));
+for(const id of ["routes-chart","latency-chart","memory-chart","compare-chart"])observe.observe($(id));
 
 function plot(id,series,color,extra){
   const canvas=$(id),{ctx,w,h}=resizeCanvas(canvas);
@@ -287,3 +287,123 @@ pollMetrics();pollHistory();drawMap();
 setInterval(pollMetrics,950);
 setInterval(pollHistory,1600);
 setInterval(()=>{if(!dragging&&currentMetrics?.nodeCount>0)loadMap();},1600);
+
+
+let comparisonState=null;
+let lastComparisonReportId="";
+function drawComparisonPlot(){
+  const canvas=$("compare-chart");
+  if(!canvas)return;
+  const {ctx,w,h}=resizeCanvas(canvas);
+  ctx.clearRect(0,0,w,h);
+  const algorithms=comparisonState?.report?.algorithms;
+  if(!algorithms?.length){
+    ctx.fillStyle="#8295ae";ctx.font="11px Segoe UI, sans-serif";
+    ctx.fillText("Awaiting comparison data",12,h/2);
+    return;
+  }
+  const max=Math.max(1,...algorithms.map(a=>a.p95Us));
+  const rowHeight=Math.min(37,(h-10)/algorithms.length);
+  algorithms.forEach((algorithm,index)=>{
+    const y=7+index*rowHeight;
+    const barX=6,barWidth=Math.max(0,w-70);
+    ctx.fillStyle="#1c2c41";ctx.fillRect(barX,y,barWidth,12);
+    ctx.fillStyle=index===0?"#5a819f":"#58cadb";
+    ctx.fillRect(barX,y,barWidth*algorithm.p95Us/max,12);
+    ctx.fillStyle="#b8cbe0";ctx.font="10px Segoe UI, sans-serif";
+    ctx.fillText(format(algorithm.p95Us)+" µs",barX+barWidth+7,y+10);
+    ctx.fillStyle="#829ab6";ctx.font="10px Segoe UI, sans-serif";
+    ctx.fillText(algorithm.name,y===-1?0:barX,y+25);
+  });
+}
+function renderComparison(report){
+  const rows=$("comparison-rows");
+  rows.replaceChildren();
+  const best=Math.min(...report.algorithms.map(a=>a.p95Us));
+  for(const a of report.algorithms){
+    const tr=document.createElement("tr");
+    const cells=[
+      a.name,format(a.p50Us)+" µs",format(a.p95Us)+" µs",
+      format(a.p99Us)+" µs",format(a.meanExploredNodes),
+      format(a.meanAllocatedBytes/1024)+" KiB",
+      compact(a.serialQueriesPerSecond)
+    ];
+    cells.forEach((value,index)=>{
+      const td=document.createElement("td");
+      td.textContent=value;
+      if(index===2&&a.p95Us===best)td.className="best";
+      tr.appendChild(td);
+    });
+    rows.appendChild(tr);
+  }
+  const spatial=report.spatial,movement=report.movement;
+  const summaries=[
+    "SPATIAL INDEX · "+format(spatial.indexedP95Us)+" µs p95",
+    "FULL SCAN · "+format(spatial.scanP95Us)+" µs p95",
+    "CSR BUILD · "+format(report.csrBuildMs)+" ms / "+mb(report.csrArrayPayloadBytes)+" arrays",
+    "MOVE BATCH · "+format(movement.batchP95Us)+" µs p95"
+  ];
+  $("comparison-details").replaceChildren(...summaries.map(value=>{
+    const span=document.createElement("span");span.textContent=value;return span;
+  }));
+  drawComparisonPlot();
+}
+async function pollComparison(){
+  try{
+    const response=await fetch("/api/comparison",{cache:"no-store"});
+    if(!response.ok)return;
+    const state=await response.json();
+    comparisonState=state;
+    $("compare-status").textContent=state.status.toUpperCase();
+    $("compare-stage").textContent=state.stage+(state.error?" · "+state.error:"");
+    $("compare-progress").textContent=format(state.completed)+" / "+format(state.total);
+    $("compare-start").disabled=state.status==="running"||state.status==="stopping";
+    const id=state.report?.completedAt||"";
+    if(id&&id!==lastComparisonReportId){
+      lastComparisonReportId=id;
+      renderComparison(state.report);
+    }
+  }catch(error){console.warn("Comparison telemetry error",error);}
+}
+$("compare-form").addEventListener("submit",async event=>{
+  event.preventDefault();
+  const options={
+    nodes:Number($("compare-nodes").value),
+    routes:Number($("compare-routes").value),
+    viewportQueries:Number($("compare-viewports").value),
+    moveBatches:32,
+    seed:Number($("compare-seed").value)
+  };
+  try{
+    const response=await fetch("/api/comparison/start",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(options)
+    });
+    if(!response.ok){
+      const body=await response.json();
+      throw Error(body.error||response.statusText);
+    }
+    lastComparisonReportId="";
+    $("comparison-rows").innerHTML='<tr><td colspan="7" class="no-data">Running controlled comparison…</td></tr>';
+    toast("Algorithm comparison started.");
+    await pollComparison();
+  }catch(error){toast("Comparison rejected: "+error.message);}
+});
+$("compare-stop").addEventListener("click",async()=>{
+  try{
+    await fetch("/api/comparison/stop",{method:"POST"});
+    await pollComparison();
+  }catch(error){toast(error.message);}
+});
+$("compare-export").addEventListener("click",()=>{
+  const report=comparisonState?.report;
+  if(!report){toast("No completed comparison to export.");return;}
+  const blob=new Blob([JSON.stringify(report,null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");a.href=url;
+  a.download="netdm-routing-comparison-"+Date.now()+".json";
+  document.body.append(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+setInterval(pollComparison,1300);
+pollComparison();
