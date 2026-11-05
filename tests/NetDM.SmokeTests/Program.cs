@@ -620,7 +620,7 @@ static async Task CheckDedicatedPacketTicksAsync()
         Check(packets.Enqueue(path, 100, tick));
     var worker = runner.Start(cancelled.Token);
     bool refusedSecondStart = false;
-    try { runner.Start(cancelled.Token); }
+    try { _ = runner.Start(cancelled.Token); }
     catch (InvalidOperationException) { refusedSecondStart = true; }
     Check(refusedSecondStart);
     try
