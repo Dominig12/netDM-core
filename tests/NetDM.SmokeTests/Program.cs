@@ -256,6 +256,7 @@ static void CheckSharedMedium()
         radioStats.RejectedTransferTooLarge + radioStats.RejectedCapacity +
         radioStats.RejectedStaleRoute + radioStats.RejectedInvalidPath +
         radioStats.RejectedOldTick);
+    Check(medium.SetCable(new NodeId(1), new NodeId(3), null));
     Check(medium.RemoveNodes([new NodeId(2)]) == 1);
     Check(!medium.Route(new NodeId(1), new NodeId(3)).Found);
     Check(medium.Stats().ConfiguredDevices == 3);
