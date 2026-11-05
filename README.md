@@ -410,3 +410,31 @@ which is too large for even an idle 8,192-byte/tick channel.
 
 Important: the capacity budget is an intentionally simple shared-airtime
 approximation, not a physically accurate radio bandwidth model.
+
+## Open-loop offered-load benchmarking (M7)
+
+The earlier benchmark waited for all routes in every 100-ms batch to finish
+before attempting the next batch. Thus a 1,500 routes/s target on the
+12k-node connected radio grid only completed ~69/s, with **zero scheduler
+rejections**, even though the desired rate was much higher. This was
+self-throttling from the test harness, not actual proof of server capacity.
+
+The new producer uses monotonic Stopwatch arrival pacing independently of
+route completion. It never awaits the prior batch; the global bounded
+scheduler applies backpressure. Catch-up bursts after OS scheduling pauses
+are capped at 512 requests/producer iteration.
+
+Three explicit counters are available in `benchmark.load` and plotted in
+the new **Load admission** chart:
+
+- `offered`: requested scheduler admissions;
+- `admitted`: accepted for execution;
+- `rejected`: immediately denied by the global scheduler.
+
+Per-sample rates are `offeredRoutesPerSecond`,
+`admittedRoutesPerSecond` and `rejectedRoutesPerSecond`. These are
+distinct from `actualRoutesPerSecond`, which counts completed searches.
+
+Do not compare results from old closed-loop tests directly to new
+open-loop runs as if they used the same offered load. This change is a
+benchmark-methodology correction, not an algorithm speedup.

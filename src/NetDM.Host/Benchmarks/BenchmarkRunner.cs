@@ -31,10 +31,12 @@ public sealed record BenchmarkOptions(
     }
 }
 
+public sealed record BenchmarkLoadStats(long Offered, long Admitted, long Rejected);
+
 public sealed record BenchmarkState(
     string Status, BenchmarkOptions? Options, DateTimeOffset? StartedUtc,
     double ElapsedSeconds, int WorldWidth, int WorldHeight, string? Error,
-    RadioStats? Radio, SharedMediumStatistics? SharedMedium);
+    RadioStats? Radio, SharedMediumStatistics? SharedMedium, BenchmarkLoadStats Load);
 
 public sealed record BenchmarkSample(
     DateTimeOffset At, double ElapsedSeconds, double ActualRoutesPerSecond,
@@ -49,7 +51,9 @@ public sealed record BenchmarkSample(
     double RejectedStalePerSecond, double RejectedInvalidPerSecond,
     double RejectedTooLargePerSecond, double RejectedCapacityPerSecond,
     double RejectedOldTickPerSecond,
-    int SchedulerQueued, double SchedulerQueueWaitP95Us);
+    int SchedulerQueued, double SchedulerQueueWaitP95Us,
+    double OfferedRoutesPerSecond, double AdmittedRoutesPerSecond,
+    double RejectedRoutesPerSecond);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -68,6 +72,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     private DateTimeOffset? _started;
     private int _width, _height;
     private double _elapsed;
+    private long _offeredRoutes, _admittedRoutes, _rejectedRoutes;
     private DynamicRadioNetwork? _radioEngine;
     private SharedMediumNetwork? _sharedMedium;
 
@@ -81,10 +86,15 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     {
         lock (_gate)
             return new BenchmarkState(_status, _options, _started, _elapsed, _width, _height, _error,
-                _radioEngine?.Stats(), _sharedMedium?.Stats());
+                _radioEngine?.Stats(), _sharedMedium?.Stats(), LoadStats());
     }
 
     public BenchmarkSample[] History() => _history.ToArray();
+
+    private BenchmarkLoadStats LoadStats() => new(
+        Interlocked.Read(ref _offeredRoutes),
+        Interlocked.Read(ref _admittedRoutes),
+        Interlocked.Read(ref _rejectedRoutes));
 
     public bool Start(BenchmarkOptions options)
     {
@@ -98,6 +108,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             _status = "building";
             _started = DateTimeOffset.UtcNow;
             _elapsed = 0;
+            Interlocked.Exchange(ref _offeredRoutes, 0);
+            Interlocked.Exchange(ref _admittedRoutes, 0);
+            Interlocked.Exchange(ref _rejectedRoutes, 0);
             _error = null;
             _width = _height = 0;
             _radioEngine = null;
@@ -201,6 +214,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             var previous = runtime.Metrics.Capture(runtime.Cache.Count);
             var previousRadio = radio?.Stats();
             var previousMedium = medium?.Stats();
+            var previousLoad = LoadStats();
             var previousTime = clock.Elapsed.TotalSeconds;
             var finishedNaturally = false;
 
@@ -214,6 +228,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 var mediumSnapshot = medium?.Stats();
                 var interval = Math.Max(0.001, seconds - previousTime);
                 var schedulerSnapshot = scheduler.Capture();
+                var loadSnapshot = LoadStats();
                 var deltaRoutes = current.Routes - previous.Routes;
                 var deltaMoves = current.Moves - previous.Moves;
                 var sample = new BenchmarkSample(
@@ -238,13 +253,17 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     ((mediumSnapshot?.RejectedTransferTooLarge ?? 0) - (previousMedium?.RejectedTransferTooLarge ?? 0)) / interval,
                     ((mediumSnapshot?.RejectedCapacity ?? 0) - (previousMedium?.RejectedCapacity ?? 0)) / interval,
                     ((mediumSnapshot?.RejectedOldTick ?? 0) - (previousMedium?.RejectedOldTick ?? 0)) / interval,
-                    schedulerSnapshot.Queued, schedulerSnapshot.QueueWaitP95Us);
+                    schedulerSnapshot.Queued, schedulerSnapshot.QueueWaitP95Us,
+                    (loadSnapshot.Offered - previousLoad.Offered) / interval,
+                    (loadSnapshot.Admitted - previousLoad.Admitted) / interval,
+                    (loadSnapshot.Rejected - previousLoad.Rejected) / interval);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;
                 previous = current;
                 previousRadio = radioSnapshot;
                 previousMedium = mediumSnapshot;
+                previousLoad = loadSnapshot;
                 previousTime = seconds;
                 if (seconds >= options.DurationSeconds) { finishedNaturally = true; break; }
             }
@@ -274,47 +293,72 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
         }
     }
 
+    /// <summary>
+    /// Open-loop generator: submission timing is independent of search completion.
+    /// The process-wide scheduler rejects overload; it does not create threads
+    /// or allow unbounded queues for each new arrival.
+    /// </summary>
     private async Task RouteWorkerAsync(BenchmarkOptions options, int worker, int workers,
         SharedMediumNetwork? medium, CancellationToken ct)
     {
         var rng = new Random(options.Seed + 10_001 + worker);
-        var quota = (double)options.RoutesPerSecond / workers / 10;
-        double due = 0;
-        while (true)
+        var clock = Stopwatch.StartNew();
+        var rate = (double)options.RoutesPerSecond / workers;
+        long offered = 0;
+        var pending = new List<Task<RouteResult>>(384);
+        try
         {
-            ct.ThrowIfCancellationRequested();
-            due += quota;
-            var count = (int)due;
-            due -= count;
-            // Burst-submit the current 100 ms quota without spawning a task
-            // per route. The shared scheduler bounds queued work and CPU workers.
-            var pending = new List<Task<RouteResult>>(Math.Min(count, 300));
-            for (var i = 0; i < count; i++)
+            while (true)
             {
                 ct.ThrowIfCancellationRequested();
-                var a = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
-                var b = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
-                var payload = rng.Next(128, 1025);
-                if (scheduler.TrySchedule(token =>
-                    {
-                        var route = medium is null
-                            ? runtime.Route(a, b, cancellationToken: token)
-                            : medium.Route(a, b, cancellationToken: token);
-                        if (route.Found && medium is not null)
+                var target = (long)Math.Floor(clock.Elapsed.TotalSeconds * rate);
+                // Catch up on missed arrivals without one giant producer burst.
+                var count = (int)Math.Min(512L, Math.Max(0L, target - offered));
+                for (var i = 0; i < count; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    offered++;
+                    Interlocked.Increment(ref _offeredRoutes);
+                    var a = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
+                    var b = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
+                    var payload = rng.Next(128, 1025);
+                    if (scheduler.TrySchedule(token =>
                         {
-                            var tick = Stopwatch.GetTimestamp() /
-                                Math.Max(1, Stopwatch.Frequency / 10);
-                            medium.TryTransmit(route, payload, tick);
-                        }
-                        return route;
-                    }, WorkPriority.Background, ct, out Task<RouteResult>? result))
-                    pending.Add(result!);
-                // Rejected routes are measured by scheduler counters. Never queue
-                // an unbounded backlog in the synthetic benchmark generator.
+                            var route = medium is null
+                                ? runtime.Route(a, b, cancellationToken: token)
+                                : medium.Route(a, b, cancellationToken: token);
+                            if (route.Found && medium is not null)
+                            {
+                                var tick = Stopwatch.GetTimestamp() /
+                                    Math.Max(1, Stopwatch.Frequency / 10);
+                                medium.TryTransmit(route, payload, tick);
+                            }
+                            return route;
+                        }, WorkPriority.Background, ct, out Task<RouteResult>? task))
+                    {
+                        Interlocked.Increment(ref _admittedRoutes);
+                        pending.Add(task!);
+                    }
+                    else Interlocked.Increment(ref _rejectedRoutes);
+                }
+                // Task list stays bounded by globally admitted work; promptly
+                // release observed results rather than awaiting an entire burst.
+                for (var i = pending.Count - 1; i >= 0; i--)
+                {
+                    var task = pending[i];
+                    if (!task.IsCompleted) continue;
+                    if (task.IsFaulted) _ = task.Exception;
+                    pending.RemoveAt(i);
+                }
+                await Task.Delay(20, ct);
             }
-            if (pending.Count > 0)
-                await Task.WhenAll(pending);
-            await Task.Delay(100, ct);
+        }
+        finally
+        {
+            // Accepted work was tied to the benchmark token, and the scheduler
+            // cancels outstanding work when the run is stopped.
+            try { await Task.WhenAll(pending); }
+            catch (Exception) { } // Scheduler publishes failures/cancellations.
         }
     }
 
