@@ -387,7 +387,7 @@ static void CheckPacketTransport()
                 Position: new NodePosition(20,0))
         ]);
         var medium = new SharedMediumNetwork(runtime, bytesPerTick: capacity);
-        medium.Update([1,2,3].Select(i => new RadioNodeUpdate(
+        medium.Update(new[] {1,2,3}.Select(i => new RadioNodeUpdate(
             new NodeId((ulong)i), Profile: new RadioProfile(14,1,8),
             ChangeProfile:true)).ToArray());
         var route = medium.Route(new NodeId(1),new NodeId(3));
