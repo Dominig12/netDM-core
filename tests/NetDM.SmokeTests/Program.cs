@@ -743,13 +743,15 @@ static void CheckEventDrivenPacketWaiting()
         MaxAgeTicks: 3, EventDrivenPacketWaiting: true));
     var direct = medium.Route(new NodeId(1), new NodeId(3));
     Check(direct.Found);
-    Check(expiring.Enqueue(direct, 100, 0));
-    Check(expiring.Advance(1) == 1);
+    // SharedMediumNetwork tracks airtime ticks independently of transport
+    // instances; this second case must use later ticks than the prior case.
+    Check(expiring.Enqueue(direct, 100, 7));
+    Check(expiring.Advance(8) == 1);
     medium.Update([disabled]);
     expiring.NotifyRadioUpdates([disabled]);
-    Check(expiring.Advance(2) == 0);
+    Check(expiring.Advance(9) == 0);
     Check(expiring.Capture().AwaitingReroutePackets == 1);
-    Check(expiring.Advance(3) == 0);
+    Check(expiring.Advance(10) == 0);
     var ttl = expiring.Capture();
     Check(ttl.Expired == 1 && ttl.ExpiredWhileParked == 1 && ttl.Queued == 0);
     Check(ttl.AwaitingReroutePackets == 0);
