@@ -89,10 +89,12 @@ app.MapPost("/api/comparison/stop", (RoutingComparisonRunner comparison) =>
 
 // The map API returns only graph cells intersecting the requested viewport.
 // This keeps serialized payloads bounded even when the simulation is much larger.
-app.MapGet("/api/map", (NetworkRuntime runtime,
+app.MapGet("/api/map", (NetworkRuntime runtime, BenchmarkRunner benchmark,
     int? minX, int? minY, int? maxX, int? maxY, int? z, int? limit) =>
 {
-    var snapshot = runtime.Topology.Snapshot;
+    var medium = benchmark.ActiveSharedMedium;
+    var mediumSnapshot = medium?.Snapshot;
+    var snapshot = mediumSnapshot?.Physical ?? runtime.Topology.Snapshot;
     var maxNodes = Math.Clamp(limit ?? 4000, 1, 8000);
     var left = minX ?? -100;
     var top = minY ?? -100;
@@ -110,9 +112,13 @@ app.MapGet("/api/map", (NetworkRuntime runtime,
         .Take(maxNodes * 8)
         .ToArray();
 
+    var mediumCells = medium?.ViewCells(left, top, right, bottom, z ?? 0,
+        1_500, mediumSnapshot);
     return Results.Ok(new
     {
         version = snapshot.Version,
+        mediumVersion = mediumSnapshot?.Version,
+        domainCells = mediumCells,
         totalNodes = snapshot.Nodes.Count,
         displayedNodes = nodes.Count,
         truncated = nodes.Count >= maxNodes,

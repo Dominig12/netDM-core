@@ -25,11 +25,16 @@
         <label for="network-mode">Link topology <small>simulation mode</small></label>
         <select id="network-mode" class="workload-select">
           <option value="wired">WIRED · Persistent links</option>
-          <option value="radio">RADIO · Dynamic proximity</option>
+          <option value="radio">RADIO · Pairwise proximity</option>
+          <option value="shared">SHARED · Lazy medium domains</option>
         </select>
         <div id="radio-options" hidden>
           <label for="radio-range">Radio range <small>1 – 128 units</small></label>
           <input id="radio-range" type="number" min="1" max="128" value="14" required>
+          <div id="medium-budget-row" hidden>
+            <label for="medium-budget">Shared capacity <small>bytes / 100 ms tick</small></label>
+            <input id="medium-budget" type="number" min="1" max="1000000" value="8192" required>
+          </div>
           <p class="radio-description">Nodes form links automatically when both radios are in range and on the same channel. Link changes simulate temporary radio outages.</p>
         </div>
         <label for="nodes">Network nodes <small>9 – 30,000</small></label>
@@ -69,7 +74,7 @@
         <div class="kpi"><div class="kpi-label">P95 LATENCY <span>◷</span></div><strong id="kpi-p95">—</strong><small>microseconds, rolling window</small></div>
         <div class="kpi"><div class="kpi-label">CACHE HIT RATE <span>⟳</span></div><strong id="kpi-cache">—</strong><small id="kpi-cache-count">0 cached routes</small></div>
         <div class="kpi"><div class="kpi-label">MUTATIONS / SEC <span>⤨</span></div><strong id="kpi-mps">—</strong><small id="kpi-version">topology v0</small></div>
-        <div class="kpi"><div class="kpi-label">RADIO LINKS <span>⌁</span></div><strong id="kpi-radio">—</strong><small id="kpi-radio-events">Choose radio mode to simulate</small></div>
+        <div class="kpi"><div class="kpi-label"><span id="kpi-radio-label">RADIO LINKS</span> <span>⌁</span></div><strong id="kpi-radio">—</strong><small id="kpi-radio-events">Choose radio mode to simulate</small></div>
       </section>
       <section class="network-panel">
         <div class="panel-head">
@@ -78,6 +83,7 @@
             <span class="legend"><i class="legend-line"></i> LINK</span>
             <span class="legend"><i class="legend-node"></i> NODE</span>
             <span class="legend"><i class="legend-hot"></i> ROUTE ACTIVITY</span>
+            <span class="legend"><i class="legend-domain"></i> RADIO DOMAIN CELLS</span>
             <button type="button" id="fit" title="Fit network to viewport">⊡ FIT</button>
           </div>
         </div>
@@ -94,7 +100,7 @@
         <div class="chart-panel"><div class="chart-heading"><div><strong>Route throughput</strong><small>Observed queries per second</small></div><span class="chart-value" id="chart-rps">—</span></div><canvas id="routes-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
         <div class="chart-panel"><div class="chart-heading"><div><strong>Routing latency</strong><small>P50 / P95 / P99 in µs</small></div><span class="chart-value" id="chart-latency">—</span></div><canvas id="latency-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
         <div class="chart-panel"><div class="chart-heading"><div><strong>Managed memory</strong><small>GC managed heap estimate</small></div><span class="chart-value" id="chart-memory">—</span></div><canvas id="memory-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
-        <div class="chart-panel"><div class="chart-heading"><div><strong>Link churn</strong><small>New / lost proximity links per second</small></div><span class="chart-value" id="chart-link-churn">—</span></div><canvas id="links-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
+        <div class="chart-panel"><div class="chart-heading"><div><strong id="churn-title">Link churn</strong><small id="churn-subtitle">New / lost proximity links per second</small></div><span class="chart-value" id="chart-link-churn">—</span></div><canvas id="links-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
       </section>
 
       <section class="comparison-panel" aria-label="Routing algorithm comparison">

@@ -134,14 +134,23 @@ public sealed class NetworkRuntime
 
         if (cached && result.Version != snapshot.Version)
             result = result with { Version = snapshot.Version };
-        Metrics.RouteCompleted(result.Found, cached, Stopwatch.GetTimestamp() - start);
+        RecordExternalRoute(result, cached, Stopwatch.GetTimestamp() - start);
+        return result;
+    }
 
-        // Sample one route out of 16: traffic heat is approximate and bounded in cost.
+    /// <summary>
+    /// Shared telemetry sink for alternate routing layers. The caller must
+    /// measure elapsed ticks, not Stopwatch.ElapsedMilliseconds.
+    /// </summary>
+    public void RecordExternalRoute(RouteResult result, bool cached, long elapsedTicks)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        Metrics.RouteCompleted(result.Found, cached, elapsedTicks);
+
+        // Sample one route in 16: sampled activity is not packet throughput.
         if (result.Found && (Interlocked.Increment(ref _sampleCounter) & 15) == 0)
             foreach (var node in result.Path)
                 _traffic.AddOrUpdate(node, 1, (_, value) => value + 1);
-
-        return result;
     }
 
     public long Traffic(NodeId id) => _traffic.TryGetValue(id, out var hits) ? hits : 0;

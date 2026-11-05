@@ -263,3 +263,61 @@ ledger mutations are published if planning is aborted. The graph commit
 and ownership ledger update are intentionally non-cancellable after
 commit begins. Range checks avoid squared-distance overflow for teleports
 between extreme 32-bit map coordinates.
+
+## Shared-medium logical domains (M4 prototype)
+
+**Why:** `DynamicRadioNetwork` models each radio pair as a graph edge,
+creating quadratic storage when many devices share a large coverage area.
+The new `SharedMediumNetwork` is a separate model with the following
+trade-off:
+
+- Radio memberships: immutable `RadioMediumCell(channel, z, gridX, gridY)`
+  map to immutable node-ID sets. Storage grows with devices and occupied
+  cells rather than number of radio pairs.
+- Route search: Dijkstra merges physical cable neighbours with **lazy
+  radio neighbours** from nearby domain cells, applying mutual range,
+  channel, and Z tests at relaxation time. It does not assume that every
+  device sharing a channel can reach every other directly.
+- Route consistency: one `SharedMediumSnapshot` contains both a captured
+  physical `TopologySnapshot` and the corresponding radio membership
+  index. Readers never mix two movement epochs. Updates under a single
+  writer lock publish one new composite snapshot.
+- Cache invalidation: independent radio-domain version increments on
+  meaningful updates (including movement of configured devices), even
+  when the physical graph's `ConnectivityVersion` does not change.
+- Physical links: cables still use `TopologyStore`, but are written
+  through the medium owner so the composite snapshot stays coherent.
+
+### Shared airtime
+
+`TryTransmit(route, payloadBytes, tick)` verifies a route's snapshot
+version, identifies cable versus radio hops, then reserves bytes for each
+radio hop against the capacity of its `RadioDomainKey(channel, Z)`.
+All reservations happen under one short lock and are committed atomically
+only when every used domain has sufficient capacity in that tick.
+
+The benchmark uses a monotonic `Stopwatch` clock quantized to approximately
+100 ms and sends synthetic payload sizes of 128–1024 bytes after successful
+route queries. Accepted/rejected transfer counts are **synthetic offered
+traffic**, not measured real BYOND packets.
+
+There is no current RF collision/backoff/propagation or spatial reuse.
+Moreover, independent radio clusters on the same channel/Z compete for
+one shared airtime pool in this first approximation.
+
+### Scalability warnings
+
+No quadratic **storage** does not imply no quadratic **CPU**: densely
+populated cells can still cause large lazy-neighbour scans in Dijkstra.
+The first performance studies should compare cold and warm query latency,
+high-density configurations (hundreds/thousands of devices per cell),
+radio movement churn, and heap memory across both implementations.
+
+The dashboard renders *occupied channel cells* in the shared mode rather
+than inventing direct radio edges. Up to 1,500 domain tiles are returned per
+map query, and the backend does not serialize the entire dense radio graph.
+
+Implementation is intentionally isolated from BYOND. For a production
+shared medium, add hierarchical intra-domain routing, contention-aware
+queue scheduling, packet lifetime/retry policies, per-device permissions
+and a native bridge with bounded framed IPC.
