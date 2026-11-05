@@ -114,6 +114,7 @@ public sealed class TopologyStore
                             RemoveFromCell(cells, change.A, oldPosition);
                         nodes.Remove(change.A);
                         applied++;
+                        connectivityChanged = true;
                         break;
 
                     case TopologyOperation.Connect:
@@ -130,15 +131,17 @@ public sealed class TopologyStore
                             Links = right.Links.SetItem(change.A, new Edge(change.A, change.Cost))
                         };
                         applied++;
+                        connectivityChanged = true;
                         break;
 
                     case TopologyOperation.Disconnect:
-                        if (!nodes.TryGetValue(change.A, out var from) ||
-                            !nodes.TryGetValue(change.B, out var to) ||
-                            !from.Links.ContainsKey(change.B)) break;
-                        nodes[change.A] = from with { Links = from.Links.Remove(change.B) };
-                        nodes[change.B] = to with { Links = to.Links.Remove(change.A) };
+                        if (!nodes.TryGetValue(change.A, out var fromNode) ||
+                            !nodes.TryGetValue(change.B, out var toNode) ||
+                            !fromNode.Links.ContainsKey(change.B)) break;
+                        nodes[change.A] = fromNode with { Links = fromNode.Links.Remove(change.B) };
+                        nodes[change.B] = toNode with { Links = toNode.Links.Remove(change.A) };
                         applied++;
+                        connectivityChanged = true;
                         break;
 
                     case TopologyOperation.MoveNode:
