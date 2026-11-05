@@ -32,13 +32,15 @@ public sealed record SharedMediumSnapshot(
 {
     /// <summary>Disables geometric heuristics when arbitrary long-range cables exist.</summary>
     public bool HasPhysicalLinks { get; init; }
+    internal DenseRadioIndex? Dense { get; init; }
 }
 
 public enum SharedRadioSearchMode
 {
     Dijkstra = 0,
     AStar = 1,
-    AStarPooled = 2
+    AStarPooled = 2,
+    AStarDense = 3
 }
 
 public readonly record struct SharedMediumUpdateResult(
@@ -65,7 +67,7 @@ public readonly record struct RadioMediumCellView(
 /// This layer owns device positions/profiles and cable changes while it is active.
 /// The cell grid is persistent immutable data; route queries are lock-free.
 /// </summary>
-public sealed class SharedMediumNetwork
+public sealed partial class SharedMediumNetwork
 {
     private readonly NetworkRuntime _runtime;
     private readonly object _writer = new();
@@ -163,7 +165,8 @@ public sealed class SharedMediumNetwork
             ImmutableDictionary<NodeId, RadioProfile>.Empty,
             ImmutableDictionary<RadioMediumCell, ImmutableHashSet<NodeId>>.Empty)
         {
-            HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0)
+            HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0),
+            Dense = DenseRadioIndex.Build(physical, ImmutableDictionary<NodeId, RadioProfile>.Empty)
         };
     }
 
@@ -278,10 +281,12 @@ public sealed class SharedMediumNetwork
             cancellationToken.ThrowIfCancellationRequested();
             if (moves.Count > 0) _runtime.Apply(moves);
             var physical = _runtime.Topology.Snapshot;
+            var nextDevices = devices.ToImmutable();
             var next = new SharedMediumSnapshot(checked(before.Version + 1), physical,
-                devices.ToImmutable(), cells.ToImmutable())
+                nextDevices, cells.ToImmutable())
             {
-                HasPhysicalLinks = before.HasPhysicalLinks
+                HasPhysicalLinks = before.HasPhysicalLinks,
+                Dense = before.Dense?.WithChanges(physical, nextDevices, updates.Select(u => u.Id))
             };
             _cache.Clear();
             Volatile.Write(ref _current, next);
@@ -308,7 +313,7 @@ public sealed class SharedMediumNetwork
             var op = cost is null ? TopologyOperation.Disconnect : TopologyOperation.Connect;
             var result = _runtime.Apply([new TopologyChange(op, a, b, cost ?? 1)]);
             if (result.Applied == 0) return false;
-            PublishPhysical(before);
+            PublishPhysical(before, a, b);
             return true;
         }
     }
@@ -341,7 +346,8 @@ public sealed class SharedMediumNetwork
             var next = new SharedMediumSnapshot(checked(before.Version + 1),
                 physical, devices.ToImmutable(), cells.ToImmutable())
             {
-                HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0)
+                HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0),
+                Dense = DenseRadioIndex.Build(physical, devices.ToImmutable())
             };
             _cache.Clear();
             Volatile.Write(ref _current, next);
@@ -368,6 +374,9 @@ public sealed class SharedMediumNetwork
             SharedRadioSearchMode.AStar => RouteAStarCore(snapshot, source, destination,
                 _maximumRadioRange, _minimumRadioCost, maxExplored, cancellationToken),
             SharedRadioSearchMode.AStarPooled => RouteAStarPooledCore(snapshot, source,
+                destination, _maximumRadioRange, _minimumRadioCost,
+                maxExplored, cancellationToken),
+            SharedRadioSearchMode.AStarDense => RouteAStarDenseCore(snapshot, source,
                 destination, _maximumRadioRange, _minimumRadioCost,
                 maxExplored, cancellationToken),
             _ => RouteCore(snapshot, source, destination, maxExplored, cancellationToken)
@@ -976,14 +985,15 @@ public sealed class SharedMediumNetwork
                 "Use this service to mutate its nodes and cables.");
     }
 
-    private void PublishPhysical(SharedMediumSnapshot before)
+    private void PublishPhysical(SharedMediumSnapshot before, NodeId a, NodeId b)
     {
         var physical = _runtime.Topology.Snapshot;
         var next = before with
         {
             Version = checked(before.Version + 1),
             Physical = physical,
-            HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0)
+            HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0),
+            Dense = before.Dense?.WithChanges(physical, before.Devices, [a, b])
         };
         _cache.Clear();
         Volatile.Write(ref _current, next);
