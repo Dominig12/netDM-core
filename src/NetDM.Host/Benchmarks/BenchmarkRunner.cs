@@ -29,7 +29,8 @@ public sealed record BenchmarkOptions(
     int PacketRerouteQueueRetryDelayTicks = 8,
     int PacketQueueCapacity = 2048,
     bool AdaptivePacketVisits = false,
-    bool PacketPreRouteBackpressure = false)
+    bool PacketPreRouteBackpressure = false,
+    bool EventDrivenPacketWaiting = false)
 {
     public void Validate()
     {
@@ -334,7 +335,8 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     MaxTickWorkMilliseconds: options.PacketTickWorkBudgetMs,
                     MaxNoRouteRetryDelayTicks: options.PacketMaxNoRouteRetryDelayTicks,
                     RerouteQueueRetryDelayTicks: options.PacketRerouteQueueRetryDelayTicks,
-                    AdaptivePacketVisits: options.AdaptivePacketVisits))
+                    AdaptivePacketVisits: options.AdaptivePacketVisits,
+                     EventDrivenPacketWaiting: options.EventDrivenPacketWaiting))
                 : null;
             // Reroute computation is never executed while holding the packet
             // queue lock. A separate bounded CPU executor prevents it from
