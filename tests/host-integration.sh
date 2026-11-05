@@ -20,6 +20,7 @@ done
 curl -fsS "$base/api/health" | python3 -c 'import json,sys; assert json.load(sys.stdin)["status"]=="ok"'
 curl -fsS "$base/" > "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 grep -q 'Network Observatory' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+grep -q 'CPU Work Scheduler' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 curl -fsS "$base/app.js" > "${RUNNER_TEMP:-/tmp}/netdm-app.js"
 grep -q 'fitMap' "${RUNNER_TEMP:-/tmp}/netdm-app.js"
 node --check src/NetDM.Host/wwwroot/app.js
@@ -154,3 +155,18 @@ assert b["sharedMedium"]["acceptedTransfers"]+b["sharedMedium"]["rejectedTransfe
 print("Shared-medium routing / domain cells / airtime diagnostics: PASS")
 PY
 curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null
+
+# The same scheduler is shared by IPC routes and background benchmark queries.
+curl -fsS "$base/api/scheduler" > "${RUNNER_TEMP:-/tmp}/netdm-scheduler.json"
+python3 - <<'PY'
+import json, os
+p=os.path.join(os.environ.get("RUNNER_TEMP","/tmp"),"netdm-scheduler.json")
+with open(p,encoding="utf-8") as f: s=json.load(f)
+assert 1 <= s["workers"] <= 8, s
+assert 0 <= s["running"] <= s["workers"], s
+assert 0 <= s["queued"] <= 256 and s["peakQueued"] <= 256, s
+assert s["accepted"] > 0 and s["completed"] > 0, s
+assert s["rejected"] >= 0 and s["queueWaitP95Us"] >= 0, s
+assert s["budgetMillisecondsPer100Ms"] == 65, s
+print("Global scheduled routing / bounded backlog / telemetry: PASS")
+PY
