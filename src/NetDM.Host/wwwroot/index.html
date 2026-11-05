@@ -38,7 +38,8 @@
             <select id="shared-search" class="workload-select">
               <option value="dijkstra">DIJKSTRA · Exact baseline</option>
               <option value="astar">A* · Original allocations (control)</option>
-              <option value="astar-pooled">A* POOLED · Reused workspace and direct radio traversal</option>
+              <option value="astar-pooled">A* POOLED · Reused dictionaries</option>
+              <option value="astar-dense">A* DENSE · Indexed nodes and epoch-stamped arrays</option>
             </select>
             <label for="packet-delivery">Delivery simulation</label>
             <select id="packet-delivery" class="workload-select">
@@ -125,15 +126,17 @@
               <option value="baseline">A · PR #14 original A* · 2 reroute workers · max wait 96 ticks</option>
               <option value="pooled">B · Pooled A* · 2 reroute workers · max wait 96 ticks</option>
               <option value="short-wait">C · Pooled A* · 2 reroute workers · max wait 24 ticks</option>
+              <option value="dense">D · Dense A* · 2 reroute workers · max wait 96 ticks</option>
             </select>
-            <small>Run each preset separately; each produces three JSON files. Keep the other settings identical.</small>
+            <small>For an isolated CPU comparison, run B and D. Each produces three JSON reports with identical workload and reroute settings.</small>
           </div>
           <div class="suite-choices">
             <label for="suite-search">Routing
               <select id="suite-search" class="workload-select">
                 <option value="dijkstra">Dijkstra baseline</option>
                 <option value="astar">A* spatial search · original</option>
-                <option value="astar-pooled">A* spatial search · pooled (new)</option>
+                <option value="astar-pooled">A* spatial search · pooled</option>
+                <option value="astar-dense">A* spatial search · dense (new)</option>
               </select>
             </label>
             <label for="suite-delivery">Transport

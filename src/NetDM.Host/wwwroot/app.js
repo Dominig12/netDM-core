@@ -657,7 +657,9 @@ async function pollSuite(){
         " requested routes/s · seed "+opts.seed+" · radio range "+opts.radioRange+
         " · "+format(opts.mediumBytesPerTick)+" bytes/tick · "+
         opts.durationSeconds+" seconds per scenario · "+
-        (opts.sharedSearch==="astar-pooled"?"A* pooled":opts.sharedSearch==="astar"?"A* original":"Dijkstra")+" · "+
+        (opts.sharedSearch==="astar-dense"?"A* dense":
+          opts.sharedSearch==="astar-pooled"?"A* pooled":
+          opts.sharedSearch==="astar"?"A* original":"Dijkstra")+" · "+
         (opts.packetTransportEnabled?"hop-by-hop packets":"legacy airtime")+" · "+
         (opts.spatialReuseEnabled?"spatial sharing":"global channel")+
         " · TTL "+opts.packetMaxAgeTicks+" ticks · "+
@@ -721,7 +723,8 @@ async function pollSuite(){
 $("suite-compare-preset").addEventListener("change",()=>{
   const preset=$("suite-compare-preset").value;
   if(!preset)return;
-  $("suite-search").value=preset==="baseline"?"astar":"astar-pooled";
+  $("suite-search").value=preset==="baseline"?"astar":
+    preset==="dense"?"astar-dense":"astar-pooled";
   $("suite-delivery").value="hopwise";
   $("suite-airtime").value="spatial";
   $("suite-ttl").value="900";
