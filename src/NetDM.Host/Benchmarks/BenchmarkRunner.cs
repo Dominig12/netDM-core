@@ -147,7 +147,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
                 var registrations = Enumerable.Range(1, options.Nodes)
                     .Select(i => new RadioNodeUpdate(new NodeId((ulong)i),
                         Profile: profile, ChangeProfile: true)).ToArray();
-                radio.Update(registrations);
+                radio.Update(registrations, ct);
             }
             lock (_gate)
             {
@@ -301,7 +301,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
                     };
                 }
                 if (radioUpdates.Count > 0)
-                    radio.Update(radioUpdates.Values.ToArray());
+                    radio.Update(radioUpdates.Values.ToArray(), ct);
                 await Task.Delay(100, ct);
                 continue;
             }
