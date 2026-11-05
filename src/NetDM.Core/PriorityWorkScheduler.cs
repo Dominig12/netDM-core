@@ -39,6 +39,8 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
     {
         long SubmittedAt { get; }
         CancellationToken Cancellation { get; }
+        bool WasCancelled { get; }
+        bool WasFailed { get; }
         void Execute(CancellationToken schedulerToken);
         void Cancel();
     }
@@ -51,6 +53,8 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
 
         public long SubmittedAt { get; } = Stopwatch.GetTimestamp();
         public CancellationToken Cancellation => cancellation;
+        public bool WasCancelled { get; private set; }
+        public bool WasFailed { get; private set; }
         public Task<T> Task => _completion.Task;
 
         public void Execute(CancellationToken schedulerToken)
@@ -63,10 +67,12 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
             }
             catch (OperationCanceledException) when (linked.IsCancellationRequested)
             {
+                WasCancelled = true;
                 _completion.TrySetCanceled(linked.Token);
             }
             catch (Exception ex)
             {
+                WasFailed = true;
                 _completion.TrySetException(ex);
             }
         }
@@ -75,7 +81,7 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
     }
 
     private const int WindowSamples = 1024;
-    private const long WindowTicks = 100L * Stopwatch.Frequency / 1000L;
+    private static readonly long WindowTicks = 100L * Stopwatch.Frequency / 1000L;
     private static readonly int[] WeightedOrder = [0, 0, 0, 0, 1, 1, 2];
     private readonly Queue<IWork>[] _queues = [new(), new(), new()];
     private readonly object _gate = new();
@@ -213,7 +219,9 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
                 ChargeBudget(ticks);
                 Interlocked.Decrement(ref _running);
                 // Use per-task metrics from the TaskCompletionSource state.
-                Interlocked.Increment(ref _completed);
+                if (item.WasCancelled) Interlocked.Increment(ref _cancelled);
+                else if (item.WasFailed) Interlocked.Increment(ref _failed);
+                else Interlocked.Increment(ref _completed);
                 var position = (Interlocked.Increment(ref _latencyIndex) - 1) % WindowSamples;
                 Interlocked.Exchange(ref _queueWaits[(int)position], queuedUs);
                 Interlocked.Exchange(ref _workTimes[(int)position], Microseconds(ticks));
