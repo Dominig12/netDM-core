@@ -79,6 +79,7 @@ Check(errors.IsEmpty);
 await CheckSchedulerAsync();
 CheckSharedMedium();
 CheckSharedMediumOracle();
+CheckRadioAStar();
 CheckRadioSafety();
 CheckWirelessTopology();
 CheckRadioOracle();
@@ -369,6 +370,94 @@ static void CheckSharedMediumOracle()
             }
         }
     }
+}
+
+static void CheckRadioAStar()
+{
+    // Preserve optimality across moving radio nodes, profile changes, cable
+    // shortcuts and disconnected networks. Baseline is the exact Dijkstra.
+    for (var seed = 0; seed < 4; seed++)
+    {
+        var rng = new Random(4410 + seed);
+        var runtime = new NetworkRuntime();
+        var nodes = Enumerable.Range(1, 100)
+            .Select(i => new TopologyChange(TopologyOperation.AddNode,
+                new NodeId((ulong)i),
+                Position: new NodePosition(rng.Next(-80, 81), rng.Next(-80, 81),
+                    rng.Next(0, 2)))).ToArray();
+        runtime.Apply(nodes);
+        var medium = new SharedMediumNetwork(runtime, searchMode: SharedRadioSearchMode.AStar,
+            maximumRadioRange: 26, minimumRadioCost: 3);
+        var startup = Enumerable.Range(1, 100).Select(i =>
+            new RadioNodeUpdate(new NodeId((ulong)i),
+                Profile: new RadioProfile(rng.Next(12, 27),
+                    (uint)rng.Next(1, 3), (uint)rng.Next(3, 13)),
+                ChangeProfile: true)).ToArray();
+        medium.Update(startup);
+        for (var batch = 0; batch < 12; batch++)
+        {
+            if (batch == 5)
+            {
+                // A long cable invalidates the spatial heuristic; A* must
+                // fall back to an exact zero heuristic for mixed graphs.
+                medium.SetCable(new NodeId(1), new NodeId(100), 1);
+            }
+            else if (batch == 8)
+                medium.SetCable(new NodeId(1), new NodeId(100), null);
+
+            var snapshot = medium.Snapshot;
+            Check(snapshot.HasPhysicalLinks == (batch is >= 5 and < 8));
+            for (var query = 0; query < 45; query++)
+            {
+                var from = new NodeId((ulong)rng.Next(1, 101));
+                var to = new NodeId((ulong)rng.Next(1, 101));
+                var baseline = SharedMediumNetwork.RouteCore(snapshot, from, to);
+                var astar = SharedMediumNetwork.RouteAStarCore(snapshot, from, to,
+                    maximumRadioRange: 26, minimumRadioCost: 3);
+                Check(astar.Found == baseline.Found);
+                Check(astar.Cost == baseline.Cost);
+                Check(astar.Version == baseline.Version);
+                if (astar.Found)
+                {
+                    Check(astar.Path[0] == from && astar.Path[^1] == to);
+                    Check(astar.Explored >= 1);
+                }
+                Check(medium.Route(from,to).Cost == baseline.Cost);
+            }
+            var changed = new List<RadioNodeUpdate>();
+            for (var k = 0; k < 8; k++)
+            {
+                var id = new NodeId((ulong)(batch * 8 + k + 1));
+                var profile = k == 0
+                    ? (RadioProfile?)null
+                    : new RadioProfile(rng.Next(12, 27), (uint)rng.Next(1, 3),
+                        (uint)rng.Next(3, 13));
+                var current = medium.Snapshot.Physical.Nodes[id].Position!.Value;
+                changed.Add(new RadioNodeUpdate(id,
+                    Position: new NodePosition(current.X + rng.Next(-15, 16),
+                        current.Y + rng.Next(-15, 16), current.Z),
+                    Profile: profile, ChangeProfile: true));
+            }
+            medium.Update(changed);
+        }
+    }
+
+    // Dense shared-radio geometry: a straight route uses the same cost.
+    var grid = new NetworkRuntime();
+    grid.Apply(Enumerable.Range(1, 900).Select(i =>
+        new TopologyChange(TopologyOperation.AddNode, new NodeId((ulong)i),
+            Position: new NodePosition((i-1)%30*12,(i-1)/30*12))).ToArray());
+    var radioGrid = new SharedMediumNetwork(grid,
+        searchMode: SharedRadioSearchMode.AStar,maximumRadioRange:14,minimumRadioCost:8);
+    radioGrid.Update(Enumerable.Range(1,900).Select(i =>
+        new RadioNodeUpdate(new NodeId((ulong)i),
+            Profile:new RadioProfile(14, 1, 8),ChangeProfile:true)).ToArray());
+    var pinned = radioGrid.Snapshot;
+    var start = new NodeId(1); var end = new NodeId(900);
+    var d = SharedMediumNetwork.RouteCore(pinned, start, end);
+    var a = radioGrid.Route(start, end);
+    Check(a.Found && a.Cost == d.Cost);
+    Check(a.Explored <= d.Explored);
 }
 
 static void CheckRadioSafety()

@@ -14,7 +14,8 @@ public sealed record BenchmarkOptions(
     bool WirelessEnabled = false,
     int RadioRange = 14,
     string RadioModel = "pairwise",
-    int MediumBytesPerTick = 8192)
+    int MediumBytesPerTick = 8192,
+    string SharedSearch = "dijkstra")
 {
     public void Validate()
     {
@@ -24,6 +25,8 @@ public sealed record BenchmarkOptions(
         if (LinkChangesPerSecond is < 0 or > 1_000) throw new ArgumentOutOfRangeException(nameof(LinkChangesPerSecond));
         if (DurationSeconds is < 2 or > 1800) throw new ArgumentOutOfRangeException(nameof(DurationSeconds));
         if (RadioRange is < 1 or > 128) throw new ArgumentOutOfRangeException(nameof(RadioRange));
+        if (SharedSearch is not ("dijkstra" or "astar"))
+            throw new ArgumentException("SharedSearch must be dijkstra or astar.", nameof(SharedSearch));
         if (RadioModel is not ("pairwise" or "shared"))
             throw new ArgumentException("RadioModel must be pairwise or shared.", nameof(RadioModel));
         if (MediumBytesPerTick is < 1 or > 1_000_000)
@@ -214,7 +217,12 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                         Profile: profile, ChangeProfile: true)).ToArray();
                 if (options.RadioModel == "shared")
                 {
-                    medium = new SharedMediumNetwork(runtime, options.MediumBytesPerTick);
+                    medium = new SharedMediumNetwork(runtime,
+                        options.MediumBytesPerTick,
+                        options.SharedSearch == "astar"
+                            ? SharedRadioSearchMode.AStar : SharedRadioSearchMode.Dijkstra,
+                        maximumRadioRange: options.RadioRange,
+                        minimumRadioCost: 8);
                     medium.Update(registrations, ct);
                 }
                 else
