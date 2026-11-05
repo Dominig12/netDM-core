@@ -5,6 +5,7 @@ using System.Text.Json;
 using NetDM.Core;
 
 var pipeName = args.Length > 0 ? args[0] : "netdm-core";
+var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 var store = new TopologyStore();
 var mutations = System.Threading.Channels.Channel.CreateBounded<Command>(
     new System.Threading.Channels.BoundedChannelOptions(8192)
@@ -71,7 +72,7 @@ async Task ServeAsync(Stream stream)
 
     async Task SendAsync(Response result)
     {
-        var line = JsonSerializer.Serialize(result, JsonOptions);
+        var line = JsonSerializer.Serialize(result, jsonOptions);
         await writeGate.WaitAsync();
         try { await writer.WriteLineAsync(line); }
         finally { writeGate.Release(); }
@@ -86,7 +87,7 @@ async Task ServeAsync(Stream stream)
         }
 
         Request? request;
-        try { request = JsonSerializer.Deserialize<Request>(line, JsonOptions); }
+        try { request = JsonSerializer.Deserialize<Request>(line, jsonOptions); }
         catch (JsonException ex)
         {
             await SendAsync(new Response(null, false, $"Invalid JSON: {ex.Message}"));
@@ -136,4 +137,3 @@ record Response(string? Id, bool Ok, string? Error = null, long? Version = null,
     bool? Changed = null, int? NodeCount = null, bool? Found = null, ulong? Cost = null,
     ulong[]? Path = null);
 
-static partial class Placeholder { }
