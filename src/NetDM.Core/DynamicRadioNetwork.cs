@@ -129,6 +129,7 @@ public sealed class DynamicRadioNetwork(NetworkRuntime runtime)
                 return snapshot.Nodes.TryGetValue(id, out var node) ? node.Position : null;
             }
 
+            const int maxSpatialCandidatesPerNode = 128; // Conservative fail-fast density protection.
             var pairs = new HashSet<LinkPair>();
             foreach (var update in updates)
             {
@@ -141,10 +142,15 @@ public sealed class DynamicRadioNetwork(NetworkRuntime runtime)
                 if (ProfileOf(update.Id) is not { } profile || PositionOf(update.Id) is not { } origin)
                     continue;
 
+                var inspected = 0;
                 foreach (var candidate in Candidates(snapshot, origin, profile.Range, stagedCells))
                 {
-                    if (candidate != update.Id)
-                        pairs.Add(LinkPair.From(update.Id, candidate));
+                    if (candidate == update.Id) continue;
+                    if (++inspected > maxSpatialCandidatesPerNode)
+                        throw new InvalidOperationException(
+                            $"Radio density near node {update.Id} exceeds {maxSpatialCandidatesPerNode} candidate endpoints. " +
+                            "Use smaller radio range or a shared-medium radio domain.");
+                    pairs.Add(LinkPair.From(update.Id, candidate));
                 }
             }
 
@@ -297,6 +303,9 @@ public sealed class DynamicRadioNetwork(NetworkRuntime runtime)
     {
         var dx = (long)a.X - b.X;
         var dy = (long)a.Y - b.Y;
+        // Check signed magnitudes before squaring: extreme teleports may otherwise
+        // overflow Int64 and falsely resurrect an out-of-range link.
+        if (Math.Abs(dx) > range || Math.Abs(dy) > range) return false;
         return dx * dx + dy * dy <= (long)range * range;
     }
 
