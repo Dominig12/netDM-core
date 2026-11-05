@@ -625,3 +625,45 @@ already-running A* result then fails validation and cannot replace
 the progressed or delivered packet. Ticket ownership is released
 when the scheduled search completes; this preserves concurrency
 limits on the actual reroute executor.
+
+## M13: keep monotonic packet forwarding independent of route admission
+
+Previous work removed reroute CPU from the packet lock, yet forwarding
+still ran by submitting one Interactive task to the globally bounded
+`PriorityWorkScheduler`. Under the 12k-node open-loop workload this
+producer rejected many tick admissions, so packets missed most of
+their 100ms opportunities to progress.
+
+The default hopwise simulation now uses `PacketTickRunner`:
+
+1. Its own long-running worker aligns to the absolute
+   `Stopwatch.GetTimestamp()` clock, matching the producer's
+   global tick value.
+2. Every accepted wall-clock interval runs `Advance(currentTick)`
+   at most once. On a stall or long GC pause, it never replays old
+   ticks; skipped boundaries are counted and no artificial
+   multi-hop catch-up occurs.
+3. `RadioPacketTransport.Advance` has a soft 25ms wall-time budget
+   and a hard visit limit; after budget exhaustion the next packet
+   remains at the head of the FIFO for the following tick.
+4. Cancellation is signalled through the same benchmark token.
+   The host awaits the runner task **before** a suite stage resets
+   topology or releases ownership of the packet queue.
+5. A/B mode `dedicatedPacketTicks=false` retains the previous
+   shared-scheduler implementation for controlled comparisons.
+
+There is one new dedicated thread for a live hopwise benchmark, not
+one thread per packet. Reroute CPU continues on its own bounded
+`PriorityWorkScheduler` (previous M12 architecture).
+No packet-forwarding thread exists for legacy non-packet workloads.
+
+`PacketTickRunnerCounters`: executed ticks, skipped intervals,
+failed ticks, last tick, start-lag p95/max and execution p95.
+`PacketTransportCounters.TickBudgetStops` counts forwarding scans
+stopped early after reaching the soft per-tick work cap.
+
+**Limitations:** The thread has no guaranteed OS priority, affinity
+or real-time scheduling privileges. Whole-process saturation can
+still delay it; p95 execution includes wall-time waiting for locks.
+Do not interpret 10 ticks/sec as sufficient proof of low application
+latency. Collect packet first-hop p95 and delivered p95 too.

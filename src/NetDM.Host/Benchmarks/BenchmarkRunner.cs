@@ -22,7 +22,9 @@ public sealed record BenchmarkOptions(
     int PacketMaxAdvancesPerTick = 1024,
     int PacketRerouteWorkers = 1,
     int PacketRerouteQueueCapacity = 32,
-    int PacketRerouteCpuBudgetMs = 25)
+    int PacketRerouteCpuBudgetMs = 25,
+    bool DedicatedPacketTicks = true,
+    int PacketTickWorkBudgetMs = 25)
 {
     public void Validate()
     {
@@ -42,6 +44,8 @@ public sealed record BenchmarkOptions(
             throw new ArgumentOutOfRangeException(nameof(PacketRerouteQueueCapacity));
         if (PacketRerouteCpuBudgetMs is < 0 or > 100)
             throw new ArgumentOutOfRangeException(nameof(PacketRerouteCpuBudgetMs));
+        if (PacketTickWorkBudgetMs is < 1 or > 1000)
+            throw new ArgumentOutOfRangeException(nameof(PacketTickWorkBudgetMs));
         if (PacketTransportEnabled && (!WirelessEnabled || RadioModel != "shared"))
             throw new ArgumentException(
                 "Hop-by-hop packets require wireless Shared Medium mode.",
@@ -62,7 +66,8 @@ public sealed record BenchmarkState(
     double ElapsedSeconds, int WorldWidth, int WorldHeight, string? Error,
     RadioStats? Radio, SharedMediumStatistics? SharedMedium, BenchmarkLoadStats Load,
     PacketTransportCounters? PacketTransport,
-    WorkSchedulerCounters? RerouteScheduler);
+    WorkSchedulerCounters? RerouteScheduler,
+    PacketTickRunnerCounters? TickRunner);
 
 public sealed record BenchmarkSample(
     DateTimeOffset At, double ElapsedSeconds, double ActualRoutesPerSecond,
@@ -95,7 +100,10 @@ public sealed record BenchmarkSample(
     double RerouteWaitP95Ticks, double PacketForwardingP95Milliseconds,
     double PacketSkippedTicksPerSecond, double PacketTickAdmissionFailuresPerSecond,
     int RerouteCpuQueued, double RerouteCpuWaitP95Us,
-    double PacketFirstHopP50Ticks, double PacketFirstHopP95Ticks);
+    double PacketFirstHopP50Ticks, double PacketFirstHopP95Ticks,
+    double TickExecutedPerSecond, double TickRunnerSkippedPerSecond,
+    double TickBudgetStopsPerSecond, double TickStartLagP95Milliseconds,
+    double TickExecutionP95Milliseconds, long TickRunnerFailed);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -120,6 +128,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     private SharedMediumNetwork? _sharedMedium;
     private RadioPacketTransport? _packets;
     private PriorityWorkScheduler? _rerouteScheduler;
+    private PacketTickRunner? _tickRunner;
 
     public PacketTransportCounters? PacketStatistics
     {
@@ -137,7 +146,8 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
         lock (_gate)
             return new BenchmarkState(_status, _options, _started, _elapsed, _width, _height, _error,
                 _radioEngine?.Stats(), _sharedMedium?.Stats(), LoadStats(),
-                _packets?.Capture(), _rerouteScheduler?.Capture());
+                _packets?.Capture(), _rerouteScheduler?.Capture(),
+                _tickRunner?.Capture());
     }
 
     public BenchmarkSample[] History() => _history.ToArray();
@@ -194,6 +204,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             _sharedMedium = null;
             _packets = null;
             _rerouteScheduler = null;
+            _tickRunner = null;
             while (_history.TryDequeue(out _)) { }
             _task = Task.Run(() => RunAsync(options, _cts.Token));
             return true;
@@ -285,11 +296,15 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 ? new RadioPacketTransport(medium, new PacketTransportOptions(
                     MaxAgeTicks: options.PacketMaxAgeTicks,
                     MaxAdvancesPerTick: options.PacketMaxAdvancesPerTick,
-                    MaxConcurrentReroutes: options.PacketRerouteWorkers))
+                    MaxConcurrentReroutes: options.PacketRerouteWorkers,
+                    MaxTickWorkMilliseconds: options.PacketTickWorkBudgetMs))
                 : null;
             // Reroute computation is never executed while holding the packet
             // queue lock. A separate bounded CPU executor prevents it from
             // monopolizing the live routing scheduler or forwarding ticks.
+            var tickRunner = packets is not null && options.DedicatedPacketTicks
+                ? new PacketTickRunner(packets)
+                : null;
             await using var rerouteScheduler = packets is null ? null :
                 new PriorityWorkScheduler(new WorkSchedulerOptions(
                     Workers: options.PacketRerouteWorkers,
@@ -299,6 +314,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             {
                 _packets = packets;
                 _rerouteScheduler = rerouteScheduler;
+                _tickRunner = tickRunner;
                 _width = columns * 12;
                 _height = ((options.Nodes + columns - 1) / columns) * 12;
                 _radioEngine = radio;
@@ -315,7 +331,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 workers.Add(Task.Run(() => MutationWorkerAsync(options, positions, radio, medium, ct), ct));
             if (packets is not null)
             {
-                workers.Add(Task.Run(() => PacketWorkerAsync(packets, ct), ct));
+                workers.Add(tickRunner is null
+                    ? Task.Run(() => PacketWorkerAsync(packets, ct), ct)
+                    : tickRunner.Start(ct));
                 workers.Add(Task.Run(() => RerouteWorkerAsync(
                     packets, medium!, rerouteScheduler!, ct), ct));
             }
@@ -324,6 +342,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             var previousRadio = radio?.Stats();
             var previousMedium = medium?.Stats();
             var previousPackets = packets?.Capture();
+            var previousTickRunner = tickRunner?.Capture();
             var previousLoad = LoadStats();
             var previousTime = clock.Elapsed.TotalSeconds;
             var finishedNaturally = false;
@@ -337,6 +356,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 var radioSnapshot = radio?.Stats();
                 var mediumSnapshot = medium?.Stats();
                 var packetSnapshot = packets?.Capture();
+                var tickRunnerSnapshot = tickRunner?.Capture();
                 var rerouteCpuSnapshot = rerouteScheduler?.Capture();
                 var interval = Math.Max(0.001, seconds - previousTime);
                 var schedulerSnapshot = scheduler.Capture();
@@ -407,7 +427,16 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     rerouteCpuSnapshot?.Queued ?? 0,
                     rerouteCpuSnapshot?.QueueWaitP95Us ?? 0,
                     packetSnapshot?.FirstHopAgeP50Ticks ?? 0,
-                    packetSnapshot?.FirstHopAgeP95Ticks ?? 0);
+                    packetSnapshot?.FirstHopAgeP95Ticks ?? 0,
+                    ((tickRunnerSnapshot?.ExecutedTicks ?? 0) -
+                        (previousTickRunner?.ExecutedTicks ?? 0)) / interval,
+                    ((tickRunnerSnapshot?.SkippedIntervals ?? 0) -
+                        (previousTickRunner?.SkippedIntervals ?? 0)) / interval,
+                    ((packetSnapshot?.TickBudgetStops ?? 0) -
+                        (previousPackets?.TickBudgetStops ?? 0)) / interval,
+                    tickRunnerSnapshot?.StartLagP95Milliseconds ?? 0,
+                    tickRunnerSnapshot?.ExecutionP95Milliseconds ?? 0,
+                    tickRunnerSnapshot?.FailedTicks ?? 0);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;
@@ -415,6 +444,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 previousRadio = radioSnapshot;
                 previousMedium = mediumSnapshot;
                 previousPackets = packetSnapshot;
+                previousTickRunner = tickRunnerSnapshot;
                 previousLoad = loadSnapshot;
                 previousTime = seconds;
                 if (seconds >= options.DurationSeconds) { finishedNaturally = true; break; }

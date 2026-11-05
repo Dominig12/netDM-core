@@ -19,7 +19,8 @@ public sealed record PacketTransportOptions(
     int MaxAdvancesPerTick = 1024,
     int NoRouteRetryDelayTicks = 3,
     int MaxPendingReroutes = 64,
-    int MaxConcurrentReroutes = 2)
+    int MaxConcurrentReroutes = 2,
+    int MaxTickWorkMilliseconds = 25)
 {
     public void Validate()
     {
@@ -37,6 +38,8 @@ public sealed record PacketTransportOptions(
             throw new ArgumentOutOfRangeException(nameof(MaxPendingReroutes));
         if (MaxConcurrentReroutes is < 1 or > 32 || MaxConcurrentReroutes > MaxPendingReroutes)
             throw new ArgumentOutOfRangeException(nameof(MaxConcurrentReroutes));
+        if (MaxTickWorkMilliseconds is < 1 or > 1000)
+            throw new ArgumentOutOfRangeException(nameof(MaxTickWorkMilliseconds));
     }
 }
 
@@ -58,7 +61,7 @@ public sealed record PacketTransportCounters(
     long SkippedTicks, long TickAdmissionFailures,
     double ForwardingP95Milliseconds,
     double FirstHopAgeP50Ticks, double FirstHopAgeP95Ticks,
-    long FirstHopSamples);
+    long FirstHopSamples, long TickBudgetStops);
 
 /// <summary>
 /// Bounded round-robin store-and-forward. Advance never calculates a route:
@@ -103,6 +106,7 @@ public sealed class RadioPacketTransport
     private long _rerouteCompleted, _rerouteCancelled, _rerouteQueueDeferrals;
     private long _rerouteSchedulerRejections, _skippedTicks, _tickAdmissionFailures;
     private long _rerouteSampleCount, _forwardSampleCount, _firstHopSampleCount;
+    private long _tickBudgetStops;
     private long _lastTick = -1, _nextPacketId, _nextRequestId;
     private int _peak;
 
@@ -150,7 +154,7 @@ public sealed class RadioPacketTransport
                 _rerouteSchedulerRejections, Percentile(rerouteAges, .95),
                 _skippedTicks, _tickAdmissionFailures, Percentile(forwardUs, .95) / 1000.0,
                 Percentile(firstHopAges, .5), Percentile(firstHopAges, .95),
-                _firstHopSampleCount);
+                _firstHopSampleCount, _tickBudgetStops);
         }
     }
 
@@ -194,6 +198,11 @@ public sealed class RadioPacketTransport
         ArgumentOutOfRangeException.ThrowIfNegative(tick);
         cancellationToken.ThrowIfCancellationRequested();
         var started = Stopwatch.GetTimestamp();
+        // Soft per-tick CPU/wall execution limit. We never preempt a single
+        // hop, but after at least one visit we stop rotating the queue when
+        // the budget has elapsed. Unvisited packets retain their FIFO order.
+        var deadline = started + Math.Max(1L,
+            (long)_settings.MaxTickWorkMilliseconds * Stopwatch.Frequency / 1_000);
         lock (_gate)
         {
             if (tick <= _lastTick) return 0;
@@ -205,6 +214,11 @@ public sealed class RadioPacketTransport
             for (var i = 0; i < count; i++)
             {
                 if (cancellationToken.IsCancellationRequested) break;
+                if (i > 0 && Stopwatch.GetTimestamp() >= deadline)
+                {
+                    _tickBudgetStops++;
+                    break;
+                }
                 var packet = _queue.Dequeue();
                 if (tick - packet.CreatedTick >= _settings.MaxAgeTicks)
                 {

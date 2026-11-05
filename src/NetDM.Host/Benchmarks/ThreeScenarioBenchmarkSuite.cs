@@ -25,7 +25,9 @@ public sealed record ThreeScenarioSuiteOptions(
     int PacketMaxAdvancesPerTick = 1024,
     int PacketRerouteWorkers = 1,
     int PacketRerouteQueueCapacity = 32,
-    int PacketRerouteCpuBudgetMs = 25)
+    int PacketRerouteCpuBudgetMs = 25,
+    bool DedicatedPacketTicks = true,
+    int PacketTickWorkBudgetMs = 25)
 {
     public void Validate()
     {
@@ -48,7 +50,9 @@ public sealed record ThreeScenarioSuiteOptions(
             PacketMaxAdvancesPerTick: PacketMaxAdvancesPerTick,
             PacketRerouteWorkers: PacketRerouteWorkers,
             PacketRerouteQueueCapacity: PacketRerouteQueueCapacity,
-            PacketRerouteCpuBudgetMs: PacketRerouteCpuBudgetMs);
+            PacketRerouteCpuBudgetMs: PacketRerouteCpuBudgetMs,
+            DedicatedPacketTicks: DedicatedPacketTicks,
+            PacketTickWorkBudgetMs: PacketTickWorkBudgetMs);
 }
 
 public sealed record ScenarioResultSummary(
