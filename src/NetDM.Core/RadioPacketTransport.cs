@@ -176,8 +176,19 @@ public sealed class RadioPacketTransport
                         _reroutes++;
                         // Recompute from the *actual current* node; never
                         // teleport to the original source after a broken hop.
-                        var candidate = _network.Route(current, packet.Destination,
-                            cancellationToken: cancellationToken);
+                        RouteResult candidate;
+                        try
+                        {
+                            candidate = _network.Route(current, packet.Destination,
+                                cancellationToken: cancellationToken);
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            // A cancelled tick must not silently lose the
+                            // packet popped from the bounded queue.
+                            _queue.Enqueue(packet);
+                            break;
+                        }
                         if (!candidate.Found || candidate.Path.Count == 0 ||
                             candidate.Path[0] != current ||
                             candidate.Path[^1] != packet.Destination)
