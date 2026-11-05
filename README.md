@@ -227,3 +227,19 @@ Example configuration for the live bench API:
 ```json
 {"nodes":2500,"routesPerSecond":300,"movesPerSecond":250,"linkChangesPerSecond":40,"durationSeconds":60,"seed":1337,"wirelessEnabled":true,"radioRange":14}
 ```
+
+### Radio density and overload limits
+
+Automatic radio links are currently individual pairwise edges, not
+shared-medium broadcast domains. The core therefore **fails safely** if a
+radio update sees more than 128 candidate endpoints in its proximity cells,
+rather than constructing an unbounded clique that could exhaust memory.
+
+The overload condition does not publish partial topology or radio ownership
+changes; it surfaces as an error in the simulator. For dense SS13 environments,
+the production design should replace pairwise radio visibility with
+**radio-domain/group routing**, with transmission contention modeled separately.
+Do not treat the 128-candidate threshold as a gameplay rule.
+
+Long-running radio discovery accepts a `CancellationToken`; cancellation
+before the graph commit leaves the current topology unchanged.

@@ -250,3 +250,16 @@ The `wirelessEnabled` benchmark option creates actual proximity edges and
 simulates radio outages by toggling profiles, as well as independent
 position changes. Observatory counters and the topology visualizer derive
 from the resulting graph, not a UI-only approximation.
+
+### Failure and cancellation contracts
+
+The current radio layer implements a conservative per-updated-endpoint
+**128 candidate** fail-fast ceiling to guard against unbounded pairwise radio
+cliques. The threshold is an implementation safeguard, not the eventual
+per-channel capacity or realistic RF topology.
+
+The planning phase checks cancellation; no partial graph changes or radio
+ledger mutations are published if planning is aborted. The graph commit
+and ownership ledger update are intentionally non-cancellable after
+commit begins. Range checks avoid squared-distance overflow for teleports
+between extreme 32-bit map coordinates.

@@ -76,12 +76,73 @@ for (var i = 0; i < 250; i++)
 Task.WaitAll(tasks);
 Check(errors.IsEmpty);
 
+CheckRadioSafety();
 CheckWirelessTopology();
 CheckRadioOracle();
 CheckRoutingEquivalence();
 CheckRouteCacheBudgets();
 Console.WriteLine("All netDM-core smoke tests passed.");
 
+
+
+static void CheckRadioSafety()
+{
+    // Fast-fail density admission: 130 devices sharing one cell cannot
+    // accidentally create a quadratic radio clique.
+    var dense = new NetworkRuntime();
+    var radio = new DynamicRadioNetwork(dense);
+    dense.Apply(Enumerable.Range(1, 130)
+        .Select(i => new TopologyChange(TopologyOperation.AddNode,
+            new NodeId((ulong)i), Position: new NodePosition(0, 0))).ToArray());
+    var version = dense.Topology.Snapshot.Version;
+    var rejectedDensity = false;
+    try
+    {
+        radio.Update(Enumerable.Range(1, 130)
+            .Select(i => new RadioNodeUpdate(new NodeId((ulong)i),
+                Profile: new RadioProfile(15, 1), ChangeProfile: true)).ToArray());
+    }
+    catch (InvalidOperationException) { rejectedDensity = true; }
+    Check(rejectedDensity);
+    Check(dense.Topology.Snapshot.Version == version);
+    Check(radio.Stats().ActiveWirelessLinks == 0);
+    Check(radio.Stats().ConfiguredNodes == 0);
+
+    var runtime = new NetworkRuntime();
+    var manager = new DynamicRadioNetwork(runtime);
+    var a = new NodeId(1); var b = new NodeId(2);
+    runtime.Apply([
+        new TopologyChange(TopologyOperation.AddNode, a, Position: new NodePosition(0, 0)),
+        new TopologyChange(TopologyOperation.AddNode, b, Position: new NodePosition(10, 0))
+    ]);
+    manager.Update([
+        new RadioNodeUpdate(a, Profile: new RadioProfile(15, 1), ChangeProfile: true),
+        new RadioNodeUpdate(b, Profile: new RadioProfile(15, 1), ChangeProfile: true)
+    ]);
+    Check(runtime.Route(a, b).Found);
+
+    // A previously connected neighbor can teleport to the Int32 extrema.
+    // Squaring this delta without a magnitude check overflows Int64.
+    manager.Update([new RadioNodeUpdate(b,
+        Position: new NodePosition(int.MinValue, int.MinValue))]);
+    Check(!runtime.Route(a, b).Found);
+    manager.Update([new RadioNodeUpdate(b,
+        Position: new NodePosition(int.MaxValue, int.MaxValue))]);
+    Check(!runtime.Route(a, b).Found);
+
+    using var cancelled = new CancellationTokenSource();
+    cancelled.Cancel();
+    var lastVersion = runtime.Topology.Snapshot.Version;
+    var wasCancelled = false;
+    try
+    {
+        manager.Update([new RadioNodeUpdate(b,
+            Position: new NodePosition(1, 1))], cancelled.Token);
+    }
+    catch (OperationCanceledException) { wasCancelled = true; }
+    Check(wasCancelled);
+    Check(runtime.Topology.Snapshot.Version == lastVersion);
+}
 
 static void CheckWirelessTopology()
 {
