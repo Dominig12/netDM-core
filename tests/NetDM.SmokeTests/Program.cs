@@ -944,6 +944,26 @@ static void CheckRadioAStar()
     });
     Check(mismatches.IsEmpty);
 
+    // A single-threaded repeatable micro-probe reports thread-local
+    // allocations without hard-coding machine-specific latency targets.
+    // A subsequent 12k-node hardware run remains the performance authority.
+    const int samples = 32;
+    for (int i = 0; i < 4; i++)
+    {
+        _ = SharedMediumNetwork.RouteAStarCore(pinned, start, end, 14, 8);
+        _ = SharedMediumNetwork.RouteAStarPooledCore(pinned, start, end, 14, 8);
+    }
+    long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+    for (int i = 0; i < samples; i++)
+        _ = SharedMediumNetwork.RouteAStarCore(pinned, start, end, 14, 8);
+    long originalAllocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+    allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+    for (int i = 0; i < samples; i++)
+        _ = SharedMediumNetwork.RouteAStarPooledCore(pinned, start, end, 14, 8);
+    long pooledAllocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+    Console.WriteLine($"Radio A* allocations per route, 900 nodes: original={originalAllocated / samples:N0} B, pooled={pooledAllocated / samples:N0} B");
+    Check(pooledAllocated < originalAllocated);
+
     // A cancellation must release a cleared workspace. Following queries
     // must still produce exact results instead of reusing partial distances.
     using var cancelled = new CancellationTokenSource();
