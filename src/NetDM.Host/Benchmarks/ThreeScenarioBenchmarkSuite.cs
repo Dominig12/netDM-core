@@ -183,6 +183,7 @@ public sealed class ThreeScenarioBenchmarkSuite(
                 }
 
                 var workload = options.Build(moves, outages);
+                var schedulerBefore = scheduler.Capture();
                 if (!benchmark.Start(workload, fromSuite: true))
                     throw new InvalidOperationException("Failed to start suite scenario " + number);
                 await benchmark.AwaitCompletionAsync(cancellationToken);
@@ -194,6 +195,7 @@ public sealed class ThreeScenarioBenchmarkSuite(
                         (state.Error is null ? "" : ": " + state.Error));
 
                 var snapshot = runtime.Topology.Snapshot;
+                var schedulerAfter = scheduler.Capture();
                 var exportedAt = DateTimeOffset.UtcNow;
                 // Keep the same top-level envelope as the manual Observatory
                 // JSON export: exportedAt, metrics, history, topology.
@@ -206,7 +208,16 @@ public sealed class ThreeScenarioBenchmarkSuite(
                         parameters = options, movesPerSecond = moves,
                         linkChangesPerSecond = outages,
                         generator = "open-loop",
-                        completed = true
+                        schemaVersion = 1,
+                        completed = true,
+                        schedulerDelta = new
+                        {
+                            accepted = schedulerAfter.Accepted - schedulerBefore.Accepted,
+                            rejected = schedulerAfter.Rejected - schedulerBefore.Rejected,
+                            completed = schedulerAfter.Completed - schedulerBefore.Completed,
+                            cancelled = schedulerAfter.Cancelled - schedulerBefore.Cancelled,
+                            failed = schedulerAfter.Failed - schedulerBefore.Failed
+                        }
                     },
                     metrics = new
                     {
@@ -270,12 +281,18 @@ public sealed class ThreeScenarioBenchmarkSuite(
         {
             // Never release exclusive benchmark ownership while a previous
             // workload can still mutate/reset the shared runtime.
-            if (benchmark.State().Status is "building" or "running" or "stopping")
+            try
             {
-                benchmark.Stop(fromSuite: true);
-                await benchmark.AwaitCompletionAsync();
+                if (benchmark.State().Status is "building" or "running" or "stopping")
+                {
+                    benchmark.Stop(fromSuite: true);
+                    await benchmark.AwaitCompletionAsync();
+                }
             }
-            benchmark.ReleaseSuite();
+            finally
+            {
+                benchmark.ReleaseSuite();
+            }
         }
     }
 }
