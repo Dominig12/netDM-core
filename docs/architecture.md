@@ -208,3 +208,58 @@ Note: the current comparison uses one query worker and isolates its
 synthetic graph from the live network, but competes for process CPU
 and memory if some other workload is started independently. It is intended
 for algorithm selection before integration, not for hard latency guarantees.
+
+## Incremental spatial-radio topology (M3 foundation)
+
+`DynamicRadioNetwork` is an **optional domain service** above the
+`NetworkRuntime`. It owns auto-discovered radio links, radio profiles and
+registered cable links; `TopologyStore` remains a generic undirected graph.
+
+For a movement/profile-update batch:
+
+1. Validate all node IDs, positions and radio profiles against the currently
+   published graph and reject duplicate updates.
+2. Stage desired new positions/profiles without modifying the current graph.
+3. For each changed endpoint, enumerate its *previous radio neighbors* plus
+   candidate nodes from the immutable spatial cell index near the **new**
+   endpoint position. Include cells staged for concurrently moved endpoints.
+4. Evaluate mutual radio reachability from the final intended positions:
+   `same channel && same Z && distance <= min(rangeA, rangeB)`.
+5. Merge radio links with explicitly registered physical cables, using the
+   smaller available cost for overlapping links. Generate only effective
+   connect/disconnect/cost changes.
+6. Submit all movements + link deltas as **one atomic graph batch**. Only on
+   success update radio link ownership and neighbor indexes.
+
+There is no full graph scan in the movement hot path. The spatial cells
+limit discovery to nearby nodes, while the prior adjacency index ensures
+old links that leave range are removed. No radio profile -> no auto links.
+Node removal cleans radio and cable ownership to permit later ID reuse.
+
+**Important current limits**: discovery models 2-D circles on a single
+Z-plane, ignores walls and physics, supports up to 128 spatial units per radio,
+and assumes one domain service owns its managed edges. Large overlapping
+broadcast areas still produce potentially quadratic physical links; this
+requires an explicit radio-density admission policy or shared-medium model
+before production. Initialization of many radio nodes currently publishes a
+node snapshot before publishing their auto-links; it is only used during
+benchmark startup, before workload readers begin. A production world
+lifecycle manager must construct these changes transactionally.
+
+The `wirelessEnabled` benchmark option creates actual proximity edges and
+simulates radio outages by toggling profiles, as well as independent
+position changes. Observatory counters and the topology visualizer derive
+from the resulting graph, not a UI-only approximation.
+
+### Failure and cancellation contracts
+
+The current radio layer implements a conservative per-updated-endpoint
+**128 candidate** fail-fast ceiling to guard against unbounded pairwise radio
+cliques. The threshold is an implementation safeguard, not the eventual
+per-channel capacity or realistic RF topology.
+
+The planning phase checks cancellation; no partial graph changes or radio
+ledger mutations are published if planning is aborted. The graph commit
+and ownership ledger update are intentionally non-cancellable after
+commit begins. Range checks avoid squared-distance overflow for teleports
+between extreme 32-bit map coordinates.

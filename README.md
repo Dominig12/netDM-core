@@ -187,3 +187,59 @@ workflows once the workflow file is available on the repository default branch.
 Until then use the PowerShell script or run the workflow from a supported ref.
 
 CI also runs a small profile-script smoke test on both Linux and Windows.
+
+## Dynamic proximity topology (experimental)
+
+The `DynamicRadioNetwork` engine derives **actual network edges** from node
+positions rather than drawing imaginary connections. In the Observatory,
+choose **RADIO · Dynamic proximity** and configure `Radio range` (default 14
+world units with nodes spaced 12 units apart). During the live test:
+
+- Both endpoints must have enabled radio profiles on the same nonzero channel.
+- Radio connections are **mutual**: same Z-level, distance no more than the
+  smaller endpoint's configured range.
+- A movement batch rechecks previous radio neighbors and indexed candidates
+  near the *new* position. All changes are published with node moves in one
+  immutable topology snapshot.
+- Automatic edge creation/removal increments connectivity version and
+  invalidates stale route results; movement with unchanged connectivity
+  preserves route cache reuse.
+- Registered **cable links** survive wireless disconnect/reconfiguration;
+  if both a radio and cable link exist, the lower routing cost wins.
+- Runtime metrics include current radio edges, cumulative created/removed links
+  and per-second link churn. The map is generated from the **actual graph**.
+
+The simulator's `linkChangesPerSecond` setting switches between radio on/off
+events in radio mode; in wired mode it continues to create/remove synthetic
+optional links. These workloads simulate **logical signal reachability**, not
+radio wave propagation, walls/obstacles, interference, packet bandwidth,
+authentication, power consumption, or server-side physical effects.
+
+The radio subsystem is intentionally a separate component from the base graph.
+The underlying graph can still be used for wired-only or custom gameplay
+rules. **One logical owner per managed edge** is required: when using
+`DynamicRadioNetwork`, create cables through `SetCable` and changes to
+radio profiles/positions through `Update`, rather than writing their edges
+directly to `TopologyStore`.
+
+Example configuration for the live bench API:
+
+```json
+{"nodes":2500,"routesPerSecond":300,"movesPerSecond":250,"linkChangesPerSecond":40,"durationSeconds":60,"seed":1337,"wirelessEnabled":true,"radioRange":14}
+```
+
+### Radio density and overload limits
+
+Automatic radio links are currently individual pairwise edges, not
+shared-medium broadcast domains. The core therefore **fails safely** if a
+radio update sees more than 128 candidate endpoints in its proximity cells,
+rather than constructing an unbounded clique that could exhaust memory.
+
+The overload condition does not publish partial topology or radio ownership
+changes; it surfaces as an error in the simulator. For dense SS13 environments,
+the production design should replace pairwise radio visibility with
+**radio-domain/group routing**, with transmission contention modeled separately.
+Do not treat the 128-candidate threshold as a gameplay rule.
+
+Long-running radio discovery accepts a `CancellationToken`; cancellation
+before the graph commit leaves the current topology unchanged.
