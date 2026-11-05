@@ -10,12 +10,11 @@ namespace NetDM.Host.Transport;
 /// Routing has global admission control, so unbounded client requests cannot create
 /// unbounded routing tasks. One connection never writes concurrently to its stream.
 /// </summary>
-public sealed class PipeHostedService(NetworkRuntime runtime, ILogger<PipeHostedService> log)
+public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkScheduler scheduler,
+    ILogger<PipeHostedService> log)
     : BackgroundService
 {
     private readonly SemaphoreSlim _connectionSlots = new(16, 16);
-    private readonly SemaphoreSlim _routeSlots = new(
-        Math.Clamp(Environment.ProcessorCount, 1, 8), Math.Clamp(Environment.ProcessorCount, 1, 8));
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private const int MaxMessageChars = 64 * 1024;
 
@@ -56,7 +55,8 @@ public sealed class PipeHostedService(NetworkRuntime runtime, ILogger<PipeHosted
         await using var writer = new StreamWriter(stream, new UTF8Encoding(false), 4096, leaveOpen: true)
             { AutoFlush = true };
         using var writeGate = new SemaphoreSlim(1, 1);
-        var tasks = new List<Task>(16);
+        using var disconnect = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var tasks = new List<Task>(64);
 
         async Task SendAsync(PipeResponse result)
         {
@@ -89,29 +89,21 @@ public sealed class PipeHostedService(NetworkRuntime runtime, ILogger<PipeHosted
 
             if (request.Op == "route")
             {
-                if (!await _routeSlots.WaitAsync(0, token))
+                // No per-request routing Task.Run: the process-wide scheduler owns
+                // CPU admission and worker concurrency for both players and benchmarks.
+                tasks.RemoveAll(t => t.IsCompleted);
+                if (tasks.Count >= 64 ||
+                    !scheduler.TrySchedule(
+                        ct => runtime.Route(new NodeId(request.A), new NodeId(request.B),
+                            cancellationToken: ct),
+                        WorkPriority.Interactive, disconnect.Token,
+                        out Task<RouteResult>? scheduled))
                 {
                     await SendAsync(new PipeResponse(request.Id, false, "busy"));
                     continue;
                 }
-                // Route tasks are admitted globally; only a small bounded set
-                // of completed/in-flight tasks lives in each connection.
-                tasks.RemoveAll(t => t.IsCompleted);
-                tasks.Add(Task.Run(async () =>
-                {
-                    try
-                    {
-                        var route = runtime.Route(new NodeId(request.A), new NodeId(request.B), cancellationToken: token);
-                        await SendAsync(new PipeResponse(
-                            request.Id, true, Version: route.Version, Found: route.Found,
-                            Cost: route.Cost, Path: route.Path.Select(n => n.Value).ToArray()));
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        await SendAsync(new PipeResponse(request.Id, false, ex.Message));
-                    }
-                    finally { _routeSlots.Release(); }
-                }, CancellationToken.None));
+
+                tasks.Add(SendRouteAsync(scheduled!, request.Id));
                 continue;
             }
 
@@ -133,7 +125,31 @@ public sealed class PipeHostedService(NetworkRuntime runtime, ILogger<PipeHosted
             }
         }
 
-        await Task.WhenAll(tasks);
+        disconnect.Cancel(); // Disconnect must cancel work still in the global queue.
+        try { await Task.WhenAll(tasks); }
+        catch (OperationCanceledException) { }
+        catch (IOException) { }
+
+        async Task SendRouteAsync(Task<RouteResult> scheduled, string? id)
+        {
+            try
+            {
+                var route = await scheduled;
+                if (!disconnect.IsCancellationRequested)
+                    await SendAsync(new PipeResponse(
+                        id, true, Version: route.Version, Found: route.Found,
+                        Cost: route.Cost, Path: route.Path.Select(n => n.Value).ToArray()));
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) when (ex is not IOException)
+            {
+                if (!disconnect.IsCancellationRequested)
+                {
+                    try { await SendAsync(new PipeResponse(id, false, ex.Message)); }
+                    catch (IOException) { } // Client closed its pipe.
+                }
+            }
+        }
     }
 
     private PipeResponse Stats(PipeRequest request)
