@@ -207,7 +207,7 @@ mapCanvas.addEventListener("wheel",event=>{
 $("fit").addEventListener("click",fitMap);
 const observe=new ResizeObserver(()=>{drawMap();drawCharts();drawSchedulerCharts();drawComparisonPlot();});
 observe.observe(frame);
-for(const id of ["routes-chart","latency-chart","memory-chart","links-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
+for(const id of ["routes-chart","latency-chart","memory-chart","links-chart","reachability-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
 
 function plot(id,series,color,extra){
   const canvas=$(id),{ctx,w,h}=resizeCanvas(canvas);
@@ -234,6 +234,20 @@ function drawCharts(){
     {values:history.map(x=>x.p99Us),color:"#f3a572",width:1.3}
   ],"#5bd5db");
   plot("memory-chart",[{values:history.map(x=>x.managedBytes/1048576),color:"#87a5ff"}],"#87a5ff");
+  plot("reachability-chart",[
+    {values:history.map(x=>x.foundPercent||0),color:"#56dfbc"}
+  ],"#56dfbc");
+  plot("rejections-chart",[
+    {values:history.map(x=>x.rejectedTooLargePerSecond||0),color:"#f19f72"},
+    {values:history.map(x=>x.rejectedCapacityPerSecond||0),color:"#e76373"},
+    {values:history.map(x=>x.rejectedStalePerSecond||0),color:"#689eff"},
+    {values:history.map(x=>(x.rejectedInvalidPerSecond||0)+(x.rejectedOldTickPerSecond||0)),color:"#9d86dd"}
+  ],"#f19f72");
+  $("chart-reachability").textContent=last?format(last.foundPercent||0)+"%":"—";
+  $("chart-radio-reasons").textContent=last
+    ? format((last.rejectedTooLargePerSecond||0)+(last.rejectedCapacityPerSecond||0)+
+             (last.rejectedStalePerSecond||0)+(last.rejectedInvalidPerSecond||0)+
+             (last.rejectedOldTickPerSecond||0))+"/s":"—";
   const shared=currentMetrics?.benchmark?.options?.radioModel==="shared";
   const accepted=history.map(x=>x.acceptedTransfersPerSecond||0);
   const rejected=history.map(x=>x.rejectedTransfersPerSecond||0);
