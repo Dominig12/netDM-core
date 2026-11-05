@@ -420,8 +420,8 @@ static void CheckPacketTransport()
     Check(stats.MeanDeliveredHops == 2);
     Check(stats.QueueFullRejections == 1);
 
-    // A disconnected hop waits for recovery, but retries and TTL remain
-    // finite so a permanently isolated endpoint cannot fill memory forever.
+    // A broken link only creates a *ticket*. No route computation is done
+    // inside Advance or while the packet queue lock is owned.
     var (broken, original) = MakeChain(600);
     var disconnected = new RadioPacketTransport(broken,
         new PacketTransportOptions(MaxReroutes:2));
@@ -429,16 +429,32 @@ static void CheckPacketTransport()
     Check(disconnected.Advance(1)==1);
     broken.Update([new RadioNodeUpdate(new NodeId(3),Profile:null,
         ChangeProfile:true)]);
-    disconnected.Advance(2);
+    Check(disconnected.Advance(2)==0);
     Check(disconnected.Capture().Dropped==0);
+    Check(disconnected.Capture().RerouteQueued==1);
+    Check(disconnected.Capture().Reroutes==0);
+    Check(disconnected.TryTakeReroute(out var ticket1));
+    Check(ticket1.Source==new NodeId(2) && ticket1.Destination==new NodeId(3));
+    Check(disconnected.Capture().RerouteInFlight==1);
+    // Other packets still enter while a broken route is being calculated.
+    Check(disconnected.Enqueue(broken.Route(new NodeId(1),new NodeId(2)),100,2));
+    Check(disconnected.CompleteReroute(ticket1,
+        broken.Route(ticket1.Source,ticket1.Destination)));
     Check(disconnected.Capture().NoRouteDeferrals==1);
-    for (var tick=3; tick<=10; tick++) disconnected.Advance(tick);
+    for (var tick=3; tick<=10; tick++)
+    {
+        disconnected.Advance(tick);
+        if (disconnected.TryTakeReroute(out var next))
+            Check(disconnected.CompleteReroute(next,
+                broken.Route(next.Source,next.Destination)));
+    }
     Check(disconnected.Capture().Dropped==1);
     Check(disconnected.Capture().LinkFailureDrops==1);
     Check(disconnected.Capture().Reroutes==2);
-    Check(disconnected.Capture().Delivered==0);
+    Check(disconnected.Capture().Delivered==1);
 
-    // Transient outages can heal before the next scheduled reroute.
+    // A cancelled search returns ownership to its packet. When the radio
+    // recovers, the old route can resume without additional route searches.
     var (recovering, recoveringRoute) = MakeChain(600);
     var recovery = new RadioPacketTransport(recovering,
         new PacketTransportOptions(MaxReroutes:3, NoRouteRetryDelayTicks:2));
@@ -447,15 +463,50 @@ static void CheckPacketTransport()
     recovering.Update([new RadioNodeUpdate(new NodeId(3),
         Profile:null, ChangeProfile:true)]);
     Check(recovery.Advance(2)==0);
+    Check(recovery.TryTakeReroute(out var cancelTicket));
+    Check(recovery.CancelReroute(cancelTicket));
+    Check(recovery.Capture().RerouteCancelled==1);
     recovering.Update([new RadioNodeUpdate(new NodeId(3),
         Profile:new RadioProfile(14,1,8),ChangeProfile:true)]);
-    Check(recovery.Advance(3)==0);
-    // Once a previously broken hop becomes valid, it can be sent directly
-    // without spending a second search after the retry backoff.
-    Check(recovery.Advance(4)==1);
-    Check(recovery.Advance(5)==0);
+    Check(recovery.Advance(3)==1);
     Check(recovery.Capture().Delivered==1);
     Check(recovery.Capture().Dropped==0);
+
+    // Pending reroute admission remains finite. If full, the additional
+    // broken packet stays queued and retries later instead of blocking.
+    var (limitedMedium, limitedPath)=MakeChain(600);
+    var limited=new RadioPacketTransport(limitedMedium,new PacketTransportOptions(
+        MaxPendingReroutes:1, MaxConcurrentReroutes:1, MaxAdvancesPerTick:3));
+    Check(limited.Enqueue(limitedPath,200,0));
+    Check(limited.Enqueue(limitedPath,200,0));
+    Check(limited.Advance(1)==2);
+    limitedMedium.Update([new RadioNodeUpdate(new NodeId(3),
+        Profile:null,ChangeProfile:true)]);
+    limited.Advance(2);
+    Check(limited.Capture().RerouteQueued==1);
+    Check(limited.Capture().RerouteQueueDeferrals==1);
+    Check(limited.Capture().Queued==2);
+    Check(limited.TryTakeReroute(out var limitedTicket));
+    Check(!limited.TryTakeReroute(out _)); // in-flight quota
+    Check(limited.CancelReroute(limitedTicket,schedulerRejected:true));
+    Check(limited.Capture().RerouteSchedulerRejections==1);
+
+    // An expensive search can finish after the packet expires. Its stale
+    // completion MUST NOT resurrect a dead packet.
+    var (expiredMedium, expiredRoute)=MakeChain(600);
+    var expired=new RadioPacketTransport(expiredMedium,new PacketTransportOptions(
+        MaxAgeTicks:3,MaxPendingReroutes:1,MaxConcurrentReroutes:1));
+    Check(expired.Enqueue(expiredRoute,300,0));
+    Check(expired.Advance(1)==1);
+    expiredMedium.Update([new RadioNodeUpdate(new NodeId(3),
+        Profile:null,ChangeProfile:true)]);
+    expired.Advance(2);
+    Check(expired.TryTakeReroute(out var expiredTicket));
+    expired.Advance(3);
+    Check(expired.Capture().Expired==1 && expired.Capture().Queued==0);
+    Check(!expired.CompleteReroute(expiredTicket,expiredRoute));
+    Check(expired.Capture().Delivered==0);
+    Check(expired.Capture().RerouteInFlight==0);
 
     // A physical cable can restore the missing hop while a packet is
     // already en route. The final hop uses the cable, not shared airtime.
