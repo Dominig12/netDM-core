@@ -83,6 +83,7 @@ CheckSharedMediumOracle();
 CheckRadioAStar();
 CheckDenseRadioAStar();
 CheckPacketTransport();
+CheckAdaptivePacketTransport();
 CheckRerouteAdaptiveBackoff();
 await CheckDedicatedPacketTicksAsync();
 CheckSpatialRadioAirtime();
@@ -572,6 +573,119 @@ static void CheckPacketTransport()
     Check(ttlQueue.Enqueue(same,100,2));
     ttlQueue.Advance(3);
     Check(ttlQueue.Capture().Delivered==1);
+}
+
+static void CheckAdaptivePacketTransport()
+{
+    static (SharedMediumNetwork Medium, RouteResult Route) MakeTwoNodes()
+    {
+        var runtime = new NetworkRuntime();
+        runtime.Apply([
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+                Position:new NodePosition(0,0)),
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+                Position:new NodePosition(10,0))
+        ]);
+        var medium = new SharedMediumNetwork(runtime, bytesPerTick:1_000_000);
+        medium.Update([
+            new RadioNodeUpdate(new NodeId(1),
+                Profile:new RadioProfile(14,1,8),ChangeProfile:true),
+            new RadioNodeUpdate(new NodeId(2),
+                Profile:new RadioProfile(14,1,8),ChangeProfile:true)
+        ]);
+        var route = medium.Route(new NodeId(1), new NodeId(2));
+        Check(route.Found && route.Path.Count==2);
+        return (medium,route);
+    }
+
+    var (radio,route) = MakeTwoNodes();
+    var admission = new RadioPacketTransport(radio, new PacketTransportOptions(
+        Capacity:2,MaxAdvancesPerTick:2));
+    var lease1 = admission.TryReserveAdmission();
+    var lease2 = admission.TryReserveAdmission();
+    Check(lease1 is not null && lease2 is not null);
+    Check(admission.TryReserveAdmission() is null);
+    Check(!admission.Enqueue(route,1,0)); // Cannot steal a reserved slot.
+    Check(admission.Capture().PreRouteBackpressureRejections==1);
+    Check(admission.Capture().ReservedAdmissions==2);
+    lease1.Dispose();
+    lease1.Dispose(); // Must not double-release.
+    Check(admission.Capture().ReservedAdmissions==1);
+    Check(admission.Enqueue(route,1,0)); // Unreserved free slot.
+    Check(admission.EnqueueReserved(route,1,0,lease2));
+    lease2.Dispose(); // Consumed lease is now inert.
+    Check(admission.Capture().ReservedAdmissions==0);
+    Check(admission.Capture().Enqueued==2);
+    Check(admission.TryReserveAdmission() is null);
+    Check(admission.Advance(1)==2);
+    Check(admission.Capture().Delivered==2);
+
+    var (failedRadio,failedRoute) = MakeTwoNodes();
+    var failed = new RadioPacketTransport(failedRadio,
+        new PacketTransportOptions(Capacity:1));
+    var invalidLease = failed.TryReserveAdmission();
+    Check(invalidLease is not null);
+    Check(!failed.EnqueueReserved(RouteResult.Missing(
+        failedRadio.Snapshot.Version),1,0,invalidLease));
+    invalidLease.Dispose();
+    Check(failed.Capture().ReservedAdmissions==0);
+    Check(failed.Capture().InvalidRejections==1);
+    // A route cancelled BEFORE it executes simply disposes the lease.
+    using(var cancelLease = failed.TryReserveAdmission())
+    {
+        Check(cancelLease is not null);
+        Check(failed.TryReserveAdmission() is null);
+    }
+    Check(failed.Capture().ReservedAdmissions==0);
+    Check(failed.Enqueue(failedRoute,1,0));
+
+    var (concurrentRadio,_) = MakeTwoNodes();
+    var concurrent = new RadioPacketTransport(concurrentRadio,
+        new PacketTransportOptions(Capacity:24));
+    var leases = new System.Collections.Concurrent.ConcurrentBag<PacketAdmissionLease>();
+    Parallel.For(0,100, _ =>
+    {
+        var lease = concurrent.TryReserveAdmission();
+        if(lease is not null)leases.Add(lease);
+    });
+    Check(leases.Count==24);
+    Check(concurrent.Capture().ReservedAdmissions==24);
+    Parallel.ForEach(leases, lease => lease.Dispose());
+    Check(concurrent.Capture().ReservedAdmissions==0);
+
+    // A high forwarding workload should grow the visit ceiling while
+    // still preserving one hop per packet and respecting queue capacity.
+    var (fastRadio,fastRoute)=MakeTwoNodes();
+    var fast=new RadioPacketTransport(fastRadio,new PacketTransportOptions(
+        Capacity:4096, MaxAdvancesPerTick:4096,
+        MaxTickWorkMilliseconds:1000, AdaptivePacketVisits:true));
+    for(int i=0;i<4096;i++)
+        Check(fast.Enqueue(fastRoute,1,0));
+    Check(fast.Capture().CurrentVisitLimit==1024);
+    Check(fast.Advance(1)==1024);
+    Check(fast.Advance(1)==0);
+    Check(fast.Capture().CurrentVisitLimit>1024);
+    for(int tick=2;tick<=10 && fast.Capture().Queued>0;tick++)
+        fast.Advance(tick);
+    var stats=fast.Capture();
+    Check(stats.Delivered==4096 && stats.Queued==0);
+    Check(stats.ForwardingVisits==4096);
+    Check(stats.AdaptiveLimitIncreases>0);
+    Check(stats.CurrentVisitLimit<=4096);
+    Check(stats.VisitBudgetStops>0);
+
+    // Fixed mode stays identical to the previous transport behavior.
+    var (legacyRadio,legacyRoute)=MakeTwoNodes();
+    var legacy=new RadioPacketTransport(legacyRadio,new PacketTransportOptions(
+        Capacity:2048,MaxAdvancesPerTick:1024,AdaptivePacketVisits:false));
+    for(int i=0;i<2048;i++)
+        Check(legacy.Enqueue(legacyRoute,1,0));
+    Check(legacy.Advance(1)==1024);
+    Check(legacy.Capture().Queued==1024);
+    Check(legacy.Capture().CurrentVisitLimit==1024);
+    Check(legacy.Capture().AdaptiveLimitIncreases==0);
+    Check(legacy.Advance(2)==1024);
+    Check(legacy.Capture().Delivered==2048);
 }
 
 static void CheckRerouteAdaptiveBackoff()
