@@ -81,6 +81,7 @@ await CheckSchedulerAsync();
 CheckSharedMedium();
 CheckSharedMediumOracle();
 CheckRadioAStar();
+CheckDenseRadioAStar();
 CheckPacketTransport();
 CheckRerouteAdaptiveBackoff();
 await CheckDedicatedPacketTicksAsync();
@@ -982,6 +983,181 @@ static void CheckRadioAStar()
     Check(SharedMediumNetwork.RouteAStarPooledCore(pinned, start, end,
         maximumRadioRange: 14, minimumRadioCost: 8,
         maxExplored: 1).Found == false);
+}
+
+static void CheckDenseRadioAStar()
+{
+    // Snapshot isolation: positions, profiles and cable links must all come
+    // from one immutable epoch. Dense ID mappings survive radio movements.
+    for (int seed = 0; seed < 4; seed++)
+    {
+        var random = new Random(8000 + seed);
+        var runtime = new NetworkRuntime();
+        var ids = Enumerable.Range(1, 160)
+            .Select(i => new NodeId((ulong)i * 37 + 0x8000UL)).ToArray();
+        runtime.Apply(ids.Select(id =>
+            new TopologyChange(TopologyOperation.AddNode, id,
+                Position: new NodePosition(random.Next(-160, 161),
+                    random.Next(-160, 161), random.Next(2)))).ToArray());
+        var medium = new SharedMediumNetwork(runtime,
+            searchMode: SharedRadioSearchMode.AStarDense,
+            maximumRadioRange: 28, minimumRadioCost: 3);
+        medium.Update(ids.Select(id => new RadioNodeUpdate(id,
+            Profile: new RadioProfile(random.Next(12, 29),
+                (uint)random.Next(1, 4), (uint)random.Next(3, 14)),
+            ChangeProfile: true)).ToArray());
+
+        for (int round = 0; round < 12; round++)
+        {
+            if (round == 3)
+                Check(medium.SetCable(ids[0], ids[^1], 1));
+            if (round == 7)
+                Check(medium.SetCable(ids[0], ids[^1], null));
+            var snapshot = medium.Snapshot;
+
+            for (int query = 0; query < 50; query++)
+            {
+                var from = ids[random.Next(ids.Length)];
+                var to = ids[random.Next(ids.Length)];
+                var pooled = SharedMediumNetwork.RouteAStarPooledCore(
+                    snapshot, from, to, 28, 3);
+                var dense = SharedMediumNetwork.RouteAStarDenseCore(
+                    snapshot, from, to, 28, 3);
+                var dijkstra = SharedMediumNetwork.RouteCore(snapshot, from, to);
+                Check(dense.Found == pooled.Found &&
+                    dense.Found == dijkstra.Found);
+                Check(dense.Cost == pooled.Cost && dense.Cost == dijkstra.Cost);
+                Check(dense.Version == snapshot.Version);
+                Check(dense.Explored == pooled.Explored);
+                Check(dense.Path.SequenceEqual(pooled.Path));
+                Check(medium.Route(from, to).Cost == dense.Cost);
+            }
+            // Check old immutable view again after the next movement below.
+            var old = medium.Snapshot;
+            var reference = SharedMediumNetwork.RouteAStarPooledCore(
+                old, ids[0], ids[^1], 28, 3);
+            var updates = new RadioNodeUpdate[12];
+            for (int i = 0; i < updates.Length; i++)
+            {
+                var id = ids[(round * 11 + i) % ids.Length];
+                var position = old.Physical.Nodes[id].Position!.Value;
+                updates[i] = new RadioNodeUpdate(id,
+                    Position: new NodePosition(position.X + random.Next(-20, 21),
+                        position.Y + random.Next(-20, 21), position.Z),
+                    Profile: i == 0 ? null : new RadioProfile(
+                        random.Next(12, 29), (uint)random.Next(1, 4),
+                        (uint)random.Next(3, 14)),
+                    ChangeProfile: true);
+            }
+            medium.Update(updates);
+            var pinned = SharedMediumNetwork.RouteAStarDenseCore(
+                old, ids[0], ids[^1], 28, 3);
+            Check(pinned.Found == reference.Found);
+            Check(pinned.Cost == reference.Cost);
+            Check(pinned.Path.SequenceEqual(reference.Path));
+            Check(pinned.Version == old.Version);
+        }
+
+        // Removal requires reindexing. Arbitrary non-contiguous IDs cannot
+        // be used directly as offsets into the dense arrays.
+        var victims = ids.Skip(30).Take(25).ToArray();
+        Check(medium.RemoveNodes(victims) == victims.Length);
+        var after = medium.Snapshot;
+        Check(!SharedMediumNetwork.RouteAStarDenseCore(after, ids[0],
+            victims[0], 28, 3).Found);
+        var expected = SharedMediumNetwork.RouteAStarPooledCore(after,
+            ids[0], ids[^1], 28, 3);
+        var actual = medium.Route(ids[0], ids[^1]);
+        Check(actual.Found == expected.Found && actual.Cost == expected.Cost);
+    }
+
+    // Dense workspace is exclusive to each worker, even when the graph
+    // mutates concurrently. Queries pin their input snapshots.
+    var big = new NetworkRuntime();
+    big.Apply(Enumerable.Range(1, 900).Select(i =>
+        new TopologyChange(TopologyOperation.AddNode, new NodeId((ulong)i),
+            Position: new NodePosition((i - 1) % 30 * 12,
+                (i - 1) / 30 * 12))).ToArray());
+    var radio = new SharedMediumNetwork(big,
+        searchMode: SharedRadioSearchMode.AStarDense,
+        maximumRadioRange: 14, minimumRadioCost: 8);
+    radio.Update(Enumerable.Range(1, 900).Select(i =>
+        new RadioNodeUpdate(new NodeId((ulong)i),
+            Profile: new RadioProfile(14, 1, 8), ChangeProfile: true)).ToArray());
+    var initial = radio.Snapshot;
+    var errors = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    Parallel.For(0, 240, i =>
+    {
+        var a = new NodeId((ulong)(i % 900 + 1));
+        var b = new NodeId((ulong)((i * 71 + 160) % 900 + 1));
+        var expected = SharedMediumNetwork.RouteAStarPooledCore(
+            initial, a, b, 14, 8);
+        var actual = SharedMediumNetwork.RouteAStarDenseCore(
+            initial, a, b, 14, 8);
+        if (actual.Cost != expected.Cost ||
+            actual.Explored != expected.Explored ||
+            !actual.Path.SequenceEqual(expected.Path))
+            errors.Enqueue($"Dense route differs on parallel query {i}");
+    });
+    Check(errors.IsEmpty);
+
+    // Compare warmed thread-local allocations, but do not prescribe an
+    // execution-time threshold that depends on GitHub runner hardware.
+    var start = new NodeId(1);
+    var finish = new NodeId(900);
+    for (int i = 0; i < 6; i++)
+    {
+        _ = SharedMediumNetwork.RouteAStarPooledCore(initial, start, finish, 14, 8);
+        _ = SharedMediumNetwork.RouteAStarDenseCore(initial, start, finish, 14, 8);
+    }
+    const int samples = 32;
+    long before = GC.GetAllocatedBytesForCurrentThread();
+    for (int i = 0; i < samples; i++)
+        _ = SharedMediumNetwork.RouteAStarPooledCore(initial, start, finish, 14, 8);
+    long pooledBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+    before = GC.GetAllocatedBytesForCurrentThread();
+    for (int i = 0; i < samples; i++)
+        _ = SharedMediumNetwork.RouteAStarDenseCore(initial, start, finish, 14, 8);
+    long denseBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+    Console.WriteLine($"Radio A* allocations per route, 900 nodes: pooled={pooledBytes / samples:N0} B, dense={denseBytes / samples:N0} B");
+    Check(denseBytes < pooledBytes);
+
+    // A separately constructed snapshot without a prebuilt dense view
+    // must still be routable by the public static search method.
+    var manual = new SharedMediumSnapshot(initial.Version,
+        initial.Physical, initial.Devices, initial.Cells)
+    { HasPhysicalLinks = initial.HasPhysicalLinks };
+    Check(SharedMediumNetwork.RouteAStarDenseCore(manual, start, finish,
+        14, 8).Cost == SharedMediumNetwork.RouteAStarPooledCore(
+            initial, start, finish, 14, 8).Cost);
+
+    const int timingQueries = 40;
+    long timeBefore = Stopwatch.GetTimestamp();
+    for (int i = 0; i < timingQueries; i++)
+        _ = SharedMediumNetwork.RouteAStarPooledCore(initial, start, finish, 14, 8);
+    long pooledTime = Stopwatch.GetTimestamp() - timeBefore;
+    timeBefore = Stopwatch.GetTimestamp();
+    for (int i = 0; i < timingQueries; i++)
+        _ = SharedMediumNetwork.RouteAStarDenseCore(initial, start, finish, 14, 8);
+    long denseTime = Stopwatch.GetTimestamp() - timeBefore;
+    Console.WriteLine(
+        $"Radio A* CPU micro-probe (900 nodes): pooled={pooledTime * 1_000_000.0 / Stopwatch.Frequency / timingQueries:N1} us/route, dense={denseTime * 1_000_000.0 / Stopwatch.Frequency / timingQueries:N1} us/route");
+
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    bool cancelled = false;
+    try
+    {
+        _ = SharedMediumNetwork.RouteAStarDenseCore(initial, start, finish,
+            14, 8, cancellationToken: cancellation.Token);
+    }
+    catch (OperationCanceledException) { cancelled = true; }
+    Check(cancelled);
+    var shortest = SharedMediumNetwork.RouteAStarDenseCore(
+        initial, start, finish, 14, 8);
+    Check(shortest.Found);
+    Check(!SharedMediumNetwork.RouteAStarDenseCore(initial, start, finish,
+        14, 8, maxExplored: 1).Found);
 }
 
 static void CheckRadioSafety()

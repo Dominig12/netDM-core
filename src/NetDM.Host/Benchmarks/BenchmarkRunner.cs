@@ -56,8 +56,8 @@ public sealed record BenchmarkOptions(
             throw new ArgumentException(
                 "Hop-by-hop packets require wireless Shared Medium mode.",
                 nameof(PacketTransportEnabled));
-        if (SharedSearch is not ("dijkstra" or "astar" or "astar-pooled"))
-            throw new ArgumentException("SharedSearch must be dijkstra, astar or astar-pooled.", nameof(SharedSearch));
+        if (SharedSearch is not ("dijkstra" or "astar" or "astar-pooled" or "astar-dense"))
+            throw new ArgumentException("SharedSearch must be dijkstra, astar, astar-pooled or astar-dense.", nameof(SharedSearch));
         if (RadioModel is not ("pairwise" or "shared"))
             throw new ArgumentException("RadioModel must be pairwise or shared.", nameof(RadioModel));
         if (MediumBytesPerTick is < 1 or > 1_000_000)
@@ -292,6 +292,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                         {
                             "astar" => SharedRadioSearchMode.AStar,
                             "astar-pooled" => SharedRadioSearchMode.AStarPooled,
+                            "astar-dense" => SharedRadioSearchMode.AStarDense,
                             _ => SharedRadioSearchMode.Dijkstra
                         },
                         maximumRadioRange: options.RadioRange,
