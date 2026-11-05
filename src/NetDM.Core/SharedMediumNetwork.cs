@@ -166,8 +166,11 @@ public sealed partial class SharedMediumNetwork
             ImmutableDictionary<RadioMediumCell, ImmutableHashSet<NodeId>>.Empty)
         {
             HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0),
-            Dense = DenseRadioIndex.Build(physical, ImmutableDictionary<NodeId, RadioProfile>.Empty,
-                ImmutableDictionary<RadioMediumCell, ImmutableHashSet<NodeId>>.Empty)
+            Dense = searchMode == SharedRadioSearchMode.AStarDense
+                ? DenseRadioIndex.Build(physical,
+                    ImmutableDictionary<NodeId, RadioProfile>.Empty,
+                    ImmutableDictionary<RadioMediumCell, ImmutableHashSet<NodeId>>.Empty)
+                : null
         };
     }
 
@@ -352,7 +355,9 @@ public sealed partial class SharedMediumNetwork
                 physical, nextDevices, nextCells)
             {
                 HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0),
-                Dense = DenseRadioIndex.Build(physical, nextDevices, nextCells)
+                Dense = before.Dense is not null
+                    ? DenseRadioIndex.Build(physical, nextDevices, nextCells)
+                    : null
             };
             _cache.Clear();
             Volatile.Write(ref _current, next);
