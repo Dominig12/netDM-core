@@ -112,7 +112,8 @@ app.MapGet("/api/map", (NetworkRuntime runtime, BenchmarkRunner benchmark,
         .Take(maxNodes * 8)
         .ToArray();
 
-    var mediumCells = medium?.ViewCells(left, top, right, bottom, z ?? 0, 1_500);
+    var mediumCells = medium?.ViewCells(left, top, right, bottom, z ?? 0,
+        1_500, mediumSnapshot);
     return Results.Ok(new
     {
         version = snapshot.Version,
