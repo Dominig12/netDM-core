@@ -26,7 +26,10 @@ public sealed record BenchmarkOptions(
     bool DedicatedPacketTicks = true,
     int PacketTickWorkBudgetMs = 25,
     int PacketMaxNoRouteRetryDelayTicks = 96,
-    int PacketRerouteQueueRetryDelayTicks = 8)
+    int PacketRerouteQueueRetryDelayTicks = 8,
+    int PacketQueueCapacity = 2048,
+    bool AdaptivePacketVisits = false,
+    bool PacketPreRouteBackpressure = false)
 {
     public void Validate()
     {
@@ -40,6 +43,12 @@ public sealed record BenchmarkOptions(
             throw new ArgumentOutOfRangeException(nameof(PacketMaxAgeTicks));
         if (PacketMaxAdvancesPerTick is < 1 or > 65_536)
             throw new ArgumentOutOfRangeException(nameof(PacketMaxAdvancesPerTick));
+        if (PacketQueueCapacity is < 1 or > 65_536)
+            throw new ArgumentOutOfRangeException(nameof(PacketQueueCapacity));
+        if (PacketPreRouteBackpressure && !PacketTransportEnabled)
+            throw new ArgumentException(
+                "Pre-route packet backpressure requires hopwise transport.",
+                nameof(PacketPreRouteBackpressure));
         if (PacketRerouteWorkers is < 1 or > 4)
             throw new ArgumentOutOfRangeException(nameof(PacketRerouteWorkers));
         if (PacketRerouteQueueCapacity is < 1 or > 256)
@@ -65,7 +74,8 @@ public sealed record BenchmarkOptions(
     }
 }
 
-public sealed record BenchmarkLoadStats(long Offered, long Admitted, long Rejected);
+public sealed record BenchmarkLoadStats(long Offered, long Admitted, long Rejected,
+    long TransportBackpressured);
 
 public sealed record BenchmarkState(
     string Status, BenchmarkOptions? Options, DateTimeOffset? StartedUtc,
@@ -113,7 +123,12 @@ public sealed record BenchmarkSample(
     double NoRouteBackoffsPerSecond, double RerouteCooldownSkipsPerSecond,
     double LocalChangeWakeupsPerSecond, double RecoveredOriginalHopsPerSecond,
     double StaleNegativeResultsPerSecond, double AverageNoRouteBackoffTicks,
-    int TrackedChangedRadioNodes);
+    int TrackedChangedRadioNodes,
+    double PacketEnqueuedPerSecond, double PacketForwardingVisitsPerSecond,
+    double PacketPreRouteRejectedPerSecond, int PacketReservedAdmissions,
+    int PacketVisitLimit, double PacketVisitLimitIncreasesPerSecond,
+    double PacketVisitLimitDecreasesPerSecond,
+    double PacketVisitBudgetStopsPerSecond);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -134,6 +149,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     private int _width, _height;
     private double _elapsed;
     private long _offeredRoutes, _admittedRoutes, _rejectedRoutes;
+    private long _transportBackpressured;
     private DynamicRadioNetwork? _radioEngine;
     private SharedMediumNetwork? _sharedMedium;
     private RadioPacketTransport? _packets;
@@ -165,7 +181,8 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     private BenchmarkLoadStats LoadStats() => new(
         Interlocked.Read(ref _offeredRoutes),
         Interlocked.Read(ref _admittedRoutes),
-        Interlocked.Read(ref _rejectedRoutes));
+        Interlocked.Read(ref _rejectedRoutes),
+        Interlocked.Read(ref _transportBackpressured));
 
     /// <summary>
     /// Reserve the entire benchmark lifecycle for an automated experiment suite.
@@ -208,6 +225,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             Interlocked.Exchange(ref _offeredRoutes, 0);
             Interlocked.Exchange(ref _admittedRoutes, 0);
             Interlocked.Exchange(ref _rejectedRoutes, 0);
+            Interlocked.Exchange(ref _transportBackpressured, 0);
             _error = null;
             _width = _height = 0;
             _radioEngine = null;
@@ -309,12 +327,14 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             }
             var packets = medium is not null && options.PacketTransportEnabled
                 ? new RadioPacketTransport(medium, new PacketTransportOptions(
+                    Capacity: options.PacketQueueCapacity,
                     MaxAgeTicks: options.PacketMaxAgeTicks,
                     MaxAdvancesPerTick: options.PacketMaxAdvancesPerTick,
                     MaxConcurrentReroutes: options.PacketRerouteWorkers,
                     MaxTickWorkMilliseconds: options.PacketTickWorkBudgetMs,
                     MaxNoRouteRetryDelayTicks: options.PacketMaxNoRouteRetryDelayTicks,
-                    RerouteQueueRetryDelayTicks: options.PacketRerouteQueueRetryDelayTicks))
+                    RerouteQueueRetryDelayTicks: options.PacketRerouteQueueRetryDelayTicks,
+                    AdaptivePacketVisits: options.AdaptivePacketVisits))
                 : null;
             // Reroute computation is never executed while holding the packet
             // queue lock. A separate bounded CPU executor prevents it from
@@ -470,7 +490,21 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                             (previousPackets?.NoRouteBackoffTicks ?? 0)) /
                             ((packetSnapshot?.NoRouteBackoffs ?? 0) -
                             (previousPackets?.NoRouteBackoffs ?? 0)),
-                    packetSnapshot?.TrackedChangedNodes ?? 0);
+                    packetSnapshot?.TrackedChangedNodes ?? 0,
+                    ((packetSnapshot?.Enqueued ?? 0) -
+                        (previousPackets?.Enqueued ?? 0)) / interval,
+                    ((packetSnapshot?.ForwardingVisits ?? 0) -
+                        (previousPackets?.ForwardingVisits ?? 0)) / interval,
+                    (loadSnapshot.TransportBackpressured -
+                        previousLoad.TransportBackpressured) / interval,
+                    packetSnapshot?.ReservedAdmissions ?? 0,
+                    packetSnapshot?.CurrentVisitLimit ?? 0,
+                    ((packetSnapshot?.AdaptiveLimitIncreases ?? 0) -
+                        (previousPackets?.AdaptiveLimitIncreases ?? 0)) / interval,
+                    ((packetSnapshot?.AdaptiveLimitDecreases ?? 0) -
+                        (previousPackets?.AdaptiveLimitDecreases ?? 0)) / interval,
+                    ((packetSnapshot?.VisitBudgetStops ?? 0) -
+                        (previousPackets?.VisitBudgetStops ?? 0)) / interval);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;
@@ -521,14 +555,15 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
         var clock = Stopwatch.StartNew();
         var rate = (double)options.RoutesPerSecond / workers;
         long offered = 0;
-        var pending = new List<Task<RouteResult>>(384);
+        // Keep the lease until even a scheduler-cancelled (never executed)
+        // task is observed. Work that ran consumes its lease in its finally.
+        var pending = new List<(Task<RouteResult> Task, PacketAdmissionLease? Lease)>(384);
         try
         {
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
                 var target = (long)Math.Floor(clock.Elapsed.TotalSeconds * rate);
-                // Catch up on missed arrivals without one giant producer burst.
                 var count = (int)Math.Min(512L, Math.Max(0L, target - offered));
                 for (var i = 0; i < count; i++)
                 {
@@ -538,35 +573,67 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     var a = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
                     var b = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
                     var payload = rng.Next(128, 1025);
+
+                    PacketAdmissionLease? lease = null;
+                    if (packets is not null && options.PacketPreRouteBackpressure)
+                    {
+                        lease = packets.TryReserveAdmission();
+                        if (lease is null)
+                        {
+                            // This is offered load rejected by TRANSPORT, not
+                            // a route search that was never admitted.
+                            Interlocked.Increment(ref _transportBackpressured);
+                            Interlocked.Increment(ref _rejectedRoutes);
+                            continue;
+                        }
+                    }
+
                     if (scheduler.TrySchedule(token =>
                         {
-                            var route = medium is null
-                                ? runtime.Route(a, b, cancellationToken: token)
-                                : medium.Route(a, b, cancellationToken: token);
-                            if (route.Found && medium is not null)
+                            try
                             {
-                                var tick = Stopwatch.GetTimestamp() /
-                                    Math.Max(1, Stopwatch.Frequency / 10);
-                                if (packets is not null)
-                                    packets.Enqueue(route, payload, tick);
-                                else
-                                    medium.TryTransmit(route, payload, tick);
+                                var route = medium is null
+                                    ? runtime.Route(a, b, cancellationToken: token)
+                                    : medium.Route(a, b, cancellationToken: token);
+                                if (route.Found && medium is not null)
+                                {
+                                    var tick = Stopwatch.GetTimestamp() /
+                                        Math.Max(1, Stopwatch.Frequency / 10);
+                                    if (packets is not null)
+                                    {
+                                        if (lease is not null)
+                                            packets.EnqueueReserved(route, payload, tick, lease);
+                                        else
+                                            packets.Enqueue(route, payload, tick);
+                                    }
+                                    else
+                                        medium.TryTransmit(route, payload, tick);
+                                }
+                                return route;
                             }
-                            return route;
+                            finally
+                            {
+                                // No-route, cancellation, error: free the slot.
+                                lease?.Dispose();
+                            }
                         }, WorkPriority.Background, ct, out Task<RouteResult>? task))
                     {
                         Interlocked.Increment(ref _admittedRoutes);
-                        pending.Add(task!);
+                        pending.Add((task!, lease));
                     }
-                    else Interlocked.Increment(ref _rejectedRoutes);
+                    else
+                    {
+                        lease?.Dispose();
+                        Interlocked.Increment(ref _rejectedRoutes);
+                    }
                 }
-                // Task list stays bounded by globally admitted work; promptly
-                // release observed results rather than awaiting an entire burst.
                 for (var i = pending.Count - 1; i >= 0; i--)
                 {
-                    var task = pending[i];
+                    var (task, lease) = pending[i];
                     if (!task.IsCompleted) continue;
                     if (task.IsFaulted) _ = task.Exception;
+                    // Also covers cancellation before the scheduled lambda ran.
+                    lease?.Dispose();
                     pending.RemoveAt(i);
                 }
                 await Task.Delay(20, ct);
@@ -574,10 +641,13 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
         }
         finally
         {
-            // Accepted work was tied to the benchmark token, and the scheduler
-            // cancels outstanding work when the run is stopped.
-            try { await Task.WhenAll(pending); }
+            try { await Task.WhenAll(pending.Select(p => p.Task)); }
             catch (Exception) { } // Scheduler publishes failures/cancellations.
+            finally
+            {
+                foreach (var item in pending)
+                    item.Lease?.Dispose();
+            }
         }
     }
 

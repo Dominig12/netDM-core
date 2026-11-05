@@ -780,3 +780,46 @@ enabling the mode by default; this branch makes it opt-in.
 Keep pooled A* as the reference in profiles B and D. Both use two
 reroute workers and negative backoff cap 96. Existing packet semantics
 and output schema remain unchanged.
+
+## M17: transport admission ownership and adaptive forwarding
+
+`RadioPacketTransport` exposes an explicit capacity reservation
+contract. `TryReserveAdmission` atomically checks
+`queue.Count + reservations < Capacity`, returning an exclusive
+lease. A queued route task calls `EnqueueReserved` exactly once on
+success, or releases its lease on error/no-path. If the main CPU
+scheduler cancels a task before invoking its lambda, its producer
+disposes the lease when the terminal Task is observed, and again at
+shutdown for all pending entries. Interlocked owner-exchange makes
+double-disposal harmless. The packet queue lock serializes all slot
+accounting, and ordinary `Enqueue` also respects outstanding
+reservations. This prevents long A* computations from finishing into
+a queue which was already guaranteed full at route admission.
+
+The adaptive `MaxAdvancesPerTick` cap is adjusted using elapsed
+`Advance` wall time, with the existing 25ms per-tick budget taking
+precedence. Fast saturated ticks allow additive growth (~25%);
+slow ticks reduce the limit (~25%), never below its starting floor.
+The queue remains FIFO round-robin, and processing always captures
+the initial number of items before the pass, so newly appended items
+cannot receive a second hop during that same tick.
+
+`PacketTransportCounters` now separates successful radio hops,
+*visited* packet entries, packets finally delivered, packet queue
+refusals, pre-route refusals, and active but not yet consumed
+admission leases. `BenchmarkLoadStats.TransportBackpressured`
+is a subset of Rejected, so `Offered = Admitted + Rejected` still
+holds for open-loop route generation. JSON also contains per-interval
+rates; the on-screen pipeline graph contrasts route acceptance,
+packet enqueue, final delivery and pre-route blocking.
+
+These changes deliberately keep the radio medium's byte budgets,
+one-hop-per-tick rule, TTL, pending reroutes and snapshot route
+validation untouched. Increasing a CPU visit cap does not multiply
+actual physical medium capacity.
+
+A controlled transport experiment can compare E (fixed 1024,
+capacity 2048, no backpressure), F (adaptive 4096, capacity 4096, no
+backpressure), and G (same F plus pre-route reservation). All three
+use Dense A*, the same two reroute workers and same negative backoff
+for reproducibility. Running B/D CPU comparisons is still supported.

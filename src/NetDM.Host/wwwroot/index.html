@@ -64,6 +64,20 @@
             </select>
             <label for="packet-tick-budget">Maximum forwarding work <small>ms per tick, soft</small></label>
             <input id="packet-tick-budget" type="number" min="1" max="1000" value="25">
+            <label for="packet-visit-mode">Packet visits per tick</label>
+            <select id="packet-visit-mode" class="workload-select">
+              <option value="fixed">FIXED · Original per-tick visit cap</option>
+              <option value="adaptive">ADAPTIVE · Increase visits while CPU budget permits</option>
+            </select>
+            <label for="packet-max-visits">Max visits per tick <small>adaptive ceiling or fixed cap</small></label>
+            <input id="packet-max-visits" type="number" min="1" max="65536" value="1024">
+            <label for="packet-queue-capacity">Packet queue capacity</label>
+            <input id="packet-queue-capacity" type="number" min="1" max="65536" value="2048">
+            <label for="packet-backpressure">Pre-route transport admission</label>
+            <select id="packet-backpressure" class="workload-select">
+              <option value="off">OFF · Compute route before enqueue (control)</option>
+              <option value="on">ON · Reserve packet slot before A*</option>
+            </select>
             <label for="packet-backoff-cap">No-route retry cap <small>100ms ticks</small></label>
             <input id="packet-backoff-cap" type="number" min="3" max="10000" value="96">
             <label for="packet-reroute-cooldown">Full reroute queue retry <small>100ms ticks</small></label>
@@ -127,8 +141,11 @@
               <option value="pooled">B · Pooled A* · 2 reroute workers · max wait 96 ticks</option>
               <option value="short-wait">C · Pooled A* · 2 reroute workers · max wait 24 ticks</option>
               <option value="dense">D · Dense A* · 2 reroute workers · max wait 96 ticks</option>
+              <option value="transport-control">E · Dense + fixed 1024 visits + 2048 packet queue (control)</option>
+              <option value="transport-adaptive">F · Dense + adaptive 4096 visits + 4096 packet queue</option>
+              <option value="transport-backpressure">G · Dense + adaptive 4096 visits + pre-route backpressure</option>
             </select>
-            <small>For an isolated CPU comparison, run B and D. Each produces three JSON reports with identical workload and reroute settings.</small>
+            <small>For transport experiments compare E/F/G. E keeps the original 1024 visits, F tests adaptive forwarding, G adds pre-route backpressure. Each generates three reports.</small>
           </div>
           <div class="suite-choices">
             <label for="suite-search">Routing
@@ -168,6 +185,24 @@
             </label>
             <label for="suite-tick-budget">Forwarding budget (ms per tick)
               <input id="suite-tick-budget" type="number" min="1" max="1000" value="25">
+            </label>
+            <label for="suite-visit-mode">Visit budget
+              <select id="suite-visit-mode" class="workload-select">
+                <option value="fixed">Fixed (control)</option>
+                <option value="adaptive">Adaptive to forwarding work time</option>
+              </select>
+            </label>
+            <label for="suite-max-visits">Max packet visits per tick
+              <input id="suite-max-visits" type="number" min="1" max="65536" value="1024">
+            </label>
+            <label for="suite-queue-capacity">Packet queue capacity
+              <input id="suite-queue-capacity" type="number" min="1" max="65536" value="2048">
+            </label>
+            <label for="suite-backpressure">Pre-route admission
+              <select id="suite-backpressure" class="workload-select">
+                <option value="off">Off — original routing workload</option>
+                <option value="on">On — reserve packet slot before search</option>
+              </select>
             </label>
             <label for="suite-backoff-cap">Max no-route retry delay (ticks)
               <input id="suite-backoff-cap" type="number" min="3" max="10000" value="96">
@@ -241,6 +276,8 @@
         <div class="chart-panel"><div class="chart-heading"><div><strong>Route reachability</strong><small>Found routes / all computed routes</small></div><span class="chart-value" id="chart-reachability">—</span></div><canvas id="reachability-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
         <div class="chart-panel"><div class="chart-heading"><div><strong>Packet delivery</strong><small>Delivered / dropped / expired packets per second</small></div><span class="chart-value" id="chart-packets">—</span></div><canvas id="packets-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
         <div class="chart-panel"><div class="chart-heading"><div><strong>Packet queue</strong><small>Queued packets and wireless hops per second</small></div><span class="chart-value" id="chart-packet-queue">—</span></div><canvas id="packet-queue-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
+        <div class="chart-panel"><div class="chart-heading"><div><strong>Transport pipeline</strong><small>Routes admitted, packets enqueued, delivered and blocked before search / second</small></div><span class="chart-value" id="chart-transport-pipeline">—</span></div><canvas id="transport-pipeline-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
+        <div class="chart-panel"><div class="chart-heading"><div><strong>Adaptive forwarding</strong><small>Visited packets per second and allowed visits per tick</small></div><span class="chart-value" id="chart-adaptive-forwarding">—</span></div><canvas id="adaptive-forwarding-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
         <div class="chart-panel"><div class="chart-heading"><div><strong>Reroute pressure</strong><small>Pending + running reroutes / retries per second</small></div><span class="chart-value" id="chart-reroute-pressure">—</span></div><canvas id="reroute-pressure-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
         <div class="chart-panel"><div class="chart-heading"><div><strong>No-route retry suppression</strong><small>Backoffs / local wakeups / skipped retries per second</small></div><span class="chart-value" id="chart-retry-backoff">—</span></div><canvas id="retry-backoff-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
         <div class="chart-panel"><div class="chart-heading"><div><strong>Packet tick health</strong><small>Executed ticks, skipped intervals and denied admissions per second</small></div><span class="chart-value" id="chart-tick-health">—</span></div><canvas id="tick-health-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>

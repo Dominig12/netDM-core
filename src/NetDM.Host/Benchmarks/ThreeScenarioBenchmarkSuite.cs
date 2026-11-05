@@ -29,7 +29,10 @@ public sealed record ThreeScenarioSuiteOptions(
     bool DedicatedPacketTicks = true,
     int PacketTickWorkBudgetMs = 25,
     int PacketMaxNoRouteRetryDelayTicks = 96,
-    int PacketRerouteQueueRetryDelayTicks = 8)
+    int PacketRerouteQueueRetryDelayTicks = 8,
+    int PacketQueueCapacity = 2048,
+    bool AdaptivePacketVisits = false,
+    bool PacketPreRouteBackpressure = false)
 {
     public void Validate()
     {
@@ -56,7 +59,10 @@ public sealed record ThreeScenarioSuiteOptions(
             DedicatedPacketTicks: DedicatedPacketTicks,
             PacketTickWorkBudgetMs: PacketTickWorkBudgetMs,
             PacketMaxNoRouteRetryDelayTicks: PacketMaxNoRouteRetryDelayTicks,
-            PacketRerouteQueueRetryDelayTicks: PacketRerouteQueueRetryDelayTicks);
+            PacketRerouteQueueRetryDelayTicks: PacketRerouteQueueRetryDelayTicks,
+            PacketQueueCapacity: PacketQueueCapacity,
+            AdaptivePacketVisits: AdaptivePacketVisits,
+            PacketPreRouteBackpressure: PacketPreRouteBackpressure);
 }
 
 public sealed record ScenarioResultSummary(
@@ -166,6 +172,12 @@ public sealed class ThreeScenarioBenchmarkSuite(
         }
     }
 
+    private static string TransportVariant(ThreeScenarioSuiteOptions options) =>
+        $"{options.SharedSearch}-w{options.PacketRerouteWorkers}-b{options.PacketMaxNoRouteRetryDelayTicks}" +
+        $"-q{options.PacketQueueCapacity}-v{options.PacketMaxAdvancesPerTick}" +
+        $"-{(options.AdaptivePacketVisits ? "adaptive" : "fixed")}" +
+        $"-{(options.PacketPreRouteBackpressure ? "reserved" : "openloop")}";
+
     public (byte[] Data, string Name)? Archive(string? runId)
     {
         (string Name, byte[] Data)[] reports;
@@ -187,7 +199,8 @@ public sealed class ThreeScenarioBenchmarkSuite(
                 writer.Write(report.Data);
             }
         }
-        var name = $"netdm-three-scenarios-{options.SharedSearch}-w{options.PacketRerouteWorkers}-b{options.PacketMaxNoRouteRetryDelayTicks}-seed{options.Seed}.zip";
+        var variant = TransportVariant(options);
+        var name = $"netdm-three-scenarios-{variant}-seed{options.Seed}.zip";
         return (buffer.ToArray(), name);
     }
 
@@ -273,7 +286,7 @@ public sealed class ThreeScenarioBenchmarkSuite(
                     {
                         WriteIndented = true
                     });
-                var fileName = $"netdm-{number:00}-{scenario.Key}-{options.Nodes}-seed{options.Seed}-{options.SharedSearch}-w{options.PacketRerouteWorkers}-b{options.PacketMaxNoRouteRetryDelayTicks}.json";
+                var fileName = $"netdm-{number:00}-{scenario.Key}-{options.Nodes}-seed{options.Seed}-{TransportVariant(options)}.json";
                 lock (_gate)
                 {
                     _reports[number] = (fileName, bytes);

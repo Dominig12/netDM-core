@@ -202,7 +202,7 @@ PY
 grep -q 'RUN ALL THREE SCENARIOS' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 curl -fsS -X POST "$base/api/benchmark-suite/start" \
   -H 'Content-Type: application/json' \
-  -d '{"nodes":90,"routesPerSecond":45,"movesPerSecond":55,"linkChangesPerSecond":6,"durationSeconds":3,"seed":1337,"radioRange":14,"mediumBytesPerTick":8192,"sharedSearch":"astar-dense","packetTransportEnabled":true,"spatialReuseEnabled":true,"packetMaxAgeTicks":100,"packetMaxAdvancesPerTick":60,"dedicatedPacketTicks":true,"packetTickWorkBudgetMs":25,"packetMaxNoRouteRetryDelayTicks":24,"packetRerouteQueueRetryDelayTicks":4}' \
+  -d '{"nodes":90,"routesPerSecond":45,"movesPerSecond":55,"linkChangesPerSecond":6,"durationSeconds":3,"seed":1337,"radioRange":14,"mediumBytesPerTick":8192,"sharedSearch":"astar-dense","packetTransportEnabled":true,"spatialReuseEnabled":true,"packetMaxAgeTicks":100,"packetMaxAdvancesPerTick":160,"packetQueueCapacity":128,"adaptivePacketVisits":true,"packetPreRouteBackpressure":true,"dedicatedPacketTicks":true,"packetTickWorkBudgetMs":25,"packetMaxNoRouteRetryDelayTicks":24,"packetRerouteQueueRetryDelayTicks":4}' \
   > "${RUNNER_TEMP:-/tmp}/netdm-suite-start.json"
 python3 - <<'PY'
 import json,os
@@ -264,7 +264,16 @@ for number,key in enumerate(scenarios,1):
     assert bench["options"]["packetTransportEnabled"] is True,bench
     assert bench["options"]["spatialReuseEnabled"] is True,bench
     assert bench["options"]["packetMaxAgeTicks"]==100,bench
-    assert bench["options"]["packetMaxAdvancesPerTick"]==60,bench
+    assert bench["options"]["packetMaxAdvancesPerTick"]==160,bench
+    assert bench["options"]["packetQueueCapacity"]==128,bench
+    assert bench["options"]["adaptivePacketVisits"] is True,bench
+    assert bench["options"]["packetPreRouteBackpressure"] is True,bench
+    assert bench["load"]["transportBackpressured"]>=0,bench
+    assert bench["load"]["rejected"]>=bench["load"]["transportBackpressured"],bench
+    assert bench["packetTransport"]["reservedAdmissions"]==0,bench
+    assert bench["packetTransport"]["preRouteBackpressureRejections"]==bench["load"]["transportBackpressured"],bench
+    assert bench["packetTransport"]["admissionReservations"]>=bench["packetTransport"]["enqueued"],bench
+    assert bench["packetTransport"]["currentVisitLimit"]<=160,bench
     assert bench["options"]["dedicatedPacketTicks"] is True,bench
     assert bench["options"]["packetTickWorkBudgetMs"]==25,bench
     assert bench["options"]["packetMaxNoRouteRetryDelayTicks"]==24,bench
@@ -294,7 +303,7 @@ with zipfile.ZipFile(os.path.join(root,"netdm-three-scenarios.zip")) as z:
     for number,key in enumerate(scenarios,1):
         match=[name for name in names if f"{number:02d}-{key}-" in name]
         assert len(match)==1,names
-        assert "astar-dense-w1-b24" in match[0],match[0]
+        assert "astar-dense-w1-b24-q128-v160-adaptive-reserved" in match[0],match[0]
         content=json.loads(z.read(match[0]))
         assert content["suite"]["scenario"]==key,content
 print("Three-stage benchmark suite + independent JSON files + ZIP: PASS")
@@ -307,7 +316,7 @@ grep -q 'A\* · Original allocations (control)' "${RUNNER_TEMP:-/tmp}/netdm-inde
 grep -q 'HOPWISE · One hop per simulation tick' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 curl -fsS -X POST "$base/api/benchmark/start" \
   -H 'Content-Type: application/json' \
-  -d '{"nodes":121,"routesPerSecond":75,"movesPerSecond":0,"linkChangesPerSecond":0,"durationSeconds":7,"seed":1337,"wirelessEnabled":true,"radioModel":"shared","radioRange":14,"mediumBytesPerTick":512,"sharedSearch":"astar","packetTransportEnabled":true,"dedicatedPacketTicks":true,"packetTickWorkBudgetMs":25}' \
+  -d '{"nodes":121,"routesPerSecond":75,"movesPerSecond":0,"linkChangesPerSecond":0,"durationSeconds":7,"seed":1337,"wirelessEnabled":true,"radioModel":"shared","radioRange":14,"mediumBytesPerTick":512,"sharedSearch":"astar","packetTransportEnabled":true,"dedicatedPacketTicks":true,"packetTickWorkBudgetMs":25,"packetQueueCapacity":256,"packetMaxAdvancesPerTick":256,"adaptivePacketVisits":true,"packetPreRouteBackpressure":true}' \
   > "${RUNNER_TEMP:-/tmp}/netdm-packet-start.json"
 sleep 5
 curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-packet-metrics.json"
@@ -324,7 +333,15 @@ stats=load("netdm-packet-stats.json")
 bench=m["benchmark"]
 assert bench["options"]["sharedSearch"]=="astar",bench
 assert bench["options"]["packetTransportEnabled"] is True,bench
+assert bench["options"]["packetPreRouteBackpressure"] is True,bench
+assert bench["options"]["adaptivePacketVisits"] is True,bench
+assert bench["options"]["packetQueueCapacity"]==256,bench
 assert stats["enqueued"]>0,stats
+assert stats["admissionReservations"]>=stats["enqueued"],stats
+assert stats["reservedAdmissions"]>=0,stats
+assert stats["preRouteBackpressureRejections"]==bench["load"]["transportBackpressured"],stats
+assert stats["currentVisitLimit"]<=256,stats
+assert stats["forwardingVisits"]>=stats["wirelessHops"]+stats["cableHops"],stats
 assert stats["enqueued"]==stats["delivered"]+stats["dropped"]+stats["expired"]+stats["queued"],stats
 assert stats["wirelessHops"]>0,stats
 assert bench["options"]["spatialReuseEnabled"] is True,bench
@@ -366,6 +383,14 @@ assert all(x["rerouteStartedPerSecond"]>=0 for x in h),h
 assert all(x["rerouteCompletedPerSecond"]>=0 for x in h),h
 assert all(x["packetSkippedTicksPerSecond"]>=0 for x in h),h
 assert all(x["packetTickAdmissionFailuresPerSecond"]>=0 for x in h),h
+assert all(x["packetEnqueuedPerSecond"]>=0 for x in h),h
+assert all(x["packetForwardingVisitsPerSecond"]>=0 for x in h),h
+assert all(x["packetPreRouteRejectedPerSecond"]>=0 for x in h),h
+assert all(x["packetReservedAdmissions"]>=0 for x in h),h
+assert all(x["packetVisitLimit"]>=0 for x in h),h
+assert all(x["packetVisitBudgetStopsPerSecond"]>=0 for x in h),h
+assert all(x["packetVisitLimitIncreasesPerSecond"]>=0 for x in h),h
+assert all(x["packetVisitLimitDecreasesPerSecond"]>=0 for x in h),h
 assert all(x["noRouteBackoffsPerSecond"]>=0 for x in h),h
 assert all(x["rerouteCooldownSkipsPerSecond"]>=0 for x in h),h
 assert all(x["localChangeWakeupsPerSecond"]>=0 for x in h),h
@@ -404,3 +429,8 @@ grep -q 'Controlled A/B experiment presets' "${RUNNER_TEMP:-/tmp}/netdm-index.ht
 # Dense mode must be available for both manual and suite workloads.
 grep -q 'A\* DENSE' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 grep -q 'D · Dense A\*' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+
+# Adaptive transport controls and three named E/F/G comparison presets.
+grep -q 'ADAPTIVE · Increase visits while CPU budget permits' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+grep -q 'E · Dense + fixed 1024 visits' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+grep -q 'G · Dense + adaptive 4096 visits + pre-route backpressure' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
