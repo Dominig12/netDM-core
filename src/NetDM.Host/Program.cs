@@ -17,6 +17,7 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 builder.WebHost.UseUrls("http://127.0.0.1:5087");
 builder.Services.AddSingleton<NetworkRuntime>();
 builder.Services.AddSingleton<BenchmarkRunner>();
+builder.Services.AddSingleton<RoutingComparisonRunner>();
 builder.Services.AddHostedService<PipeHostedService>();
 
 var app = builder.Build();
@@ -41,11 +42,13 @@ app.MapGet("/api/metrics", (NetworkRuntime runtime, BenchmarkRunner benchmark) =
 
 app.MapGet("/api/history", (BenchmarkRunner benchmark) => Results.Ok(benchmark.History()));
 
-app.MapPost("/api/benchmark/start", (BenchmarkOptions options, BenchmarkRunner benchmark) =>
+app.MapPost("/api/benchmark/start", (BenchmarkOptions options, BenchmarkRunner benchmark, RoutingComparisonRunner comparison) =>
 {
     try
     {
         options.Validate();
+        if (comparison.State().Status is "running" or "stopping")
+            return Results.Conflict(new { error = "Algorithm comparison in progress." });
         return benchmark.Start(options)
             ? Results.Accepted("/api/metrics", benchmark.State())
             : Results.Conflict(new { error = "A benchmark is already running." });
@@ -58,6 +61,31 @@ app.MapPost("/api/benchmark/start", (BenchmarkOptions options, BenchmarkRunner b
 
 app.MapPost("/api/benchmark/stop", (BenchmarkRunner benchmark) =>
     Results.Ok(new { stopping = benchmark.Stop() }));
+
+
+app.MapGet("/api/comparison", (RoutingComparisonRunner comparison) =>
+    Results.Ok(comparison.State()));
+
+app.MapPost("/api/comparison/start", (ComparisonOptions options,
+    RoutingComparisonRunner comparison, BenchmarkRunner benchmark) =>
+{
+    try
+    {
+        options.Validate();
+        if (benchmark.State().Status is "running" or "building" or "stopping")
+            return Results.Conflict(new { error = "Live workload is already running." });
+        return comparison.Start(options)
+            ? Results.Accepted("/api/comparison", comparison.State())
+            : Results.Conflict(new { error = "Algorithm comparison already in progress." });
+    }
+    catch (ArgumentOutOfRangeException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
+app.MapPost("/api/comparison/stop", (RoutingComparisonRunner comparison) =>
+    Results.Ok(new { stopping = comparison.Stop() }));
 
 // The map API returns only graph cells intersecting the requested viewport.
 // This keeps serialized payloads bounded even when the simulation is much larger.
