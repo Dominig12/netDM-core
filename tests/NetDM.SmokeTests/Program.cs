@@ -450,8 +450,10 @@ static void CheckPacketTransport()
     recovering.Update([new RadioNodeUpdate(new NodeId(3),
         Profile:new RadioProfile(14,1,8),ChangeProfile:true)]);
     Check(recovery.Advance(3)==0);
-    Check(recovery.Advance(4)==0); // Reroute is computed, not forwarded.
-    Check(recovery.Advance(5)==1);
+    // Once a previously broken hop becomes valid, it can be sent directly
+    // without spending a second search after the retry backoff.
+    Check(recovery.Advance(4)==1);
+    Check(recovery.Advance(5)==0);
     Check(recovery.Capture().Delivered==1);
     Check(recovery.Capture().Dropped==0);
 
