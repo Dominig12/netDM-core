@@ -67,6 +67,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     private readonly ConcurrentQueue<BenchmarkSample> _history = new();
     private CancellationTokenSource? _cts;
     private Task? _task;
+    private bool _suiteReserved;
     private string _status = "idle";
     private string? _error;
     private BenchmarkOptions? _options;
@@ -97,12 +98,38 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
         Interlocked.Read(ref _admittedRoutes),
         Interlocked.Read(ref _rejectedRoutes));
 
-    public bool Start(BenchmarkOptions options)
+    /// <summary>
+    /// Reserve the entire benchmark lifecycle for an automated experiment suite.
+    /// Manual workloads cannot start or stop between the suite's scenarios.
+    /// </summary>
+    public bool TryReserveSuite()
+    {
+        lock (_gate)
+        {
+            if (_suiteReserved || _task is { IsCompleted: false }) return false;
+            _suiteReserved = true;
+            return true;
+        }
+    }
+
+    public void ReleaseSuite()
+    {
+        lock (_gate) _suiteReserved = false;
+    }
+
+    public Task AwaitCompletionAsync(CancellationToken cancellationToken = default)
+    {
+        Task? current;
+        lock (_gate) current = _task;
+        return current is null ? Task.CompletedTask : current.WaitAsync(cancellationToken);
+    }
+
+    public bool Start(BenchmarkOptions options, bool fromSuite = false)
     {
         options.Validate();
         lock (_gate)
         {
-            if (_task is { IsCompleted: false }) return false;
+            if (_suiteReserved != fromSuite || _task is { IsCompleted: false }) return false;
             _cts?.Dispose();
             _cts = new CancellationTokenSource();
             _options = options;
@@ -122,11 +149,12 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
         }
     }
 
-    public bool Stop()
+    public bool Stop(bool fromSuite = false)
     {
         lock (_gate)
         {
-            if (_task is not { IsCompleted: false }) return false;
+            if (_suiteReserved != fromSuite || _task is not { IsCompleted: false })
+                return false;
             _status = "stopping";
             _cts?.Cancel();
             return true;
@@ -271,15 +299,14 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 if (seconds >= options.DurationSeconds) { finishedNaturally = true; break; }
             }
 
-            // Stop workers at the end of the benchmark without cancelling the caller's token.
-            if (finishedNaturally)
-                lock (_gate) _status = "complete";
-            else
-                lock (_gate) _status = "stopped";
-
+            // A scenario is "complete" only after all workload workers have
+            // stopped. Otherwise the suite might capture incomplete telemetry
+            // or reset the runtime while a previous scenario is still active.
             _cts?.Cancel();
             try { await Task.WhenAll(workers); }
             catch (OperationCanceledException) { }
+
+            lock (_gate) _status = finishedNaturally ? "complete" : "stopped";
         }
         catch (OperationCanceledException)
         {

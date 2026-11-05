@@ -76,6 +76,50 @@
         <div class="kpi"><div class="kpi-label">MUTATIONS / SEC <span>⤨</span></div><strong id="kpi-mps">—</strong><small id="kpi-version">topology v0</small></div>
         <div class="kpi"><div class="kpi-label"><span id="kpi-radio-label">RADIO LINKS</span> <span>⌁</span></div><strong id="kpi-radio">—</strong><small id="kpi-radio-events">Choose radio mode to simulate</small></div>
       </section>
+      <section class="suite-panel" aria-label="Automated three-scenario benchmark suite">
+        <div class="panel-head">
+          <div>
+            <strong>Three-scenario diagnostic suite</strong>
+            <span>One click · three isolated network benchmarks · three shareable JSON reports</span>
+          </div>
+          <span class="lab-tag">REPRODUCIBLE · OPEN-LOOP · SHARED RADIO</span>
+        </div>
+        <div class="suite-body">
+          <div class="suite-actions">
+            <button id="suite-start" type="button" class="primary">▶ RUN ALL THREE SCENARIOS</button>
+            <button id="suite-stop" type="button" class="secondary" disabled>■ STOP SUITE</button>
+            <span id="suite-status" class="suite-status">READY</span>
+          </div>
+          <p class="suite-settings" id="suite-settings">
+            12,000 nodes · 1,500 requested routes/s · seed 1337 · radio range 14 · 8,192 bytes/tick · 120 seconds each.
+          </p>
+          <div class="suite-progress" aria-label="Three-scenario experiment progress">
+            <div id="suite-progress-fill"></div>
+          </div>
+          <div class="suite-steps">
+            <div class="suite-step" data-suite-case="1">
+              <div><small>01 · STATIC</small><strong>Intact radio network</strong><span>0 moves/s · 0 outages/s</span></div>
+              <span class="suite-step-state">PENDING</span>
+              <div class="suite-step-download"></div>
+            </div>
+            <div class="suite-step" data-suite-case="2">
+              <div><small>02 · MOVEMENT</small><strong>Moving nodes</strong><span>1,000 moves/s · 0 outages/s</span></div>
+              <span class="suite-step-state">PENDING</span>
+              <div class="suite-step-download"></div>
+            </div>
+            <div class="suite-step" data-suite-case="3">
+              <div><small>03 · MOVEMENT + OUTAGES</small><strong>Radio failures under motion</strong><span>1,000 moves/s · 30 outages/s</span></div>
+              <span class="suite-step-state">PENDING</span>
+              <div class="suite-step-download"></div>
+            </div>
+          </div>
+          <div class="suite-footer">
+            <span id="suite-message">Results remain available when you reload the page. The experiment continues on the host if this tab closes.</span>
+            <a id="suite-zip" href="#" class="suite-zip-link" hidden>DOWNLOAD ALL 3 JSON FILES AS ZIP</a>
+          </div>
+          <p class="suite-description">After completion, download the three JSON files (or the ZIP containing all three) and attach them to ChatGPT. Running another suite replaces the previous in-memory reports.</p>
+        </div>
+      </section>
       <section class="network-panel">
         <div class="panel-head">
           <div><strong>Topology explorer</strong><span id="map-count">Waiting for snapshot</span></div>

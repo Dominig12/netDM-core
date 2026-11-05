@@ -468,3 +468,52 @@ This does **not** guarantee that the route will remain valid for the
 entire duration of an eventual multi-tick packet transfer. A future
 per-hop transmission scheduler must revalidate the next hop at its own
 dispatch time, and fail or re-route at the broken hop.
+
+## One-click three-scenario diagnostics for ChatGPT
+
+Network Observatory now has a **Three-scenario diagnostic suite** section
+with **RUN ALL THREE SCENARIOS**. Clicking it starts a host-owned job with
+these reproducible settings (no manual reconfiguration):
+
+| Stage | Nodes | Offered routes/s | Moves/s | Radio toggles/s |
+|---|---:|---:|---:|---:|
+| 01: static | 12,000 | 1,500 | 0 | 0 |
+| 02: movement | 12,000 | 1,500 | 1,000 | 0 |
+| 03: movement + outages | 12,000 | 1,500 | 1,000 | 30 |
+
+Every stage uses the same **seed 1337**, **120-second run**, **shared-radio
+model**, **14-unit range** and **8192 bytes/tick budget**. Nodes and radio
+registrations are reconstructed afresh before each stage. The host runs
+the three stages **sequentially**, never all at once.
+
+The dashboard tracks active stage and progress. Once a stage is complete,
+its **DOWNLOAD JSON** link appears immediately. When all stages finish,
+the **DOWNLOAD ALL 3 JSON FILES AS ZIP** link becomes available. Send
+the three JSON files or the ZIP to ChatGPT for an apples-to-apples
+analysis. Each exported report includes its own scenario metadata, the
+same top-level `exportedAt/metrics/history/topology` fields as manual
+exports, and the full benchmark/scheduler/shared-medium diagnostics.
+The `topology` field intentionally includes a compact summary instead
+of a massive full viewport dump.
+
+The experiment is **managed by the server**: closing or refreshing the
+browser does not cancel it. The last suite's reports remain accessible
+after a reload until you launch a new suite or restart the host.
+Manual benchmark/algorithm-comparison starts are blocked while the
+suite runs; **STOP SUITE** cancels the current stage and leaves any
+previously completed JSON reports downloadable.
+
+### Programmatic access
+
+```bash
+curl -X POST http://127.0.0.1:5087/api/benchmark-suite/start \
+  -H 'Content-Type: application/json' -d '{}'
+curl http://127.0.0.1:5087/api/benchmark-suite
+# Use runId from the state response to download each of 1, 2 and 3:
+curl -OJ 'http://127.0.0.1:5087/api/benchmark-suite/download/1?runId=...'
+curl -OJ 'http://127.0.0.1:5087/api/benchmark-suite/download-all?runId=...'
+```
+
+The API accepts optional smaller `nodes`, `routesPerSecond`, `durationSeconds`
+etc. solely to allow quick CI verification of the same three-stage
+lifecycle. The dashboard button always requests the canonical settings.

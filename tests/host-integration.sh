@@ -196,3 +196,77 @@ assert load["offered"] == load["admitted"] + load["rejected"],load
 assert load["offered"] > 0,load
 print("Offered, admitted and rejected arrival accounting: PASS",load)
 PY
+
+# One click in the dashboard starts the same server-owned suite. Exercise the
+# entire three-stage lifecycle and verify each download independently.
+grep -q 'RUN ALL THREE SCENARIOS' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+curl -fsS -X POST "$base/api/benchmark-suite/start" \
+  -H 'Content-Type: application/json' \
+  -d '{"nodes":90,"routesPerSecond":45,"movesPerSecond":55,"linkChangesPerSecond":6,"durationSeconds":3,"seed":1337,"radioRange":14,"mediumBytesPerTick":8192}' \
+  > "${RUNNER_TEMP:-/tmp}/netdm-suite-start.json"
+python3 - <<'PY'
+import json,os
+p=os.path.join(os.environ.get("RUNNER_TEMP","/tmp"),"netdm-suite-start.json")
+with open(p,encoding="utf-8") as f:s=json.load(f)
+assert s["status"]=="running",s
+assert s["runId"] and s["total"]==3,s
+print("Three-scenario suite accepted:",s["runId"])
+PY
+# Manual starts must not overwrite a stage or its pending report snapshot.
+http_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$base/api/benchmark/start" \
+  -H 'Content-Type: application/json' \
+  -d '{"nodes":90,"routesPerSecond":10,"durationSeconds":2}')"
+test "$http_code" = "409"
+for i in $(seq 1 65); do
+  curl -fsS "$base/api/benchmark-suite" > "${RUNNER_TEMP:-/tmp}/netdm-suite-state.json"
+  status="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "${RUNNER_TEMP:-/tmp}/netdm-suite-state.json")"
+  if [[ "$status" == "complete" ]]; then break; fi
+  if [[ "$status" == "failed" || "$status" == "stopped" ]]; then
+    cat "${RUNNER_TEMP:-/tmp}/netdm-suite-state.json" >&2
+    exit 1
+  fi
+  sleep 1
+done
+run_id="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["runId"])' "${RUNNER_TEMP:-/tmp}/netdm-suite-state.json")"
+for n in 1 2 3; do
+  curl -fsS "$base/api/benchmark-suite/download/$n?runId=$run_id" \
+    > "${RUNNER_TEMP:-/tmp}/netdm-suite-$n.json"
+done
+curl -fsS "$base/api/benchmark-suite/download-all?runId=$run_id" \
+  > "${RUNNER_TEMP:-/tmp}/netdm-three-scenarios.zip"
+python3 - <<'PY'
+import json,os,zipfile
+root=os.environ.get("RUNNER_TEMP","/tmp")
+def load(filename):
+    with open(os.path.join(root,filename),encoding="utf-8") as f:return json.load(f)
+state=load("netdm-suite-state.json")
+assert state["status"]=="complete" and state["completed"]==3,state
+assert len(state["reports"])==3,state
+scenarios=("static","movement","movement-outages")
+for number,key in enumerate(scenarios,1):
+    report=load(f"netdm-suite-{number}.json")
+    assert report["suite"]["scenario"]==key,report["suite"]
+    assert report["suite"]["number"]==number,report["suite"]
+    assert report["suite"]["completed"] is True,report["suite"]
+    assert report["suite"]["schemaVersion"]==1,report["suite"]
+    delta=report["suite"]["schedulerDelta"]
+    assert delta["accepted"]>=0 and delta["rejected"]>=0,delta
+    assert delta["completed"]>=0 and delta["failed"]==0,delta
+    assert report["suite"]["parameters"]["seed"]==1337,report["suite"]
+    bench=report["metrics"]["benchmark"]
+    assert bench["status"]=="complete",bench
+    assert report["metrics"]["nodeCount"]==90,report["metrics"]
+    assert len(report["history"])>0,report
+    assert bench["load"]["offered"]==bench["load"]["admitted"]+bench["load"]["rejected"],bench
+    assert bench["options"]["movesPerSecond"]==(0 if number==1 else 55),bench
+    assert bench["options"]["linkChangesPerSecond"]==(6 if number==3 else 0),bench
+with zipfile.ZipFile(os.path.join(root,"netdm-three-scenarios.zip")) as z:
+    names=z.namelist()
+    assert len(names)==3 and len(set(names))==3,names
+    for number,key in enumerate(scenarios,1):
+        match=[name for name in names if f"{number:02d}-{key}-" in name]
+        assert len(match)==1,names
+        content=json.loads(z.read(match[0]))
+        assert content["suite"]["scenario"]==key,content
+print("Three-stage benchmark suite + independent JSON files + ZIP: PASS")
+PY
