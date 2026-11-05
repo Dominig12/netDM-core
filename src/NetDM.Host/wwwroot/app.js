@@ -118,7 +118,17 @@ function drawMap(){
     if(p.x<-10||p.x>w+10||p.y<-10||p.y>h+10)continue;
     const focus=node.id===selected;
     const radius=focus?6:Math.min(5,2.4+Math.log2(1+activity)*.7);
-    if(focus){ctx.strokeStyle="#d4f6ff";ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(p.x,p.y,10,0,Math.PI*2);ctx.stroke();}
+    if(focus){
+      ctx.strokeStyle="#d4f6ff";ctx.lineWidth=1.5;ctx.beginPath();
+      ctx.arc(p.x,p.y,10,0,Math.PI*2);ctx.stroke();
+      const range=currentMetrics?.benchmark?.options?.wirelessEnabled
+        ? currentMetrics.benchmark.options.radioRange : 0;
+      if(range){
+        ctx.strokeStyle="rgba(85,219,225,.35)";
+        ctx.lineWidth=1;
+        ctx.beginPath();ctx.arc(p.x,p.y,range*camera.scale,0,Math.PI*2);ctx.stroke();
+      }
+    }
     ctx.fillStyle=focus?"#e5fbff":"#ffb77b";ctx.beginPath();ctx.arc(p.x,p.y,radius,0,Math.PI*2);ctx.fill();
   }
   $("viewport-text").textContent="X "+Math.round(left)+" → "+Math.round(right)+"   /   Y "+Math.round(top)+" → "+Math.round(bottom);

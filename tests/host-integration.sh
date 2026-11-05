@@ -86,3 +86,35 @@ assert len(h) > 0 and h[-1]["actualRoutesPerSecond"] >= 0, h
 print("Host HTTP + benchmark + visualizer integration: PASS")
 PY
 curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null
+
+# Run a second scenario: radio links follow motion and temporary outages.
+# This is a real DynamicRadioNetwork, not a cosmetic map animation.
+for i in $(seq 1 20); do
+  state="$(curl -fsS "$base/api/metrics" | python3 -c 'import json,sys;print(json.load(sys.stdin)["benchmark"]["status"])')"
+  if [[ "$state" == "stopped" || "$state" == "complete" ]]; then break; fi
+  sleep 1
+done
+curl -fsS -X POST "$base/api/benchmark/start" \
+  -H 'Content-Type: application/json' \
+  -d '{"nodes":100,"routesPerSecond":40,"movesPerSecond":90,"linkChangesPerSecond":40,"durationSeconds":9,"seed":2601,"wirelessEnabled":true,"radioRange":14}' >/dev/null
+sleep 4
+curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-radio-metrics.json"
+curl -fsS "$base/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-radio-history.json"
+python3 - <<'PY'
+import json, os
+dir=os.environ.get("RUNNER_TEMP","/tmp")
+with open(os.path.join(dir,"netdm-radio-metrics.json"),encoding="utf-8") as f: m=json.load(f)
+with open(os.path.join(dir,"netdm-radio-history.json"),encoding="utf-8") as f: h=json.load(f)
+b=m["benchmark"]
+assert b["options"]["wirelessEnabled"] is True, b
+assert m["nodeCount"] == 100, m
+assert b["radio"]["configuredNodes"] <= 100, b
+assert b["radio"]["totalWirelessLinksAdded"] > 0, b
+assert b["radio"]["totalWirelessLinksRemoved"] > 0, b
+assert b["radio"]["activeWirelessLinks"] >= 0, b
+assert m["runtime"]["routes"] > 0, m
+assert any(x["radioLinks"] > 0 for x in h), h
+assert any(x["radioLinksRemovedPerSecond"] > 0 for x in h), h
+print("Dynamic radio benchmark / topology churn / telemetry: PASS")
+PY
+curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null
