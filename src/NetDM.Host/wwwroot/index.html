@@ -44,6 +44,13 @@
               <option value="legacy">LEGACY · Reserve entire route / tick</option>
               <option value="hopwise">HOPWISE · One hop per simulation tick</option>
             </select>
+            <label for="packet-airtime">Radio airtime sharing</label>
+            <select id="packet-airtime" class="workload-select">
+              <option value="spatial">SPATIAL · Independent distant radio cells</option>
+              <option value="global">GLOBAL · One budget per channel / Z</option>
+            </select>
+            <label for="packet-ttl">Packet lifetime <small>simulation ticks (100 ms)</small></label>
+            <input id="packet-ttl" type="number" min="1" max="1000000" value="900">
           </div>
           <p class="radio-description">Nodes form links automatically when both radios are in range and on the same channel. Link changes simulate temporary radio outages.</p>
         </div>
@@ -107,6 +114,15 @@
                 <option value="legacy">Legacy full-route reservation</option>
                 <option value="hopwise">Hop-by-hop packet forwarding</option>
               </select>
+            </label>
+            <label for="suite-airtime">Airtime scope
+              <select id="suite-airtime" class="workload-select">
+                <option value="spatial">Spatial reuse (new)</option>
+                <option value="global">One channel budget (baseline)</option>
+              </select>
+            </label>
+            <label for="suite-ttl">TTL, simulation ticks
+              <input id="suite-ttl" type="number" min="1" max="1000000" value="900">
             </label>
           </div>
           <div class="suite-actions">
