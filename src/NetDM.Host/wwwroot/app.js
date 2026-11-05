@@ -745,7 +745,7 @@ $("suite-compare-preset").addEventListener("change",()=>{
   const preset=$("suite-compare-preset").value;
   if(!preset)return;
   $("suite-search").value=preset==="baseline"?"astar":
-    preset==="dense"?"astar-dense":"astar-pooled";
+    (preset==="dense"||preset.startsWith("transport-"))?"astar-dense":"astar-pooled";
   $("suite-delivery").value="hopwise";
   $("suite-airtime").value="spatial";
   $("suite-ttl").value="900";
