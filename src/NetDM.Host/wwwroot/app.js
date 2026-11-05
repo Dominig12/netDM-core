@@ -657,7 +657,7 @@ async function pollSuite(){
         " requested routes/s · seed "+opts.seed+" · radio range "+opts.radioRange+
         " · "+format(opts.mediumBytesPerTick)+" bytes/tick · "+
         opts.durationSeconds+" seconds per scenario · "+
-        (opts.sharedSearch==="astar"?"A*":"Dijkstra")+" · "+
+        (opts.sharedSearch==="astar-pooled"?"A* pooled":opts.sharedSearch==="astar"?"A* original":"Dijkstra")+" · "+
         (opts.packetTransportEnabled?"hop-by-hop packets":"legacy airtime")+" · "+
         (opts.spatialReuseEnabled?"spatial sharing":"global channel")+
         " · TTL "+opts.packetMaxAgeTicks+" ticks · "+
@@ -714,6 +714,20 @@ async function pollSuite(){
     }
   }catch(error){console.warn("Suite telemetry unavailable",error);}
 }
+$("suite-compare-preset").addEventListener("change",()=>{
+  const preset=$("suite-compare-preset").value;
+  if(!preset)return;
+  $("suite-search").value=preset==="baseline"?"astar":"astar-pooled";
+  $("suite-delivery").value="hopwise";
+  $("suite-airtime").value="spatial";
+  $("suite-ttl").value="900";
+  $("suite-reroute-workers").value="2";
+  $("suite-reroute-budget").value="25";
+  $("suite-tick-mode").value="dedicated";
+  $("suite-tick-budget").value="25";
+  $("suite-backoff-cap").value=preset==="short-wait"?"24":"96";
+  $("suite-reroute-cooldown").value="8";
+});
 $("suite-start").addEventListener("click",async()=>{
   try{
     const response=await fetch("/api/benchmark-suite/start",{
