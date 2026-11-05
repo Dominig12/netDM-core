@@ -119,3 +119,45 @@ docs/
    measured p50/p95/p99 under defined hardware and concurrency budgets.
 
 See [architecture.md](docs/architecture.md).
+
+## Routing Laboratory (isolated algorithm profiling)
+
+In the same dashboard, open **Routing laboratory** below the live charts.
+Choose **100–30,000 nodes**, **10–1,000 route queries**, viewport query count and a seed,
+then start the comparison. The report measures **four alternatives** on identical
+source/target requests from one immutable graph:
+
+1. Dictionary Dijkstra (existing baseline)
+2. Dictionary bidirectional Dijkstra
+3. CSR Dijkstra (compact array-based adjacency)
+4. CSR bidirectional Dijkstra
+
+Each solution is checked against the baseline's optimal cost, and every successful
+path is checked against the actual snapshot links. The run fails instead of reporting
+misleading timings if a mismatch is detected. P50/P95/P99 use per-route
+microseconds; memory is **per-thread allocated bytes per query**; throughput is
+**serial equivalent queries/s**, not parallel or production capacity.
+
+The same experiment compares viewport spatial-hash queries against full graph
+scans, measures **64-move batches** on the persistent topology store, and reports
+CSR build latency, allocations, and estimated CSR array payload. A compact CSR
+projection is not automatically activated in the live router, because rebuilding
+it after frequent link changes may negate faster queries. Route choice will be
+decided only after profiling realistic dynamic workloads.
+
+### Comparison API
+
+```bash
+curl -X POST http://127.0.0.1:5087/api/comparison/start \
+  -H 'Content-Type: application/json' \
+  -d '{"nodes":10000,"routes":160,"viewportQueries":120,"moveBatches":32,"seed":1337}'
+
+curl http://127.0.0.1:5087/api/comparison
+curl -X POST http://127.0.0.1:5087/api/comparison/stop
+```
+
+The comparison builds **its own isolated synthetic graph** so the live network
+visualizer is not overwritten. Live and isolated benchmark HTTP start requests
+reject most overlapping runs, but they are not yet coordinated by a single
+atomic admission lock. The synthetic workloads are **not** real SS13 traffic traces.
+On Windows, the new CI build also compiles and executes the core smoke tests.
