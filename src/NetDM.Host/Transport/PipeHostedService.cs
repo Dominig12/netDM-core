@@ -122,7 +122,7 @@ public sealed class PipeHostedService(NetworkRuntime runtime, ILogger<PipeHosted
                     "stats" => Stats(request),
                     "batch" => ApplyBatch(request),
                     "add_node" or "remove_node" or "connect" or "disconnect" or "move_node" =>
-                        ApplyBatch(request with { Changes = [ToChange(request)] }),
+                        ApplyChanges(request.Id, [ToChange(request)]),
                     _ => new PipeResponse(request.Id, false, "Unknown operation.")
                 };
                 await SendAsync(result);
@@ -147,9 +147,13 @@ public sealed class PipeHostedService(NetworkRuntime runtime, ILogger<PipeHosted
     {
         if (request.Changes is null || request.Changes.Length is < 1 or > 4096)
             throw new ArgumentException("Batch size must be 1..4096.");
-        var changes = request.Changes.Select(ToChange).ToArray();
+        return ApplyChanges(request.Id, request.Changes.Select(ToChange).ToArray());
+    }
+
+    private PipeResponse ApplyChanges(string? requestId, IReadOnlyList<TopologyChange> changes)
+    {
         var applied = runtime.Apply(changes);
-        return new PipeResponse(request.Id, true, Version: applied.Version,
+        return new PipeResponse(requestId, true, Version: applied.Version,
             Applied: applied.Applied, Skipped: applied.Skipped);
     }
 
