@@ -608,12 +608,12 @@ static void CheckAdaptivePacketTransport()
     Check(!admission.Enqueue(route,1,0)); // Cannot steal a reserved slot.
     Check(admission.Capture().PreRouteBackpressureRejections==1);
     Check(admission.Capture().ReservedAdmissions==2);
-    lease1.Dispose();
+    lease1!.Dispose();
     lease1.Dispose(); // Must not double-release.
     Check(admission.Capture().ReservedAdmissions==1);
     Check(admission.Enqueue(route,1,0)); // Unreserved free slot.
-    Check(admission.EnqueueReserved(route,1,0,lease2));
-    lease2.Dispose(); // Consumed lease is now inert.
+    Check(admission.EnqueueReserved(route,1,0,lease2!));
+    lease2!.Dispose(); // Consumed lease is now inert.
     Check(admission.Capture().ReservedAdmissions==0);
     Check(admission.Capture().Enqueued==2);
     Check(admission.TryReserveAdmission() is null);
@@ -626,8 +626,8 @@ static void CheckAdaptivePacketTransport()
     var invalidLease = failed.TryReserveAdmission();
     Check(invalidLease is not null);
     Check(!failed.EnqueueReserved(RouteResult.Missing(
-        failedRadio.Snapshot.Version),1,0,invalidLease));
-    invalidLease.Dispose();
+        failedRadio.Snapshot.Version),1,0,invalidLease!));
+    invalidLease!.Dispose();
     Check(failed.Capture().ReservedAdmissions==0);
     Check(failed.Capture().InvalidRejections==1);
     // A route cancelled BEFORE it executes simply disposes the lease.
