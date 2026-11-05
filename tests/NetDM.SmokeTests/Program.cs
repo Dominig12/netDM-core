@@ -417,6 +417,8 @@ static void CheckPacketTransport()
     Check(stats.BusyDeferrals > 0);
     Check(stats.DeliveredBytes == 800);
     Check(stats.DeliveryAgeP95Ticks >= 2);
+    Check(stats.FirstHopSamples==2);
+    Check(stats.FirstHopAgeP95Ticks>=1);
     Check(stats.MeanDeliveredHops == 2);
     Check(stats.QueueFullRejections == 1);
 
@@ -507,6 +509,20 @@ static void CheckPacketTransport()
     Check(!expired.CompleteReroute(expiredTicket,expiredRoute));
     Check(expired.Capture().Delivered==0);
     Check(expired.Capture().RerouteInFlight==0);
+    Check(expired.Capture().Enqueued==expired.Capture().Expired);
+
+    // A gap between real forwarding passes is measured separately from
+    // global scheduler admissions. No retroactive packet teleport occurs.
+    var (gapMedium,gapRoute)=MakeChain(600);
+    var gaps=new RadioPacketTransport(gapMedium);
+    Check(gaps.Enqueue(gapRoute,250,0));
+    Check(gaps.Advance(1)==1);
+    gaps.RecordTickAdmissionFailure();
+    Check(gaps.Advance(5)==1);
+    Check(gaps.Capture().SkippedTicks==3);
+    Check(gaps.Capture().TickAdmissionFailures==1);
+    Check(gaps.Capture().FirstHopSamples==1);
+    Check(gaps.Capture().ForwardingP95Milliseconds>=0);
 
     // A physical cable can restore the missing hop while a packet is
     // already en route. The final hop uses the cable, not shared airtime.

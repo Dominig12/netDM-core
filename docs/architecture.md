@@ -558,3 +558,59 @@ transmission, tick rollover and old-tick rejection, bounded packet
 admission, recovery after temporary disconnection and delivery ages.
 HTTP integration runs A* with spatial hopwise forwarding and checks
 per-stage JSON statistics from the three-scenario suite.
+
+## M12: separate reroute work from packet forwarding
+
+Packet forwarding and full shortest-path search have radically
+different CPU characteristics. The old `Advance` called
+`SharedMediumNetwork.Route` while holding the packet queue lock.
+In motion-heavy runs, this caused long critical sections and
+interfered with original routing at the Interactive priority.
+
+The M12 ownership model is:
+
+- A packet resides in a bounded round-robin queue for its entire life.
+- Failed next-hop validation generates a bounded `PacketRerouteRequest`
+  containing a packet ID, request generation, current source node,
+  destination and tick. `Advance` never calls `Route`.
+- A second bounded `PriorityWorkScheduler` executes reroute requests
+  (1 worker and 25ms soft time-window budget by default) independently
+  of the primary player/packet-advance scheduler.
+- Results are applied under a short lock, **only** if the request is
+  still the packet's current outstanding ticket, its source node is
+  unchanged and it has not been expired or dropped.
+- Cancelling a scheduled job returns the packet to a retryable state.
+  Expired packets cannot be resurrected. Excess ticket demand is
+  deferred without enqueueing an unbounded number of tasks.
+
+The ticket buffer has 64 slots, of which at most
+`MaxConcurrentReroutes` may be in flight. The dedicated CPU executor
+also has a 32-item backlog ceiling. Both limits are independent of
+the 2,048-packet admission queue and of the primary host's 256-job
+scheduler backlog.
+
+`PacketTransportCounters` now exposes ticket depth/inflight, reroute
+completion/cancellation/admission rejection counts, p95 waiting from
+ticket creation to completion (ticks), p95 `Advance` duration (ms),
+first-hop wait p50/p95 (ticks) and skipped forwarding ticks.
+The benchmark stores per-interval deltas and the latest p95 values,
+including separate reroute worker queue depth/wait.
+
+These counters distinguish application delivery, actual work admitted,
+CPU backlog, and missing packet ticks. Soft CPU budgeting still does
+not guarantee hard real-time deadlines. Reroute workers are not yet
+safe for untrusted clients: the host remains localhost-only and the
+future BYOND bridge needs per-client quotas/authentication.
+
+### Next measurements
+
+Repeat the 3 x 120s scenario suite at 12k nodes, A* + Hopwise +
+Spatial reuse, TTL=900, reroute workers=1 and CPU budget=25ms/100ms.
+Compare against the previous run:
+- delivered packets and first-hop p95;
+- reroute requests/s, in-flight count, queue deferrals;
+- skipped ticks and tick admission failures/s;
+- original-route completed requests/s, global work wait/exec p95;
+- reroute scheduler's own CPU admission and work p95.
+
+A full 12k-node benchmark has **not** been rerun by the CI tests.

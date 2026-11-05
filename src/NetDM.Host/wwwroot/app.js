@@ -267,7 +267,8 @@ function drawCharts(){
   $("chart-packets").textContent=last?
     format(last.packetsDeliveredPerSecond||0)+" / "+
     format(last.packetsDroppedPerSecond||0)+" · p95 "+
-    format((last.deliveryP95AgeTicks||0)/10)+"s":"—";
+    format((last.deliveryP95AgeTicks||0)/10)+"s · first-hop p95 "+
+    format((last.packetFirstHopP95Ticks||0)/10)+"s":"—";
   $("chart-packet-queue").textContent=last?format(last.packetsQueued||0)+" queued":"—";
   plot("reroute-pressure-chart",[
     {values:history.map(x=>x.reroutesQueued||0),color:"#8d9dff"},

@@ -687,3 +687,84 @@ hopwise simulations), `packetMaxAgeTicks` (default 900), and
 `packetMaxAdvancesPerTick` (default 1024).
 Legacy whole-route reservation still uses global channel capacity
 and is unaffected by the spatial toggle.
+
+## M12 — Isolated asynchronous packet reroutes
+
+The 12k-node spatial-radio stress run confirmed large improvements for
+static networks (4,624 delivered packets), but packet throughput collapsed
+under mobility and outages. The former `RadioPacketTransport.Advance`
+held the *entire packet queue lock* while running full A*/Dijkstra
+`_network.Route(...)` for broken hops. Those expensive searches were
+also executed inside the Interactive packet-tick task, blocking fast
+delivery work and interfering with original player routing.
+
+### The split
+
+`Advance(tick)` now only forwards bounded ready hops or generates
+**bounded** `PacketRerouteRequest` tickets for broken links. It **never**
+computes a route itself. The new API splits rerouting into:
+
+- `TryTakeReroute(out ticket)`: acquire at most the configured number of
+  in-flight tickets; the packet remains queued but is marked pending.
+- `CompleteReroute(ticket, route)`: only apply if the original packet is
+  still active, still at the same node and has the same destination.
+- `CancelReroute(ticket, schedulerRejected)`: release in-flight ownership
+  on cancellation, error or CPU admission rejection and retry later.
+
+Expired packets cannot be resurrected by late search results. Their
+original queue slots are released even while their old calculation
+is still in progress. Sending and cancellation never silently discard
+accepted payloads. Every accepted packet still contributes to exactly
+one of Delivered, Dropped, Expired or Queued.
+
+Reroute tickets are bounded by `MaxPendingReroutes=64`, and at most one
+worker is concurrently active by default (`MaxConcurrentReroutes=1`
+in the benchmark). Another packet simply defers its broken hop while
+the queue is full, rather than blocking the entire forwarding pass.
+
+### Separate CPU admission
+
+The benchmark starts a **second** `PriorityWorkScheduler` only when
+hopwise packet simulation is active. Its defaults are:
+
+| Budget | Default |
+|---|---:|
+| Dedicated reroute workers | 1 |
+| Reroute CPU executor backlog | 32 |
+| Soft reroute CPU admission per 100ms | 25ms |
+| Maximum pending reroute tickets | 64 |
+| Global player/original-route scheduler backlog | 256 |
+
+This is still *soft wall-time admission*, not preemptive CPU isolation
+or a processor-affinity guarantee. A running route may exceed its
+budget. The dedicated worker prevents a costly reroute from executing
+while the Interactive forwarding task owns the packet queue lock.
+
+### New diagnostics
+
+The three-scenario JSON reports include a distinct
+`metrics.benchmark.rerouteScheduler` snapshot and full packet counters:
+`rerouteQueued`, `rerouteInFlight`, `rerouteCompleted`,
+`rerouteCancelled`, `rerouteQueueDeferrals`,
+`rerouteSchedulerRejections`, `rerouteWaitP95Ticks`,
+`skippedTicks`, `tickAdmissionFailures`,
+`forwardingP95Milliseconds`, `firstHopAgeP50Ticks`
+and `firstHopAgeP95Ticks`.
+
+The Observatory now plots **Reroute pressure** and **Packet tick health**
+beside existing radio and packet charts. First-hop wait p95 is shown
+separately from final delivery age p95. A high first-hop wait implies
+queue congestion; high delivery age with a low first-hop wait is more
+likely due to intermediate-hop contention, reroutes or long paths.
+
+The manual benchmark and the three-scenario suite offer
+`packetRerouteWorkers` (1–4) and
+`packetRerouteCpuBudgetMs` (0–100) controls; leave them at
+**1 worker / 25ms per 100ms** for the next A/B comparison.
+
+The previous suite's report format is still compatible: existing
+fields remain, and all new fields are additive. Delivery improvements
+under mobility remain **unmeasured** until another three-scenario
+12k-node run. Old and new data should be compared by actual offered,
+admitted, completed and delivered rates, and by sampled task execution
+and queue latencies.

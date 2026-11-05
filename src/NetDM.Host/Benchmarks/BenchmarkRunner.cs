@@ -94,7 +94,8 @@ public sealed record BenchmarkSample(
     double RerouteQueueDeferralsPerSecond, double RerouteRejectedPerSecond,
     double RerouteWaitP95Ticks, double PacketForwardingP95Milliseconds,
     double PacketSkippedTicksPerSecond, double PacketTickAdmissionFailuresPerSecond,
-    int RerouteCpuQueued, double RerouteCpuWaitP95Us);
+    int RerouteCpuQueued, double RerouteCpuWaitP95Us,
+    double PacketFirstHopP50Ticks, double PacketFirstHopP95Ticks);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -404,7 +405,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     ((packetSnapshot?.TickAdmissionFailures ?? 0) -
                         (previousPackets?.TickAdmissionFailures ?? 0)) / interval,
                     rerouteCpuSnapshot?.Queued ?? 0,
-                    rerouteCpuSnapshot?.QueueWaitP95Us ?? 0);
+                    rerouteCpuSnapshot?.QueueWaitP95Us ?? 0,
+                    packetSnapshot?.FirstHopAgeP50Ticks ?? 0,
+                    packetSnapshot?.FirstHopAgeP95Ticks ?? 0);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;
