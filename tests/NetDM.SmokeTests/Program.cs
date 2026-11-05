@@ -147,7 +147,10 @@ static void CheckWirelessTopology()
     radio.Update([new RadioNodeUpdate(c, Position: new NodePosition(25, 0))]);
     Check(runtime.Topology.Snapshot.ConnectivityVersion == staticVersion);
 
-    Check(!radio.SetCable(a, a, 5)); // invalid: tested in exception assertion below
+    bool rejected = false;
+    try { radio.SetCable(a, a, 5); }
+    catch (ArgumentException) { rejected = true; }
+    Check(rejected);
 }
 
 static void CheckRadioOracle()
