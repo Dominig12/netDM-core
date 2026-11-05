@@ -223,7 +223,8 @@ public sealed class RoutingComparisonRunner(ILogger<RoutingComparisonRunner> log
             for (var i = 0; i < options.ViewportQueries; i++)
             {
                 ct.ThrowIfCancellationRequested();
-                var x = rng.Next(width + 1), y = rng.Next(height + 1);
+                var x = rng.Next(width + 1);
+                var y = rng.Next(height + 1);
                 start = Stopwatch.GetTimestamp();
                 var indexed = TopologyStore.QueryViewport(snapshot,
                     x, y, x + viewportWidth, y + viewportHeight, limit: 20_000);
