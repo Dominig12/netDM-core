@@ -447,6 +447,46 @@ public sealed class SharedMediumNetwork
     }
 
     /// <summary>
+    /// Transmit exactly one hop against current topology and the shared
+    /// per-channel airtime ledger. Cable links need no channel allocation.
+    /// This is intentionally distinct from legacy whole-route TryTransmit.
+    /// </summary>
+    public RadioHopOutcome TryTransmitHop(NodeId from, NodeId to, int bytes, long tick)
+    {
+        if (bytes is < 1 or > 1_000_000)
+            throw new ArgumentOutOfRangeException(nameof(bytes));
+        ArgumentOutOfRangeException.ThrowIfNegative(tick);
+        var snapshot = Snapshot;
+        if (from == to ||
+            !snapshot.Physical.Nodes.TryGetValue(from, out var node) ||
+            !snapshot.Physical.Nodes.ContainsKey(to))
+            return RadioHopOutcome.LinkUnavailable;
+
+        var wire = node.Links.TryGetValue(to, out var edge)
+            ? (ulong)edge.Cost : ulong.MaxValue;
+        var radio = RadioCost(snapshot, from, to, out var domain);
+        if (wire == ulong.MaxValue && radio is null)
+            return RadioHopOutcome.LinkUnavailable;
+        if (wire <= (ulong)(radio ?? uint.MaxValue))
+            return RadioHopOutcome.TransmittedCable;
+
+        lock (_airtimeLock)
+        {
+            var slot = _airtime.TryGetValue(domain, out var existing)
+                ? existing : (Tick: -1L, Used: 0L);
+            if (slot.Tick > tick)
+                return RadioHopOutcome.OldTick;
+            if (bytes > _bytesPerTick)
+                return RadioHopOutcome.PacketTooLarge;
+            if (slot.Tick == tick && slot.Used + bytes > _bytesPerTick)
+                return RadioHopOutcome.ChannelBusy;
+            var used = slot.Tick == tick ? slot.Used : 0L;
+            _airtime[domain] = (tick, used + bytes);
+            return RadioHopOutcome.TransmittedRadio;
+        }
+    }
+
+    /// <summary>
     /// Reserve shared bytes/tick on every radio hop atomically. A cable hop
     /// costs zero wireless airtime. Each domain shares one quota across devices.
     /// A route computed on an older snapshot can still be used if EVERY hop is
