@@ -302,3 +302,59 @@ Tests compare its routes to the pairwise model on randomized channels,
 positions, and moved devices; also cover a dense 400-device cell without
 adding any physical radio edges, movement snapshot consistency,
 stale-route transmission rejection and shared capacity saturation.
+
+## Priority work scheduler (M5 prototype)
+
+All **named-pipe player route requests** and **live benchmark route requests**
+now share one globally bounded `PriorityWorkScheduler`. Direct calls to the
+core `NetworkRuntime.Route`, and the isolated algorithm-comparison runner,
+remain synchronous on purpose. The latter is for measuring algorithms without
+scheduler overhead; do not mistake those numbers for end-to-end latency.
+
+### Admission and fairness
+
+- Fixed `Math.Clamp(Environment.ProcessorCount / 2, 1, 8)` concurrent CPU
+  workers; no unbounded `Task.Run` for each incoming route.
+- Maximum **256 queued requests**. New requests are immediately rejected
+  with `busy` when the queue is full. The synthetic benchmark records these
+  rejections rather than building an unbounded producer backlog.
+- Weighted selection gives Critical / Interactive / Background a 4:2:1
+  service pattern when all classes are backlogged, without permanently
+  starving any class. The pipe currently uses Interactive priority and
+  background workload generation uses Background.
+- Connection disconnects propagate cancellation into scheduled route work.
+  Already executing routes check their cancellation token while searching.
+- A soft **65 ms per 100 ms** admission budget defers starting new jobs
+  once the window is consumed. It uses task elapsed wall time as a proxy.
+  **It cannot preempt running work or guarantee CPU usage**, especially
+  with multiple workers and operating-system scheduling.
+
+### Observatory
+
+The **CPU Work Scheduler** panel shows current/peak backlog,
+queued counts by priority, worker utilization, accepted/rejected tasks,
+queue-wait p95 and processing p95. New charts show queue depth and
+rejections per second. Both the `GET /api/scheduler` endpoint and the
+`scheduler` field in `GET /api/metrics` expose these live counters.
+
+```bash
+curl http://127.0.0.1:5087/api/scheduler
+```
+
+Synthetic overload must be judged by *observed* routes/s,
+queue-wait p95, queue-depth growth and rejection rate; the configured
+target load is not the achieved throughput. Priority fairness is tested
+using a held worker and deliberately saturated queue.
+
+### Dense shared-radio routing fast path
+
+With strictly positive graph costs, Dijkstra can stop as soon as the
+smallest unsettled distance is no smaller than an already discovered
+target distance. This avoids expanding hundreds of equivalent-cost
+nodes in a fully connected radio cell, without assuming that one
+channel/Z-level implies direct geometric connectivity.
+
+The dense 400-device test checks the returned exact cost and that
+the search visits at most two nodes for a direct target. General
+multi-hop networks can still trigger expensive neighbor enumeration;
+profile worst-case geometry before switching the live default.

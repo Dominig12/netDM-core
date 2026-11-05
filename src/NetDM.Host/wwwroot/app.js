@@ -9,6 +9,9 @@ const mb = bytes => (Number(bytes || 0)/1048576).toFixed(1)+" MB";
 let currentMap = {nodes:[],edges:[],domainCells:[],version:0,totalNodes:0,displayedNodes:0};
 let currentMetrics = null;
 let history = [];
+let schedulerHistory = [];
+let lastSchedulerRejected = 0;
+let lastSchedulerTime = 0;
 let selected = null;
 let previousCounters = null, lastMetricsAt = 0;
 let camera = {x:0,y:0,scale:0.8}, cameraInitialized = false;
@@ -202,9 +205,9 @@ mapCanvas.addEventListener("wheel",event=>{
   drawMap();scheduleMap();
 },{passive:false});
 $("fit").addEventListener("click",fitMap);
-const observe=new ResizeObserver(()=>{drawMap();drawCharts();drawComparisonPlot();});
+const observe=new ResizeObserver(()=>{drawMap();drawCharts();drawSchedulerCharts();drawComparisonPlot();});
 observe.observe(frame);
-for(const id of ["routes-chart","latency-chart","memory-chart","links-chart","compare-chart"])observe.observe($(id));
+for(const id of ["routes-chart","latency-chart","memory-chart","links-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
 
 function plot(id,series,color,extra){
   const canvas=$(id),{ctx,w,h}=resizeCanvas(canvas);
@@ -251,6 +254,46 @@ function drawCharts(){
       : "+"+format(last.radioLinksAddedPerSecond||0)+" / -"+format(last.radioLinksRemovedPerSecond||0)
     : "—";
 }
+
+function drawSchedulerCharts(){
+  const samples=schedulerHistory;
+  plot("sched-queue-chart",[
+    {values:samples.map(x=>x.depth),color:"#59d6e4"},
+    {values:samples.map(x=>x.running),color:"#f2b47e",width:1.1}
+  ],"#59d6e4");
+  plot("sched-reject-chart",[
+    {values:samples.map(x=>x.rejections),color:"#ee8e81"},
+    {values:samples.map(x=>x.waitP95),color:"#659dff",width:1.25}
+  ],"#ee8e81");
+  const last=samples[samples.length-1];
+  $("sched-chart-depth").textContent=last?format(last.depth)+" waiting":"—";
+  $("sched-chart-rejections").textContent=last?format(last.rejections)+"/s":"—";
+}
+function ingestScheduler(scheduler){
+  if(!scheduler)return;
+  $("sched-depth").textContent=format(scheduler.queued)+" / "+format(scheduler.peakQueued);
+  $("sched-queues").textContent="C "+format(scheduler.criticalQueued)+
+    " · I "+format(scheduler.interactiveQueued)+
+    " · B "+format(scheduler.backgroundQueued);
+  $("sched-workers").textContent=format(scheduler.running)+" / "+format(scheduler.workers);
+  $("sched-budget").textContent="soft budget "+format(scheduler.budgetMillisecondsPer100Ms)+" ms / 100 ms";
+  $("sched-rejected").textContent=format(scheduler.rejected);
+  $("sched-accepted").textContent=format(scheduler.accepted)+" accepted · "+
+    format(scheduler.failed)+" failed · "+format(scheduler.cancelled)+" cancelled";
+  $("sched-wait").textContent=format(scheduler.queueWaitP95Us)+" µs";
+  $("sched-processing").textContent=format(scheduler.workP95Us)+" µs work p95";
+  const now=performance.now();
+  const span=lastSchedulerTime?Math.max(.001,(now-lastSchedulerTime)/1000):1;
+  const change=Math.max(0,scheduler.rejected-lastSchedulerRejected)/span;
+  lastSchedulerRejected=scheduler.rejected;lastSchedulerTime=now;
+  schedulerHistory.push({
+    depth:scheduler.queued,running:scheduler.running,
+    rejections:change,waitP95:scheduler.queueWaitP95Us
+  });
+  if(schedulerHistory.length>180)schedulerHistory.shift();
+  drawSchedulerCharts();
+}
+
 async function pollMetrics(){
   try{
     const response=await fetch("/api/metrics",{cache:"no-store"});
@@ -264,6 +307,7 @@ async function pollMetrics(){
     $("run-elapsed").textContent=bench.startedUtc?format(bench.elapsedSeconds)+"s ELAPSED":"NO ACTIVE TEST";
     $("benchmark-indicator").className="pulse "+(bench.status==="running"?"running":bench.status==="building"?"building":"");
     $("start").disabled=bench.status==="running"||bench.status==="building"||bench.status==="stopping";
+    ingestScheduler(data.scheduler);
     $("kpi-nodes").textContent=compact(data.nodeCount);
     $("kpi-edges").textContent=format(data.edgeCount)+" connections";
     $("kpi-p95").textContent=format(data.runtime.p95Microseconds)+" µs";

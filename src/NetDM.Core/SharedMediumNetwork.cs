@@ -251,6 +251,22 @@ public sealed class SharedMediumNetwork
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!costs.TryGetValue(node, out var known) || known != distance) continue;
+            // With strictly positive weights, once the smallest unsettled
+            // distance reaches the best known target distance, no remaining
+            // path can improve it. This avoids N squared expansion of dense
+            // same-cost radio cliques after the target has been discovered.
+            if (node != target && costs.TryGetValue(target, out var upperBound) &&
+                distance >= upperBound)
+            {
+                var shortest = new List<NodeId> { target };
+                for (var cursor = target; cursor != source;)
+                {
+                    cursor = parent[cursor];
+                    shortest.Add(cursor);
+                }
+                shortest.Reverse();
+                return new RouteResult(snapshot.Version, true, upperBound, shortest, explored);
+            }
             if (++explored > maxExplored)
                 return RouteResult.Missing(snapshot.Version, explored);
             if (node == target)

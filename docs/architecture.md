@@ -321,3 +321,45 @@ Implementation is intentionally isolated from BYOND. For a production
 shared medium, add hierarchical intra-domain routing, contention-aware
 queue scheduling, packet lifetime/retry policies, per-device permissions
 and a native bridge with bounded framed IPC.
+
+## Global CPU admission scheduler (M5)
+
+`PriorityWorkScheduler` is a standalone disposable .NET Core component.
+It has a fixed worker pool, finite FIFO queues per priority and a
+globally capped backlog. Scheduling is nonblocking: `TrySchedule`
+reports rejection immediately rather than consuming additional server
+threads. Cancellation is honoured while queued and during routing.
+Completion/failure/cancellation counts and rolling queue wait/operation
+latencies are published to host telemetry.
+
+Weighted round robin (Critical:Interactive:Background = 4:2:1) ensures
+background jobs continue to receive service when a high-priority stream
+is sustained. It is not strict deadline scheduling or an SS13 tick
+scheduler. The worker soft 65ms/100ms admission gate uses elapsed
+`Stopwatch` time and cannot interrupt a running Dijkstra; it may
+overrun when workers execute concurrently. Treat it as **load shaping**,
+not a hard CPU or DreamDaemon tick SLA.
+
+The global scheduler is used at the asynchronous host boundary and
+in the synthetic workload driver; it does **not** automatically govern
+direct calls inside a game module to `NetworkRuntime.Route`.
+The host still requires protocol framing and authenticated client
+isolation before accepting untrusted connections. Per-player and
+per-sector quotas, cost estimates and hardware-measured service
+targets belong to subsequent integration work.
+
+### Dense shared-medium route optimization
+
+`SharedMediumNetwork.RouteCore` now checks the best discovered target
+upper bound before exploring a queued route candidate. If no unsettled
+node has lower cost than the best target, positive-weight Dijkstra
+can return an exact shortest path without scanning all remaining
+same-cost radio neighbours. This is particularly effective when
+radio endpoints share a dense cell. It is safe for mixed cable/radio
+weights because any cheaper candidate still has a lower priority
+and must be processed first.
+
+It does not eliminate worst-case quadratic *query* complexity for
+large, sparse hop-separated connected domains. Hierarchical routing,
+portal nodes and spatially organized cost bounds remain candidates
+for future experiments.

@@ -16,6 +16,10 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 // Deliberately localhost-only; this development observability endpoint has no authentication.
 builder.WebHost.UseUrls("http://127.0.0.1:5087");
 builder.Services.AddSingleton<NetworkRuntime>();
+builder.Services.AddSingleton(_ => new PriorityWorkScheduler(new WorkSchedulerOptions(
+    Workers: Math.Clamp(Environment.ProcessorCount / 2, 1, 8),
+    QueueCapacity: 256,
+    BudgetMillisecondsPer100Ms: 65)));
 builder.Services.AddSingleton<BenchmarkRunner>();
 builder.Services.AddSingleton<RoutingComparisonRunner>();
 builder.Services.AddHostedService<PipeHostedService>();
@@ -24,7 +28,8 @@ var app = builder.Build();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
-app.MapGet("/api/metrics", (NetworkRuntime runtime, BenchmarkRunner benchmark) =>
+app.MapGet("/api/metrics", (NetworkRuntime runtime, BenchmarkRunner benchmark,
+    PriorityWorkScheduler scheduler) =>
 {
     var snapshot = runtime.Topology.Snapshot;
     return Results.Ok(new
@@ -35,6 +40,7 @@ app.MapGet("/api/metrics", (NetworkRuntime runtime, BenchmarkRunner benchmark) =
         nodeCount = snapshot.Nodes.Count,
         edgeCount = snapshot.Nodes.Values.Sum(n => n.Links.Count) / 2,
         runtime = runtime.Metrics.Capture(runtime.Cache.Count),
+        scheduler = scheduler.Capture(),
         workingSetBytes = Environment.WorkingSet,
         benchmark = benchmark.State()
     });
@@ -134,6 +140,9 @@ app.MapGet("/api/map", (NetworkRuntime runtime, BenchmarkRunner benchmark,
         edges
     });
 });
+
+app.MapGet("/api/scheduler", (PriorityWorkScheduler scheduler) =>
+    Results.Ok(scheduler.Capture()));
 
 app.MapGet("/api/health", () => Results.Ok(new { status = "ok", protocol = 1 }));
 

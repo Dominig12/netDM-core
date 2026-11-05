@@ -103,6 +103,25 @@
         <div class="chart-panel"><div class="chart-heading"><div><strong id="churn-title">Link churn</strong><small id="churn-subtitle">New / lost proximity links per second</small></div><span class="chart-value" id="chart-link-churn">—</span></div><canvas id="links-chart"></canvas><div class="chart-foot">0 <span>ELAPSED TIME →</span></div></div>
       </section>
 
+      <section class="scheduler-panel" aria-label="CPU work scheduler">
+        <div class="panel-head">
+          <div><strong>CPU Work Scheduler</strong><span>Shared IPC and benchmark execution budget</span></div>
+          <span class="lab-tag">WEIGHTED FAIRNESS · BOUNDED BACKPRESSURE</span>
+        </div>
+        <div class="scheduler-content">
+          <div class="scheduler-kpis">
+            <div class="sched-stat"><small>QUEUE DEPTH / PEAK</small><strong id="sched-depth">—</strong><span id="sched-queues">CRITICAL 0 · INTERACTIVE 0 · BACKGROUND 0</span></div>
+            <div class="sched-stat"><small>ACTIVE WORKERS</small><strong id="sched-workers">—</strong><span id="sched-budget">soft budget —</span></div>
+            <div class="sched-stat"><small>REJECTED (TOTAL)</small><strong id="sched-rejected">—</strong><span id="sched-accepted">0 accepted</span></div>
+            <div class="sched-stat"><small>QUEUE P95 WAIT</small><strong id="sched-wait">—</strong><span id="sched-processing">0 µs work p95</span></div>
+          </div>
+          <div class="scheduler-charts">
+            <div class="chart-panel"><div class="chart-heading"><div><strong>Scheduler queue</strong><small>Accepted backlog vs running workers</small></div><span id="sched-chart-depth" class="chart-value">—</span></div><canvas id="sched-queue-chart"></canvas></div>
+            <div class="chart-panel"><div class="chart-heading"><div><strong>Backpressure</strong><small>Rejected requests per second / queue wait p95 µs</small></div><span id="sched-chart-rejections" class="chart-value">—</span></div><canvas id="sched-reject-chart"></canvas></div>
+          </div>
+          <p class="scheduler-warning">Budget is an admission throttle, not preemptive CPU scheduling. A long-running route can exceed the configured window. Rejections indicate controlled overload, not lost accepted work.</p>
+        </div>
+      </section>
       <section class="comparison-panel" aria-label="Routing algorithm comparison">
         <div class="panel-head">
           <div><strong>Routing laboratory</strong><span>Controlled algorithm comparison</span></div>

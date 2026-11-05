@@ -76,6 +76,7 @@ for (var i = 0; i < 250; i++)
 Task.WaitAll(tasks);
 Check(errors.IsEmpty);
 
+await CheckSchedulerAsync();
 CheckSharedMedium();
 CheckSharedMediumOracle();
 CheckRadioSafety();
@@ -87,6 +88,76 @@ Console.WriteLine("All netDM-core smoke tests passed.");
 
 
 
+
+
+static async Task CheckSchedulerAsync()
+{
+    // One worker is held deliberately while a bounded backlog accumulates.
+    // This verifies rejection, weighted fairness and no spawn-per-request.
+    await using var scheduler = new PriorityWorkScheduler(
+        new WorkSchedulerOptions(Workers: 1, QueueCapacity: 13,
+            BudgetMillisecondsPer100Ms: 0));
+    using var gate = new ManualResetEventSlim(false);
+    using var entered = new ManualResetEventSlim(false);
+    var order = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    Check(scheduler.TrySchedule(token =>
+    {
+        entered.Set();
+        gate.Wait(token);
+        return 0;
+    }, WorkPriority.Critical, CancellationToken.None, out Task<int>? blocker));
+    Check(entered.Wait(3000));
+
+    var jobs = new List<Task<int>>();
+    for (var i = 0; i < 12; i++)
+    {
+        var number = i;
+        Check(scheduler.TrySchedule(_ =>
+        {
+            order.Enqueue("critical:" + number);
+            return number;
+        }, WorkPriority.Critical, CancellationToken.None, out Task<int>? job));
+        jobs.Add(job!);
+    }
+    Check(scheduler.TrySchedule(_ =>
+    {
+        order.Enqueue("background");
+        return -1;
+    }, WorkPriority.Background, CancellationToken.None, out Task<int>? background));
+    jobs.Add(background!);
+    Check(!scheduler.TrySchedule(_ => 100, WorkPriority.Background,
+        CancellationToken.None, out Task<int>? rejected));
+    Check(rejected is null);
+
+    var queued = scheduler.Capture();
+    Check(queued.Queued == 13 && queued.Running == 1);
+    Check(queued.Rejected == 1 && queued.BackgroundQueued == 1);
+    gate.Set();
+    await Task.WhenAll(jobs.Append(blocker!));
+    var completed = order.ToArray();
+    Check(completed.Length == 13);
+    Check(Array.IndexOf(completed, "background") < 12); // No permanent starvation.
+    Check(SpinWait.SpinUntil(() => scheduler.Capture().Completed == 14, 3000));
+    Check(scheduler.Capture().QueueWaitP95Us >= 0);
+
+    // A cancellation must not execute the operation when it reaches a worker.
+    using var cancelled = new CancellationTokenSource();
+    cancelled.Cancel();
+    Check(scheduler.TrySchedule(_ => 5, WorkPriority.Interactive, cancelled.Token,
+        out Task<int>? cancelledTask));
+    bool observedCancel = false;
+    try { await cancelledTask!; }
+    catch (OperationCanceledException) { observedCancel = true; }
+    Check(observedCancel);
+
+    Check(scheduler.TrySchedule<int>(_ => throw new InvalidOperationException("expected"),
+        WorkPriority.Critical, CancellationToken.None, out Task<int>? failure));
+    bool observedFailure = false;
+    try { await failure!; }
+    catch (InvalidOperationException) { observedFailure = true; }
+    Check(observedFailure);
+    Check(SpinWait.SpinUntil(() => scheduler.Capture().Failed == 1, 3000));
+}
 
 static void CheckSharedMedium()
 {
@@ -152,6 +223,7 @@ static void CheckSharedMedium()
     Check(domain.Stats().ConfiguredDevices == 400);
     Check(dense.Topology.Snapshot.Nodes.Values.All(n => n.Links.Count == 0));
     Check(domain.Route(new NodeId(1), new NodeId(400)).Cost == 8);
+    Check(domain.Route(new NodeId(1), new NodeId(400)).Explored <= 2);
 
     // Snapshot remains consistent after movement / profile updates.
     var frozen = domain.Snapshot;
