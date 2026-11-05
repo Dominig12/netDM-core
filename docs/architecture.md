@@ -706,3 +706,35 @@ must discover the path. On heavily mutable networks, a version can
 change before a negative search finishes; stale-result retries are
 still bounded by minimum retry spacing and the existing per-packet
 maximum attempt count.
+
+## M15: safe bounded workspace pooling for exact A*
+
+`SharedMediumNetwork.RouteAStarPooledCore` retains the exact original
+A* heuristic, priority ordering and path cost semantics. Compared
+with `RouteAStarCore`, only allocation strategy differs: a
+bounded `ConcurrentBag` of up to 8 exclusive workspaces, containing
+two mutable dictionaries and a `PriorityQueue`, and a direct
+radio-cell neighbor scan instead of a per-node `yield return`
+iterator. Workspaces are cleared in `finally` before reuse.
+No workspace is shared between simultaneous queries, and
+exception/cancellation paths clean state just like normal completion.
+
+The radio scan uses exactly the same mutual-radius/channel/Z checks
+and neighbor ordering as `RadioNeighbors`. Cable shortcut routing
+remains optimal by disabling the geometric heuristic. Tests compare
+Found, Cost, Version, Explored and full Path against original A*
+over randomized and parallel graphs and also compare exact costs
+against Dijkstra. A warmed 900-node allocation probe in CI recorded
+503,280 B/query original vs 159,416 B/query pooled; this is a
+micro-probe, **not a 12k-node performance claim**.
+
+The three-scenario suite has three A/B controls: original A* with
+2 reroute workers / cap 96, pooled A* at identical settings, and
+pooled A* with cap 24. The output file names carry solver mode,
+reroute workers, cap and seed, so locally downloaded results cannot
+silently overwrite other treatments. The exporter and existing JSON
+metrics remain backward-compatible.
+
+Future: after the user's A/B runs, optimize immutable radio-cell
+enumeration or spatial locality further if allocations remain high.
+Never infer runtime throughput only from reduced allocations.

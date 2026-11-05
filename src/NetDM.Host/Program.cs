@@ -112,7 +112,7 @@ app.MapGet("/api/benchmark-suite/download-all",
     var zip = suite.Archive(runId);
     return zip is null
         ? Results.NotFound(new { error = "Three completed reports are required." })
-        : Results.File(zip, "application/zip", "netdm-three-scenarios.zip");
+        : Results.File(zip.Value.Data, "application/zip", zip.Value.Name);
 });
 
 app.MapGet("/api/comparison", (RoutingComparisonRunner comparison) =>

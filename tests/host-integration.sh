@@ -294,6 +294,7 @@ with zipfile.ZipFile(os.path.join(root,"netdm-three-scenarios.zip")) as z:
     for number,key in enumerate(scenarios,1):
         match=[name for name in names if f"{number:02d}-{key}-" in name]
         assert len(match)==1,names
+        assert "astar-pooled-w1-b24" in match[0],match[0]
         content=json.loads(z.read(match[0]))
         assert content["suite"]["scenario"]==key,content
 print("Three-stage benchmark suite + independent JSON files + ZIP: PASS")

@@ -895,3 +895,81 @@ suite to measure original routes/sec, reroutes/sec, delivered fraction,
 TTL expiry, first-hop/delivery p95, and queue pressure. A/B
 comparison with a low cap is recommended before making this default
 in the production BYOND adapter.
+
+## M15 — Pooled A* and controlled backoff A/B experiments
+
+Shared Medium adds an opt-in `SharedSearch: "astar-pooled"` mode.
+The original `"astar"` implementation is kept intact as the control,
+and `"dijkstra"` remains the exact shortest-path reference.
+
+Pooled A* uses an **exclusive reusable search workspace** containing
+the cost dictionary, parent dictionary and priority queue. Each request
+rents one workspace from a bounded, thread-safe `ConcurrentBag`, then
+clears and returns it in a `finally` block, including during exceptions
+and cancellation. Up to **8 workspaces** are retained, each with bounded
+search-state sizes; oversized searches are not pooled. Nothing about
+graph snapshots or route caches is shared mutably between queries.
+
+Radio-neighbor traversal is now performed inline, removing the
+`IEnumerable<Edge>` iterator and transient iterator states from each
+expanded node. The radio eligibility and path-weight rules are
+identical to the original A*: same channel, Z-level, mutual range,
+positive link costs, and zero heuristic fallback when arbitrary cable
+shortcuts exist. The result remains an **exact shortest path**, not
+an approximate heuristic route.
+
+### CI allocation micro-probe
+
+The .NET smoke test warms both algorithms and calculates
+`GC.GetAllocatedBytesForCurrentThread` over 32 identical searches on
+a **900-node static radio grid**. A measured run reported:
+
+| Mode | Bytes allocated per query |
+|---|---:|
+| Original A* | 503,280 |
+| Pooled A* | 159,416 |
+
+That is **68% less thread-local allocation** for this micro-probe.
+It is not a measured speedup or a guarantee of the same allocation
+reduction on the user's 12k-node moving radio network. Real p95/CPU,
+Gen2 collections, original-route throughput and actual packet
+deliveries must be compared with exported 120-second scenarios.
+
+Smoke tests compare original, pooled and Dijkstra on multiple dynamic
+graphs (channel/Z, position changes, cables), 900-node connected
+network, 160 parallel pooled queries, cancellation and max-explored
+early exits. The public original A* path is unchanged.
+
+### Ready-to-run comparison presets
+
+Network Observatory → **Three-scenario diagnostic suite** now has a
+**Controlled A/B experiment presets** selector with:
+
+| Preset | Routing | Reroute workers | Negative backoff cap |
+|---|---|---:|---:|
+| A (control) | Original A* | 2 | 96 ticks |
+| B | Pooled A* | 2 | 96 ticks |
+| C (sensitivity) | Pooled A* | 2 | 24 ticks |
+
+Each preset also selects Hop-by-hop, Spatial reuse, TTL=900, dedicated
+packet ticks, forwarding budget 25ms/tick, reroute budget 25ms/100ms,
+full-ticket-queue cooldown 8 ticks. Each still runs **three**
+static/movement/movement+outage scenarios with identical seed=1337,
+12k nodes, 1500 offered routes/s and 120 seconds per scenario.
+
+Run A and B to isolate the pooled solver. Run C only after comparing
+A and B to assess the tradeoff between CPU work and recovery latency.
+The presets apply the controls when selected; a user may still change
+settings manually before starting.
+
+**Report and ZIP file names now include search mode, reroute-worker
+count, maximum negative-retry cap and seed** to avoid overwriting
+the baseline when downloading B and C. Each JSON report still includes
+the full, authoritative parameter set in
+`suite.parameters` and `metrics.benchmark.options`.
+
+**Interpretation:** Compare `runtime.totalRouteAllocatedBytes` by
+scenario-local delta, `allocatedBytesPerRoute`, completed original
+routes/s, found%, p95, Gen2 and GC pauses, reroutes, packet deliveries
+and delivery p95. Global counters in the host's `metrics.runtime`
+may include earlier scenarios; use per-interval history or deltas.

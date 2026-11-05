@@ -710,7 +710,11 @@ async function pollSuite(){
     if(!zip.hidden&&state.runId){
       zip.href="/api/benchmark-suite/download-all?runId="+
         encodeURIComponent(state.runId);
-      zip.download="netdm-three-scenarios.zip";
+      zip.download="netdm-three-scenarios-"+
+        (opts?.sharedSearch||"unknown")+"-w"+
+        (opts?.packetRerouteWorkers||1)+"-b"+
+        (opts?.packetMaxNoRouteRetryDelayTicks||96)+"-seed"+
+        (opts?.seed||1337)+".zip";
     }
   }catch(error){console.warn("Suite telemetry unavailable",error);}
 }
