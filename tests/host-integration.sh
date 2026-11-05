@@ -202,7 +202,7 @@ PY
 grep -q 'RUN ALL THREE SCENARIOS' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 curl -fsS -X POST "$base/api/benchmark-suite/start" \
   -H 'Content-Type: application/json' \
-  -d '{"nodes":90,"routesPerSecond":45,"movesPerSecond":55,"linkChangesPerSecond":6,"durationSeconds":3,"seed":1337,"radioRange":14,"mediumBytesPerTick":8192,"sharedSearch":"astar","packetTransportEnabled":true,"spatialReuseEnabled":true,"packetMaxAgeTicks":100,"packetMaxAdvancesPerTick":60,"dedicatedPacketTicks":true,"packetTickWorkBudgetMs":25,"packetMaxNoRouteRetryDelayTicks":24,"packetRerouteQueueRetryDelayTicks":4}' \
+  -d '{"nodes":90,"routesPerSecond":45,"movesPerSecond":55,"linkChangesPerSecond":6,"durationSeconds":3,"seed":1337,"radioRange":14,"mediumBytesPerTick":8192,"sharedSearch":"astar-pooled","packetTransportEnabled":true,"spatialReuseEnabled":true,"packetMaxAgeTicks":100,"packetMaxAdvancesPerTick":60,"dedicatedPacketTicks":true,"packetTickWorkBudgetMs":25,"packetMaxNoRouteRetryDelayTicks":24,"packetRerouteQueueRetryDelayTicks":4}' \
   > "${RUNNER_TEMP:-/tmp}/netdm-suite-start.json"
 python3 - <<'PY'
 import json,os
@@ -260,7 +260,7 @@ for number,key in enumerate(scenarios,1):
     assert bench["load"]["offered"]==bench["load"]["admitted"]+bench["load"]["rejected"],bench
     assert bench["options"]["movesPerSecond"]==(0 if number==1 else 55),bench
     assert bench["options"]["linkChangesPerSecond"]==(6 if number==3 else 0),bench
-    assert bench["options"]["sharedSearch"]=="astar",bench
+    assert bench["options"]["sharedSearch"]=="astar-pooled",bench
     assert bench["options"]["packetTransportEnabled"] is True,bench
     assert bench["options"]["spatialReuseEnabled"] is True,bench
     assert bench["options"]["packetMaxAgeTicks"]==100,bench
@@ -294,6 +294,7 @@ with zipfile.ZipFile(os.path.join(root,"netdm-three-scenarios.zip")) as z:
     for number,key in enumerate(scenarios,1):
         match=[name for name in names if f"{number:02d}-{key}-" in name]
         assert len(match)==1,names
+        assert "astar-pooled-w1-b24" in match[0],match[0]
         content=json.loads(z.read(match[0]))
         assert content["suite"]["scenario"]==key,content
 print("Three-stage benchmark suite + independent JSON files + ZIP: PASS")
@@ -302,7 +303,7 @@ PY
 # New radio routing / transport modes. A* must be a selectable production
 # candidate, while multi-tick packets are queued and forwarded separately
 # from the legacy whole-path airtime reservation.
-grep -q 'A\* · Admissible spatial heuristic' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+grep -q 'A\* · Original allocations (control)' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 grep -q 'HOPWISE · One hop per simulation tick' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 curl -fsS -X POST "$base/api/benchmark/start" \
   -H 'Content-Type: application/json' \
@@ -395,3 +396,7 @@ curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null
 # "offered routes" with tick cadence.
 grep -q 'DEDICATED · Monotonic 100ms runner' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 grep -q 'Shared global CPU queue (baseline)' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+
+# A/B controls must be visibly available in the same dashboard.
+grep -q 'A\* POOLED' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+grep -q 'Controlled A/B experiment presets' "${RUNNER_TEMP:-/tmp}/netdm-index.html"

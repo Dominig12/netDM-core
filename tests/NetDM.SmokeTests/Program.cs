@@ -871,9 +871,15 @@ static void CheckRadioAStar()
                 var baseline = SharedMediumNetwork.RouteCore(snapshot, from, to);
                 var astar = SharedMediumNetwork.RouteAStarCore(snapshot, from, to,
                     maximumRadioRange: 26, minimumRadioCost: 3);
+                var pooled = SharedMediumNetwork.RouteAStarPooledCore(snapshot,
+                    from, to, maximumRadioRange: 26, minimumRadioCost: 3);
                 Check(astar.Found == baseline.Found);
                 Check(astar.Cost == baseline.Cost);
                 Check(astar.Version == baseline.Version);
+                Check(pooled.Found == baseline.Found);
+                Check(pooled.Cost == baseline.Cost);
+                Check(pooled.Version == baseline.Version);
+                Check(pooled.Explored == astar.Explored);
                 if (astar.Found)
                 {
                     Check(astar.Path[0] == from && astar.Path[^1] == to);
@@ -913,8 +919,69 @@ static void CheckRadioAStar()
     var start = new NodeId(1); var end = new NodeId(900);
     var d = SharedMediumNetwork.RouteCore(pinned, start, end);
     var a = radioGrid.Route(start, end);
+    var p = SharedMediumNetwork.RouteAStarPooledCore(pinned, start, end,
+        maximumRadioRange: 14, minimumRadioCost: 8);
     Check(a.Found && a.Cost == d.Cost);
+    Check(p.Found && p.Cost == d.Cost);
+    Check(p.Explored == a.Explored);
     Check(a.Explored <= d.Explored);
+
+    // Reuse across concurrent workers must never cross-contaminate scratch
+    // distances/parents. All threads pin the same immutable graph snapshot.
+    var mismatches = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    Parallel.For(0, 160, iteration =>
+    {
+        var source = new NodeId((ulong)(iteration % 900 + 1));
+        var destination = new NodeId((ulong)((iteration * 41 + 172) % 900 + 1));
+        var original = SharedMediumNetwork.RouteAStarCore(pinned,
+            source, destination, maximumRadioRange: 14, minimumRadioCost: 8);
+        var pooled = SharedMediumNetwork.RouteAStarPooledCore(pinned,
+            source, destination, maximumRadioRange: 14, minimumRadioCost: 8);
+        if (original.Found != pooled.Found || original.Cost != pooled.Cost ||
+            original.Explored != pooled.Explored ||
+            !original.Path.SequenceEqual(pooled.Path))
+            mismatches.Enqueue($"Route mismatch on query {iteration}");
+    });
+    Check(mismatches.IsEmpty);
+
+    // A single-threaded repeatable micro-probe reports thread-local
+    // allocations without hard-coding machine-specific latency targets.
+    // A subsequent 12k-node hardware run remains the performance authority.
+    const int samples = 32;
+    for (int i = 0; i < 4; i++)
+    {
+        _ = SharedMediumNetwork.RouteAStarCore(pinned, start, end, 14, 8);
+        _ = SharedMediumNetwork.RouteAStarPooledCore(pinned, start, end, 14, 8);
+    }
+    long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+    for (int i = 0; i < samples; i++)
+        _ = SharedMediumNetwork.RouteAStarCore(pinned, start, end, 14, 8);
+    long originalAllocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+    allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+    for (int i = 0; i < samples; i++)
+        _ = SharedMediumNetwork.RouteAStarPooledCore(pinned, start, end, 14, 8);
+    long pooledAllocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+    Console.WriteLine($"Radio A* allocations per route, 900 nodes: original={originalAllocated / samples:N0} B, pooled={pooledAllocated / samples:N0} B");
+    Check(pooledAllocated < originalAllocated);
+
+    // A cancellation must release a cleared workspace. Following queries
+    // must still produce exact results instead of reusing partial distances.
+    using var cancelled = new CancellationTokenSource();
+    cancelled.Cancel();
+    bool wasCancelled = false;
+    try
+    {
+        _ = SharedMediumNetwork.RouteAStarPooledCore(pinned, start, end,
+            maximumRadioRange: 14, minimumRadioCost: 8,
+            cancellationToken: cancelled.Token);
+    }
+    catch (OperationCanceledException) { wasCancelled = true; }
+    Check(wasCancelled);
+    Check(SharedMediumNetwork.RouteAStarPooledCore(pinned, start, end,
+        maximumRadioRange: 14, minimumRadioCost: 8).Cost == d.Cost);
+    Check(SharedMediumNetwork.RouteAStarPooledCore(pinned, start, end,
+        maximumRadioRange: 14, minimumRadioCost: 8,
+        maxExplored: 1).Found == false);
 }
 
 static void CheckRadioSafety()

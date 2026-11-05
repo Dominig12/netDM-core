@@ -166,14 +166,16 @@ public sealed class ThreeScenarioBenchmarkSuite(
         }
     }
 
-    public byte[]? Archive(string? runId)
+    public (byte[] Data, string Name)? Archive(string? runId)
     {
         (string Name, byte[] Data)[] reports;
+        ThreeScenarioSuiteOptions options;
         lock (_gate)
         {
             if (runId != _runId || _reports.Count != 3 || _status != "complete")
                 return null;
             reports = Enumerable.Range(1, 3).Select(i => _reports[i]).ToArray();
+            options = _options!;
         }
         using var buffer = new MemoryStream();
         using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, leaveOpen: true))
@@ -185,7 +187,8 @@ public sealed class ThreeScenarioBenchmarkSuite(
                 writer.Write(report.Data);
             }
         }
-        return buffer.ToArray();
+        var name = $"netdm-three-scenarios-{options.SharedSearch}-w{options.PacketRerouteWorkers}-b{options.PacketMaxNoRouteRetryDelayTicks}-seed{options.Seed}.zip";
+        return (buffer.ToArray(), name);
     }
 
     private async Task RunAsync(ThreeScenarioSuiteOptions options, string runId,
@@ -270,7 +273,7 @@ public sealed class ThreeScenarioBenchmarkSuite(
                     {
                         WriteIndented = true
                     });
-                var fileName = $"netdm-{number:00}-{scenario.Key}-{options.Nodes}-seed{options.Seed}.json";
+                var fileName = $"netdm-{number:00}-{scenario.Key}-{options.Nodes}-seed{options.Seed}-{options.SharedSearch}-w{options.PacketRerouteWorkers}-b{options.PacketMaxNoRouteRetryDelayTicks}.json";
                 lock (_gate)
                 {
                     _reports[number] = (fileName, bytes);

@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading;
 
@@ -36,7 +37,8 @@ public sealed record SharedMediumSnapshot(
 public enum SharedRadioSearchMode
 {
     Dijkstra = 0,
-    AStar = 1
+    AStar = 1,
+    AStarPooled = 2
 }
 
 public readonly record struct SharedMediumUpdateResult(
@@ -69,6 +71,53 @@ public sealed class SharedMediumNetwork
     private readonly object _writer = new();
     private readonly object _airtimeLock = new();
     private readonly RouteCache _cache = new(8_192);
+
+    // A search owns its workspace exclusively for the duration of the call.
+    // The bounded pool amortizes dictionaries and priority-queue backing
+    // arrays across unrelated requests without sharing mutable state.
+    private sealed class PooledAStarWorkspace
+    {
+        public readonly Dictionary<NodeId, ulong> Costs = new();
+        public readonly Dictionary<NodeId, NodeId> Parents = new();
+        public readonly PriorityQueue<(NodeId Id, ulong Distance), double> Frontier = new();
+        public int PeakQueueCount;
+    }
+
+    private static readonly ConcurrentBag<PooledAStarWorkspace> AStarWorkspaces = new();
+    private static int _pooledWorkspaceCount;
+    private const int MaxPooledWorkspaces = 8;
+    private const int MaxRetainedSearchNodes = 65_536;
+    private const int MaxRetainedFrontier = 131_072;
+
+    private static PooledAStarWorkspace RentAStarWorkspace()
+    {
+        if (AStarWorkspaces.TryTake(out var workspace))
+        {
+            Interlocked.Decrement(ref _pooledWorkspaceCount);
+            return workspace;
+        }
+        return new PooledAStarWorkspace();
+    }
+
+    private static void ReturnAStarWorkspace(PooledAStarWorkspace workspace)
+    {
+        // Never leak one request's graph membership or parents to another.
+        // Keep only bounded working buffers. Discard abnormal huge searches.
+        bool keep = workspace.Costs.Count <= MaxRetainedSearchNodes &&
+                    workspace.Frontier.Count <= MaxRetainedFrontier &&
+                    workspace.PeakQueueCount <= MaxRetainedFrontier;
+        workspace.Costs.Clear();
+        workspace.Parents.Clear();
+        workspace.Frontier.Clear();
+        workspace.PeakQueueCount = 0;
+        if (!keep) return;
+        if (Interlocked.Increment(ref _pooledWorkspaceCount) > MaxPooledWorkspaces)
+        {
+            Interlocked.Decrement(ref _pooledWorkspaceCount);
+            return;
+        }
+        AStarWorkspaces.Add(workspace);
+    }
     private readonly Dictionary<RadioDomainKey, (long Tick, long Used)> _airtime = new();
     // Cells are scoped to one logical tick and cleared atomically on advance:
     // allocation size is bounded by occupied airtime regions, not elapsed time.
@@ -314,11 +363,15 @@ public sealed class SharedMediumNetwork
         var eligible = maxExplored == 100_000;
         var cached = eligible &&
             _cache.TryGet(snapshot.Version, source, destination, out cachedResult);
-        var result = cached ? cachedResult :
-            _searchMode == SharedRadioSearchMode.AStar
-                ? RouteAStarCore(snapshot, source, destination, _maximumRadioRange,
-                    _minimumRadioCost, maxExplored, cancellationToken)
-                : RouteCore(snapshot, source, destination, maxExplored, cancellationToken);
+        var result = cached ? cachedResult : _searchMode switch
+        {
+            SharedRadioSearchMode.AStar => RouteAStarCore(snapshot, source, destination,
+                _maximumRadioRange, _minimumRadioCost, maxExplored, cancellationToken),
+            SharedRadioSearchMode.AStarPooled => RouteAStarPooledCore(snapshot, source,
+                destination, _maximumRadioRange, _minimumRadioCost,
+                maxExplored, cancellationToken),
+            _ => RouteCore(snapshot, source, destination, maxExplored, cancellationToken)
+        };
         if (!cached && eligible && result.Explored <= maxExplored)
             _cache.Store(snapshot.Version, result, source, destination);
         _runtime.RecordExternalRoute(result, cached, Stopwatch.GetTimestamp() - started,
@@ -480,6 +533,143 @@ public sealed class SharedMediumNetwork
                 Relax(radio.To, radio.Cost);
         }
         return RouteResult.Missing(snapshot.Version, explored);
+    }
+
+    /// <summary>
+    /// Exact A* with an exclusive pooled workspace and zero-allocation
+    /// radio-neighbor traversal. Geometric heuristic is byte-for-byte the
+    /// same formula as RouteAStarCore, including cable fallback.
+    /// Every request pins one immutable SharedMediumSnapshot.
+    /// </summary>
+    public static RouteResult RouteAStarPooledCore(SharedMediumSnapshot snapshot,
+        NodeId source, NodeId target, int maximumRadioRange = 128,
+        uint minimumRadioCost = 1, int maxExplored = 100_000,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxExplored);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumRadioRange);
+        ArgumentOutOfRangeException.ThrowIfZero(minimumRadioCost);
+        if (!snapshot.Physical.Nodes.ContainsKey(source) ||
+            !snapshot.Physical.Nodes.ContainsKey(target))
+            return RouteResult.Missing(snapshot.Version);
+        if (source == target)
+            return new RouteResult(snapshot.Version, true, 0, [source], 1);
+
+        if (!snapshot.HasPhysicalLinks)
+        {
+            if (!snapshot.Devices.TryGetValue(source, out var sourceRadio) ||
+                !snapshot.Devices.TryGetValue(target, out var targetRadio) ||
+                sourceRadio.Channel != targetRadio.Channel ||
+                snapshot.Physical.Nodes[source].Position!.Value.Z !=
+                snapshot.Physical.Nodes[target].Position!.Value.Z)
+                return RouteResult.Missing(snapshot.Version);
+        }
+
+        var targetPosition = snapshot.Physical.Nodes[target].Position;
+        double Heuristic(NodeId id)
+        {
+            if (snapshot.HasPhysicalLinks || targetPosition is null)
+                return 0;
+            var position = snapshot.Physical.Nodes[id].Position;
+            if (position is null) return 0;
+            double dx = (double)position.Value.X - targetPosition.Value.X;
+            double dy = (double)position.Value.Y - targetPosition.Value.Y;
+            return Math.Floor(Math.Sqrt(dx * dx + dy * dy) / maximumRadioRange) *
+                minimumRadioCost;
+        }
+
+        var workspace = RentAStarWorkspace();
+        var costs = workspace.Costs;
+        var parents = workspace.Parents;
+        var frontier = workspace.Frontier;
+        try
+        {
+            costs[source] = 0;
+            frontier.Enqueue((source, 0), Heuristic(source));
+            int explored = 0;
+
+            while (frontier.TryDequeue(out var item, out _))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var node = item.Id;
+                var cost = item.Distance;
+                if (!costs.TryGetValue(node, out var latest) || latest != cost)
+                    continue;
+                if (++explored > maxExplored)
+                    return RouteResult.Missing(snapshot.Version, explored);
+
+                if (node == target)
+                {
+                    var path = new List<NodeId> { node };
+                    for (var cursor = target; cursor != source;)
+                    {
+                        cursor = parents[cursor];
+                        path.Add(cursor);
+                    }
+                    path.Reverse();
+                    return new RouteResult(snapshot.Version, true, cost, path, explored);
+                }
+
+                void Relax(NodeId nextNode, uint weight)
+                {
+                    var candidateCost = checked(cost + weight);
+                    if (costs.TryGetValue(nextNode, out var previous) &&
+                        candidateCost >= previous)
+                        return;
+                    costs[nextNode] = candidateCost;
+                    parents[nextNode] = node;
+                    frontier.Enqueue((nextNode, candidateCost),
+                        candidateCost + Heuristic(nextNode));
+                    if (frontier.Count > workspace.PeakQueueCount)
+                        workspace.PeakQueueCount = frontier.Count;
+                }
+
+                foreach (var cable in snapshot.Physical.Nodes[node].Links.Values)
+                    Relax(cable.To, cable.Cost);
+
+                // Inline the lazy radio-neighbor iterator. Iterator states
+                // and temporary Edge values previously dominated per-query
+                // allocations in radio-dense connected networks.
+                if (!snapshot.Devices.TryGetValue(node, out var profile))
+                    continue;
+                var origin = snapshot.Physical.Nodes[node].Position!.Value;
+                var domain = DomainOf(profile, origin);
+                int fromX = FloorCell((int)Math.Clamp((long)origin.X - profile.Range,
+                    int.MinValue, int.MaxValue));
+                int toX = FloorCell((int)Math.Clamp((long)origin.X + profile.Range,
+                    int.MinValue, int.MaxValue));
+                int fromY = FloorCell((int)Math.Clamp((long)origin.Y - profile.Range,
+                    int.MinValue, int.MaxValue));
+                int toY = FloorCell((int)Math.Clamp((long)origin.Y + profile.Range,
+                    int.MinValue, int.MaxValue));
+
+                for (long x = fromX; x <= toX; x++)
+                for (long y = fromY; y <= toY; y++)
+                {
+                    var cell = new RadioMediumCell(domain, (int)x, (int)y);
+                    if (!snapshot.Cells.TryGetValue(cell, out var members))
+                        continue;
+                    foreach (var neighbor in members)
+                    {
+                        if (neighbor == node ||
+                            !snapshot.Devices.TryGetValue(neighbor, out var other))
+                            continue;
+                        var destination = snapshot.Physical.Nodes[neighbor].Position!.Value;
+                        if (!Within(origin, destination,
+                            Math.Min(profile.Range, other.Range)))
+                            continue;
+                        Relax(neighbor, Math.Max(profile.Cost, other.Cost));
+                    }
+                }
+            }
+            return RouteResult.Missing(snapshot.Version, explored);
+        }
+        finally
+        {
+            // Cancellation and any exception must also return a cleared
+            // workspace. A concurrent query can never see partial results.
+            ReturnAStarWorkspace(workspace);
+        }
     }
 
     /// <summary>
