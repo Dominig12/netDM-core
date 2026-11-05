@@ -196,3 +196,9 @@ h1{font-size:27px;font-weight:650;letter-spacing:-.6px;margin:7px 0 0}
  border:1px solid #303f56;border-radius:5px
 }
 #suite-tick-budget{height:39px}
+
+#packet-backoff-cap,#packet-reroute-cooldown,#suite-backoff-cap,#suite-reroute-cooldown{
+ min-width:0;width:100%;padding:9px;background:#121d2f;color:#e2f2ff;
+ border:1px solid #303f56;border-radius:5px
+}
+#suite-backoff-cap,#suite-reroute-cooldown{height:39px}

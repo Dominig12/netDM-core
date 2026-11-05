@@ -202,7 +202,7 @@ PY
 grep -q 'RUN ALL THREE SCENARIOS' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 curl -fsS -X POST "$base/api/benchmark-suite/start" \
   -H 'Content-Type: application/json' \
-  -d '{"nodes":90,"routesPerSecond":45,"movesPerSecond":55,"linkChangesPerSecond":6,"durationSeconds":3,"seed":1337,"radioRange":14,"mediumBytesPerTick":8192,"sharedSearch":"astar","packetTransportEnabled":true,"spatialReuseEnabled":true,"packetMaxAgeTicks":100,"packetMaxAdvancesPerTick":60,"dedicatedPacketTicks":true,"packetTickWorkBudgetMs":25}' \
+  -d '{"nodes":90,"routesPerSecond":45,"movesPerSecond":55,"linkChangesPerSecond":6,"durationSeconds":3,"seed":1337,"radioRange":14,"mediumBytesPerTick":8192,"sharedSearch":"astar","packetTransportEnabled":true,"spatialReuseEnabled":true,"packetMaxAgeTicks":100,"packetMaxAdvancesPerTick":60,"dedicatedPacketTicks":true,"packetTickWorkBudgetMs":25,"packetMaxNoRouteRetryDelayTicks":24,"packetRerouteQueueRetryDelayTicks":4}' \
   > "${RUNNER_TEMP:-/tmp}/netdm-suite-start.json"
 python3 - <<'PY'
 import json,os
@@ -267,6 +267,11 @@ for number,key in enumerate(scenarios,1):
     assert bench["options"]["packetMaxAdvancesPerTick"]==60,bench
     assert bench["options"]["dedicatedPacketTicks"] is True,bench
     assert bench["options"]["packetTickWorkBudgetMs"]==25,bench
+    assert bench["options"]["packetMaxNoRouteRetryDelayTicks"]==24,bench
+    assert bench["options"]["packetRerouteQueueRetryDelayTicks"]==4,bench
+    assert bench["packetTransport"]["noRouteBackoffs"]>=0,bench
+    assert bench["packetTransport"]["cooldownSkips"]>=0,bench
+    assert bench["packetTransport"]["trackedChangedNodes"]>=0,bench
     assert bench["tickRunner"] is not None,bench
     assert bench["tickRunner"]["executedTicks"]>0,bench
     assert bench["tickRunner"]["failedTicks"]==0,bench
@@ -334,6 +339,13 @@ assert stats["rerouteCompleted"]<=stats["reroutes"],stats
 assert stats["firstHopAgeP95Ticks"]>=0,stats
 assert stats["forwardingP95Milliseconds"]>=0,stats
 assert stats["tickBudgetStops"]>=0,stats
+assert stats["noRouteBackoffs"]>=0,stats
+assert stats["noRouteBackoffTicks"]>=0,stats
+assert stats["cooldownSkips"]>=0,stats
+assert stats["localChangeWakeups"]>=0,stats
+assert stats["recoveredOriginalHops"]>=0,stats
+assert stats["staleNegativeResults"]>=0,stats
+assert stats["trackedChangedNodes"]>=0,stats
 assert bench["tickRunner"] is not None,bench
 assert bench["tickRunner"]["executedTicks"]>0,bench
 assert bench["tickRunner"]["failedTicks"]==0,bench
@@ -353,6 +365,12 @@ assert all(x["rerouteStartedPerSecond"]>=0 for x in h),h
 assert all(x["rerouteCompletedPerSecond"]>=0 for x in h),h
 assert all(x["packetSkippedTicksPerSecond"]>=0 for x in h),h
 assert all(x["packetTickAdmissionFailuresPerSecond"]>=0 for x in h),h
+assert all(x["noRouteBackoffsPerSecond"]>=0 for x in h),h
+assert all(x["rerouteCooldownSkipsPerSecond"]>=0 for x in h),h
+assert all(x["localChangeWakeupsPerSecond"]>=0 for x in h),h
+assert all(x["recoveredOriginalHopsPerSecond"]>=0 for x in h),h
+assert all(x["staleNegativeResultsPerSecond"]>=0 for x in h),h
+assert all(x["averageNoRouteBackoffTicks"]>=0 for x in h),h
 assert all(x["tickExecutedPerSecond"]>=0 for x in h),h
 assert all(x["tickRunnerSkippedPerSecond"]>=0 for x in h),h
 assert all(x["tickBudgetStopsPerSecond"]>=0 for x in h),h

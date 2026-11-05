@@ -667,3 +667,42 @@ or real-time scheduling privileges. Whole-process saturation can
 still delay it; p95 execution includes wall-time waiting for locks.
 Do not interpret 10 ticks/sec as sufficient proof of low application
 latency. Collect packet first-hop p95 and delivered p95 too.
+
+## M14: stale-safe negative search backoff and localized wakeups
+
+RadioPacketTransport tracks a small failure streak for each active
+packet. After a completed negative A*/Dijkstra reroute, delay doubles
+from a base of 3 ticks up to a configured cap (96 ticks by default).
+This reduces redundant expensive searches when no alternative route
+exists. A successfully forwarded hop or accepted new route resets
+the negative streak. Expiry, hard queue limit and maximum reroutes
+still take precedence.
+
+The mutation worker reports actual `RadioNodeUpdate` batches to
+`NotifyRadioUpdates`. A bounded revision map keyed by device ID is
+checked ONLY against the packet's current invalid next-hop endpoints.
+Unrelated global changes do not wake every packet. Changes to one
+endpoint may trigger early rerouting, throttled by the minimum retry
+delay. If the original direct hop is valid again, a non-reserving
+`HasUsableHop` probe bypasses the full search cooldown and allows
+normal airtime-limited forwarding immediately.
+
+The inability to reach a destination under snapshot version V is
+NOT reused as an authoritative negative result for version V+1.
+A negative computed on an older snapshot is treated as uncertain
+and receives a short retry instead of growing the failure streak.
+The existing bounded route cache still handles exact repeated
+queries at the same immutable snapshot version.
+
+New monitoring covers negative backoffs, accumulated backoff ticks,
+cooldown skips (per packet visit, not unique packets), local endpoint
+wakeups, recovered original hops, stale negative completions, and
+bounded changed-node hint memory.
+
+This is deliberately narrower than global connectivity notification:
+a new multi-hop alternative can appear without either of the two
+original failed-hop endpoints changing. In that case periodic retry
+must discover the path. On heavily mutable networks, a version can
+change before a negative search finishes; stale-result retries are
+still bounded by minimum retry spacing and the existing per-packet
+maximum attempt count.
