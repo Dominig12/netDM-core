@@ -32,7 +32,8 @@ public sealed record ThreeScenarioSuiteOptions(
     int PacketRerouteQueueRetryDelayTicks = 8,
     int PacketQueueCapacity = 2048,
     bool AdaptivePacketVisits = false,
-    bool PacketPreRouteBackpressure = false)
+    bool PacketPreRouteBackpressure = false,
+    bool EventDrivenPacketWaiting = false)
 {
     public void Validate()
     {
@@ -62,7 +63,8 @@ public sealed record ThreeScenarioSuiteOptions(
             PacketRerouteQueueRetryDelayTicks: PacketRerouteQueueRetryDelayTicks,
             PacketQueueCapacity: PacketQueueCapacity,
             AdaptivePacketVisits: AdaptivePacketVisits,
-            PacketPreRouteBackpressure: PacketPreRouteBackpressure);
+            PacketPreRouteBackpressure: PacketPreRouteBackpressure,
+            EventDrivenPacketWaiting: EventDrivenPacketWaiting);
 }
 
 public sealed record ScenarioResultSummary(
@@ -176,7 +178,8 @@ public sealed class ThreeScenarioBenchmarkSuite(
         $"{options.SharedSearch}-w{options.PacketRerouteWorkers}-b{options.PacketMaxNoRouteRetryDelayTicks}" +
         $"-q{options.PacketQueueCapacity}-v{options.PacketMaxAdvancesPerTick}" +
         $"-{(options.AdaptivePacketVisits ? "adaptive" : "fixed")}" +
-        $"-{(options.PacketPreRouteBackpressure ? "reserved" : "openloop")}";
+        $"-{(options.PacketPreRouteBackpressure ? "reserved" : "openloop")}" +
+        $"-{(options.EventDrivenPacketWaiting ? "eventwait" : "fifo")}";
 
     public (byte[] Data, string Name)? Archive(string? runId)
     {
