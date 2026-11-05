@@ -13,9 +13,10 @@ public enum RadioHopOutcome
 
 public sealed record PacketTransportOptions(
     int Capacity = 2048,
-    int MaxAgeTicks = 180,
-    int MaxReroutes = 4,
-    int MaxAdvancesPerTick = 512)
+    int MaxAgeTicks = 900,
+    int MaxReroutes = 8,
+    int MaxAdvancesPerTick = 1024,
+    int NoRouteRetryDelayTicks = 3)
 {
     public void Validate()
     {
@@ -27,6 +28,8 @@ public sealed record PacketTransportOptions(
             throw new ArgumentOutOfRangeException(nameof(MaxReroutes));
         if (MaxAdvancesPerTick is < 1 or > 65_536)
             throw new ArgumentOutOfRangeException(nameof(MaxAdvancesPerTick));
+        if (NoRouteRetryDelayTicks is < 1 or > 1000)
+            throw new ArgumentOutOfRangeException(nameof(NoRouteRetryDelayTicks));
     }
 }
 
@@ -34,33 +37,43 @@ public sealed record PacketTransportCounters(
     long Enqueued, long Rejected, long Delivered, long Dropped,
     long Expired, long Reroutes, long BusyDeferrals, long WirelessHops,
     long CableHops, long DeliveredBytes, int Queued, int PeakQueued,
-    long LastTick);
+    long LastTick,
+    long NoRouteDeferrals, long LinkFailureDrops, long OversizeDrops,
+    long QueueFullRejections, long InvalidRejections,
+    double DeliveryAgeP50Ticks, double DeliveryAgeP95Ticks,
+    double MeanDeliveredHops, long TotalDeliveryAgeTicks);
 
 /// <summary>
-/// Deterministic store-and-forward packet simulator. A packet may make at most
-/// ONE hop in one simulation tick. Memory, work, retries and life-time are
-/// bounded. A broken next hop triggers bounded re-routing from the current
-/// position; capacity failures defer packets to a later tick.
-/// This is a prototype logical transport, not a TCP or RF stack.
+/// Bounded round-robin store-and-forward queue. Each live packet gets at most
+/// one forwarding attempt per tick; with a full queue of N packets and a
+/// processing limit of K packets per tick, every packet is considered within
+/// ceil(N/K) ticks. Queued-but-busy packets remain alive until TTL.
 /// </summary>
 public sealed class RadioPacketTransport
 {
-    private sealed class PendingPacket(RouteResult path, int size, long tick)
+    private const int LatencyWindow = 1024;
+
+    private sealed class PendingPacket(RouteResult route, int size, long tick)
     {
-        public IReadOnlyList<NodeId> Path = path.Path;
-        public NodeId Destination = path.Path[^1];
+        public IReadOnlyList<NodeId> Path = route.Path;
+        public readonly NodeId Destination = route.Path[^1];
         public int Index;
-        public int Bytes = size;
-        public long CreatedTick = tick;
+        public readonly int Bytes = size;
+        public readonly long CreatedTick = tick;
         public int Reroutes;
+        public long NextRetryTick;
+        public int SuccessfulHops;
     }
 
     private readonly SharedMediumNetwork _network;
     private readonly PacketTransportOptions _settings;
     private readonly object _gate = new();
     private readonly Queue<PendingPacket> _queue = new();
+    private readonly long[] _completedAges = new long[LatencyWindow];
     private long _enqueued, _rejected, _delivered, _dropped, _expired;
     private long _reroutes, _busy, _radioHops, _cableHops, _bytesDelivered;
+    private long _noRouteDeferrals, _linkFailureDrops, _oversizeDrops;
+    private long _fullRejects, _invalidRejects, _totalAge, _totalDeliveredHops;
     private long _lastTick = -1;
     private int _peak;
 
@@ -76,14 +89,27 @@ public sealed class RadioPacketTransport
     public PacketTransportCounters Capture()
     {
         lock (_gate)
+        {
+            int length = (int)Math.Min(_delivered, LatencyWindow);
+            var ages = new long[length];
+            Array.Copy(_completedAges, ages, length);
+            Array.Sort(ages);
+            static double Percentile(long[] sorted, double factor) =>
+                sorted.Length == 0 ? 0 : sorted[(int)Math.Ceiling((sorted.Length - 1) * factor)];
             return new PacketTransportCounters(_enqueued, _rejected,
                 _delivered, _dropped, _expired, _reroutes, _busy, _radioHops,
-                _cableHops, _bytesDelivered, _queue.Count, _peak, _lastTick);
+                _cableHops, _bytesDelivered, _queue.Count, _peak, _lastTick,
+                _noRouteDeferrals, _linkFailureDrops, _oversizeDrops,
+                _fullRejects, _invalidRejects,
+                Percentile(ages, .5), Percentile(ages, .95),
+                _delivered == 0 ? 0 : (double)_totalDeliveredHops / _delivered,
+                _totalAge);
+        }
     }
 
     /// <summary>
-    /// Admission never waits. Route is a snapshot-based path and will be checked
-    /// hop-by-hop against actual current links during forwarding.
+    /// Nonblocking admission. Never retains a caller-mutable path array.
+    /// Rejects a stale simulation tick or an invalid/disconnected source path.
     /// </summary>
     public bool Enqueue(RouteResult route, int bytes, long tick)
     {
@@ -94,16 +120,20 @@ public sealed class RadioPacketTransport
         lock (_gate)
         {
             if (!route.Found || route.Path is null || route.Path.Count == 0 ||
-                _queue.Count >= _settings.Capacity ||
                 (_lastTick >= 0 && tick < _lastTick))
             {
                 _rejected++;
+                _invalidRejects++;
                 return false;
             }
-            // Packet path ownership must be immutable: callers can mutate
-            // their supplied arrays after Enqueue returns.
-            var detached = route with { Path = route.Path.ToArray() };
-            _queue.Enqueue(new PendingPacket(detached, bytes, tick));
+            if (_queue.Count >= _settings.Capacity)
+            {
+                _rejected++;
+                _fullRejects++;
+                return false;
+            }
+            var path = route with { Path = route.Path.ToArray() };
+            _queue.Enqueue(new PendingPacket(path, bytes, tick));
             _enqueued++;
             _peak = Math.Max(_peak, _queue.Count);
             return true;
@@ -111,9 +141,9 @@ public sealed class RadioPacketTransport
     }
 
     /// <summary>
-    /// Advances a bounded number of packets at one discrete simulation tick.
-    /// Repeating the same tick is a no-op, preventing accidental multi-hop
-    /// forwarding by repeated calls inside a server frame.
+    /// Does no more than MaxAdvancesPerTick packet visits. The initial queue
+    /// size is fixed for this tick, so a requeued item cannot advance twice.
+    /// Cancellation stops between packets and preserves every accepted item.
     /// </summary>
     public int Advance(long tick, CancellationToken cancellationToken = default)
     {
@@ -123,13 +153,10 @@ public sealed class RadioPacketTransport
         {
             if (tick <= _lastTick) return 0;
             _lastTick = tick;
-            var count = Math.Min(_queue.Count, _settings.MaxAdvancesPerTick);
-            var forwarded = 0;
+            int count = Math.Min(_queue.Count, _settings.MaxAdvancesPerTick);
+            int forwarded = 0;
             for (var i = 0; i < count; i++)
             {
-                // Once a packet has been accepted, cancellation must never
-                // remove it silently. Stop between items, not in the middle
-                // of their accounting.
                 if (cancellationToken.IsCancellationRequested) break;
                 var packet = _queue.Dequeue();
                 if (tick - packet.CreatedTick >= _settings.MaxAgeTicks)
@@ -137,73 +164,80 @@ public sealed class RadioPacketTransport
                     _expired++;
                     continue;
                 }
-
                 if (packet.Index >= packet.Path.Count - 1)
                 {
-                    Delivered(packet);
+                    Delivered(packet, tick);
+                    continue;
+                }
+                if (tick < packet.NextRetryTick)
+                {
+                    _queue.Enqueue(packet);
                     continue;
                 }
 
-                var current = packet.Path[packet.Index];
-                var next = packet.Path[packet.Index + 1];
-                var outcome = _network.TryTransmitHop(current, next, packet.Bytes, tick);
-                switch (outcome)
+                var from = packet.Path[packet.Index];
+                var to = packet.Path[packet.Index + 1];
+                var result = _network.TryTransmitHop(from, to, packet.Bytes, tick);
+                switch (result)
                 {
-                    case RadioHopOutcome.TransmittedCable:
                     case RadioHopOutcome.TransmittedRadio:
+                    case RadioHopOutcome.TransmittedCable:
                         packet.Index++;
+                        packet.SuccessfulHops++;
                         forwarded++;
-                        if (outcome == RadioHopOutcome.TransmittedRadio) _radioHops++;
+                        if (result == RadioHopOutcome.TransmittedRadio) _radioHops++;
                         else _cableHops++;
                         if (packet.Index == packet.Path.Count - 1)
-                            Delivered(packet);
-                        else _queue.Enqueue(packet);
+                            Delivered(packet, tick);
+                        else
+                            _queue.Enqueue(packet);
                         break;
-
                     case RadioHopOutcome.ChannelBusy:
                     case RadioHopOutcome.OldTick:
                         _busy++;
                         _queue.Enqueue(packet);
                         break;
-
                     case RadioHopOutcome.LinkUnavailable:
+                        // Routes are rechecked from the current node, not
+                        // the original source. Failed attempts can wait for
+                        // a temporary radio outage to recover.
                         if (packet.Reroutes >= _settings.MaxReroutes)
                         {
                             _dropped++;
+                            _linkFailureDrops++;
                             break;
                         }
-                        packet.Reroutes++;
-                        _reroutes++;
-                        // Recompute from the *actual current* node; never
-                        // teleport to the original source after a broken hop.
-                        RouteResult candidate;
+                        RouteResult newRoute;
                         try
                         {
-                            candidate = _network.Route(current, packet.Destination,
+                            newRoute = _network.Route(from, packet.Destination,
                                 cancellationToken: cancellationToken);
                         }
                         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                         {
-                            // A cancelled tick must not silently lose the
-                            // packet popped from the bounded queue.
                             _queue.Enqueue(packet);
                             break;
                         }
-                        if (!candidate.Found || candidate.Path.Count == 0 ||
-                            candidate.Path[0] != current ||
-                            candidate.Path[^1] != packet.Destination)
+                        packet.Reroutes++;
+                        _reroutes++;
+                        if (!newRoute.Found || newRoute.Path.Count == 0 ||
+                            newRoute.Path[0] != from ||
+                            newRoute.Path[^1] != packet.Destination)
                         {
-                            _dropped++;
+                            _noRouteDeferrals++;
+                            packet.NextRetryTick = tick + _settings.NoRouteRetryDelayTicks;
+                            _queue.Enqueue(packet);
                             break;
                         }
-                        packet.Path = candidate.Path;
+                        packet.Path = newRoute.Path;
                         packet.Index = 0;
+                        packet.NextRetryTick = tick + 1;
                         _queue.Enqueue(packet);
                         break;
-
                     case RadioHopOutcome.PacketTooLarge:
                     default:
                         _dropped++;
+                        _oversizeDrops++;
                         break;
                 }
             }
@@ -211,9 +245,13 @@ public sealed class RadioPacketTransport
         }
     }
 
-    private void Delivered(PendingPacket packet)
+    private void Delivered(PendingPacket packet, long tick)
     {
         _delivered++;
         _bytesDelivered += packet.Bytes;
+        long age = Math.Max(0, tick - packet.CreatedTick);
+        _completedAges[(int)((_delivered - 1) % LatencyWindow)] = age;
+        _totalAge += age;
+        _totalDeliveredHops += packet.SuccessfulHops;
     }
 }
