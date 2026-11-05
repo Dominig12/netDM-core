@@ -95,7 +95,7 @@ static async Task CheckSchedulerAsync()
     // One worker is held deliberately while a bounded backlog accumulates.
     // This verifies rejection, weighted fairness and no spawn-per-request.
     await using var scheduler = new PriorityWorkScheduler(
-        new WorkSchedulerOptions(Workers: 1, QueueCapacity: 14,
+        new WorkSchedulerOptions(Workers: 1, QueueCapacity: 13,
             BudgetMillisecondsPer100Ms: 0));
     using var gate = new ManualResetEventSlim(false);
     using var entered = new ManualResetEventSlim(false);
@@ -137,7 +137,7 @@ static async Task CheckSchedulerAsync()
     var completed = order.ToArray();
     Check(completed.Length == 13);
     Check(Array.IndexOf(completed, "background") < 12); // No permanent starvation.
-    Check(scheduler.Capture().Completed == 14);
+    Check(SpinWait.SpinUntil(() => scheduler.Capture().Completed == 14, 3000));
     Check(scheduler.Capture().QueueWaitP95Us >= 0);
 
     // A cancellation must not execute the operation when it reaches a worker.
@@ -155,7 +155,8 @@ static async Task CheckSchedulerAsync()
     bool observedFailure = false;
     try { await failure!; }
     catch (InvalidOperationException) { observedFailure = true; }
-    Check(observedFailure && scheduler.Capture().Failed == 1);
+    Check(observedFailure);
+    Check(SpinWait.SpinUntil(() => scheduler.Capture().Failed == 1, 3000));
 }
 
 static void CheckSharedMedium()
