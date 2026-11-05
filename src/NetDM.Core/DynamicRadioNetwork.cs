@@ -82,9 +82,11 @@ public sealed class DynamicRadioNetwork(NetworkRuntime runtime)
     /// Register/update many radios and/or move many nodes in one atomic graph update.
     /// Candidate discovery is local to the moved or reconfigured endpoints, not O(V^2).
     /// </summary>
-    public RadioUpdateResult Update(IReadOnlyList<RadioNodeUpdate> updates)
+    public RadioUpdateResult Update(IReadOnlyList<RadioNodeUpdate> updates,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(updates);
+        cancellationToken.ThrowIfCancellationRequested();
         if (updates.Count == 0)
             return new RadioUpdateResult(runtime.Topology.Snapshot.Version, 0, 0, 0, 0, 0);
 
@@ -97,6 +99,7 @@ public sealed class DynamicRadioNetwork(NetworkRuntime runtime)
 
             foreach (var update in updates)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (update.Id.Value == 0 || !snapshot.Nodes.TryGetValue(update.Id, out var node))
                     throw new ArgumentException("Every updated radio node must already exist.");
                 if (!staged.TryAdd(update.Id, update))
@@ -133,6 +136,7 @@ public sealed class DynamicRadioNetwork(NetworkRuntime runtime)
             var pairs = new HashSet<LinkPair>();
             foreach (var update in updates)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (_neighbors.TryGetValue(update.Id, out var neighbors))
                 {
                     foreach (var neighbor in neighbors)
@@ -145,6 +149,7 @@ public sealed class DynamicRadioNetwork(NetworkRuntime runtime)
                 var inspected = 0;
                 foreach (var candidate in Candidates(snapshot, origin, profile.Range, stagedCells))
                 {
+                    if ((inspected & 127) == 0) cancellationToken.ThrowIfCancellationRequested();
                     if (candidate == update.Id) continue;
                     if (++inspected > maxSpatialCandidatesPerNode)
                         throw new InvalidOperationException(
@@ -164,6 +169,7 @@ public sealed class DynamicRadioNetwork(NetworkRuntime runtime)
 
             foreach (var pair in pairs.OrderBy(p => p.A.Value).ThenBy(p => p.B.Value))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var formerRadio = _radio.Contains(pair);
                 var profileA = ProfileOf(pair.A);
                 var profileB = ProfileOf(pair.B);
@@ -204,6 +210,8 @@ public sealed class DynamicRadioNetwork(NetworkRuntime runtime)
                     graphChanges.Add(new TopologyChange(TopologyOperation.Disconnect, pair.A, pair.B));
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
+            // The graph publication and ledger update are a single non-cancellable commit phase.
             var result = runtime.Apply(graphChanges);
             foreach (var update in updates)
             {
