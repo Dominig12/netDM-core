@@ -22,7 +22,8 @@ public sealed record PacketTransportOptions(
     int MaxConcurrentReroutes = 2,
     int MaxTickWorkMilliseconds = 25,
     int MaxNoRouteRetryDelayTicks = 96,
-    int RerouteQueueRetryDelayTicks = 8)
+    int RerouteQueueRetryDelayTicks = 8,
+    bool AdaptivePacketVisits = false)
 {
     public void Validate()
     {
@@ -72,7 +73,11 @@ public sealed record PacketTransportCounters(
     long NoRouteBackoffs, long NoRouteBackoffTicks,
     long CooldownSkips, long LocalChangeWakeups,
     long RecoveredOriginalHops, long StaleNegativeResults,
-    int TrackedChangedNodes);
+    int TrackedChangedNodes,
+    long ForwardingVisits, long VisitBudgetStops,
+    int CurrentVisitLimit, long AdaptiveLimitIncreases,
+    long AdaptiveLimitDecreases, long PreRouteBackpressureRejections,
+    int ReservedAdmissions, long AdmissionReservations);
 
 /// <summary>
 /// Bounded round-robin store-and-forward. Advance never calculates a route:
@@ -80,6 +85,20 @@ public sealed record PacketTransportCounters(
 /// requests independently at background priority, and applies results after
 /// validating the packet identity and its actual current position.
 /// </summary>
+/// <summary>One temporary admission slot, held while the originating route is computed.
+/// Must be disposed even if the route never runs or is cancelled.</summary>
+public sealed class PacketAdmissionLease : IDisposable
+{
+    private RadioPacketTransport? _owner;
+
+    internal PacketAdmissionLease(RadioPacketTransport owner) => _owner = owner;
+
+    internal bool Consume(RadioPacketTransport owner) =>
+        ReferenceEquals(Interlocked.CompareExchange(ref _owner, null, owner), owner);
+
+    public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ReleaseReservedAdmission();
+}
+
 public sealed class RadioPacketTransport
 {
     private const int SampleWindow = 1024;
@@ -130,13 +149,18 @@ public sealed class RadioPacketTransport
     private long _noRouteBackoffs, _noRouteBackoffTicks, _cooldownSkips;
     private long _localWakes, _recoveredHops, _staleNegativeResults;
     private long _lastTick = -1, _nextPacketId, _nextRequestId;
-    private int _peak;
+    private long _forwardingVisits, _visitBudgetStops, _adaptiveIncreases, _adaptiveDecreases;
+    private long _preRouteRejects, _admissionReservations;
+    private int _peak, _reservedAdmissions, _currentVisitLimit;
 
     public RadioPacketTransport(SharedMediumNetwork network, PacketTransportOptions? settings = null)
     {
         _network = network ?? throw new ArgumentNullException(nameof(network));
         _settings = settings ?? new PacketTransportOptions();
         _settings.Validate();
+        _currentVisitLimit = _settings.AdaptivePacketVisits
+            ? Math.Min(1024, _settings.MaxAdvancesPerTick)
+            : _settings.MaxAdvancesPerTick;
     }
 
     public PacketTransportOptions Options => _settings;
@@ -179,39 +203,95 @@ public sealed class RadioPacketTransport
                 _firstHopSampleCount, _tickBudgetStops,
                 _noRouteBackoffs, _noRouteBackoffTicks,
                 _cooldownSkips, _localWakes, _recoveredHops,
-                _staleNegativeResults, _localRevisions.Count);
+                _staleNegativeResults, _localRevisions.Count,
+                _forwardingVisits, _visitBudgetStops, _currentVisitLimit,
+                _adaptiveIncreases, _adaptiveDecreases, _preRouteRejects,
+                _reservedAdmissions, _admissionReservations);
+        }
+    }
+
+    /// <summary>
+    /// Reserve a *real* queue slot before scheduling an expensive route.
+    /// Includes all pending reservations when checking capacity. Without the
+    /// lease, simply checking queue depth races between concurrent producers.
+    /// </summary>
+    public PacketAdmissionLease? TryReserveAdmission()
+    {
+        lock (_gate)
+        {
+            if (_queue.Count + _reservedAdmissions >= _settings.Capacity)
+            {
+                _preRouteRejects++;
+                return null;
+            }
+            _reservedAdmissions++;
+            _admissionReservations++;
+            return new PacketAdmissionLease(this);
+        }
+    }
+
+    internal void ReleaseReservedAdmission()
+    {
+        lock (_gate)
+        {
+            if (_reservedAdmissions <= 0)
+                throw new InvalidOperationException("Packet admission reservation underflow.");
+            _reservedAdmissions--;
         }
     }
 
     public bool Enqueue(RouteResult route, int bytes, long tick)
     {
+        ValidateEnqueue(route, bytes, tick);
+        lock (_gate) return EnqueueCore(route, bytes, tick);
+    }
+
+    /// <summary>Consumes the admission lease, successful route or not.
+    /// The unreserved entry path can never steal its slot.</summary>
+    public bool EnqueueReserved(RouteResult route, int bytes, long tick,
+        PacketAdmissionLease lease)
+    {
+        ValidateEnqueue(route, bytes, tick);
+        ArgumentNullException.ThrowIfNull(lease);
+        lock (_gate)
+        {
+            if (!lease.Consume(this))
+                throw new InvalidOperationException("Packet admission lease is already consumed or invalid.");
+            _reservedAdmissions--;
+            return EnqueueCore(route, bytes, tick);
+        }
+    }
+
+    private static void ValidateEnqueue(RouteResult route, int bytes, long tick)
+    {
         ArgumentNullException.ThrowIfNull(route);
         if (bytes is < 1 or > 1_000_000)
             throw new ArgumentOutOfRangeException(nameof(bytes));
         ArgumentOutOfRangeException.ThrowIfNegative(tick);
-        lock (_gate)
+    }
+
+    private bool EnqueueCore(RouteResult route, int bytes, long tick)
+    {
+        if (!route.Found || route.Path is null || route.Path.Count == 0 ||
+            (_lastTick >= 0 && tick < _lastTick))
         {
-            if (!route.Found || route.Path is null || route.Path.Count == 0 ||
-                (_lastTick >= 0 && tick < _lastTick))
-            {
-                _rejected++;
-                _invalidRejects++;
-                return false;
-            }
-            if (_queue.Count >= _settings.Capacity)
-            {
-                _rejected++;
-                _fullRejects++;
-                return false;
-            }
-            var detached = route with { Path = route.Path.ToArray() };
-            var packet = new PendingPacket(detached, bytes, tick, ++_nextPacketId);
-            _queue.Enqueue(packet);
-            _active.Add(packet.Id, packet);
-            _enqueued++;
-            _peak = Math.Max(_peak, _queue.Count);
-            return true;
+            _rejected++;
+            _invalidRejects++;
+            return false;
         }
+        if (_queue.Count + _reservedAdmissions >= _settings.Capacity)
+        {
+            _rejected++;
+            _fullRejects++;
+            return false;
+        }
+        var detached = route with { Path = route.Path.ToArray() };
+        var packet = new PendingPacket(detached, bytes, tick, ++_nextPacketId);
+        _queue.Enqueue(packet);
+        _active.Add(packet.Id, packet);
+        _enqueued++;
+        _peak = Math.Max(_peak, _queue.Count);
+        return true;
     }
 
     /// <summary>
@@ -280,8 +360,11 @@ public sealed class RadioPacketTransport
             if (_lastTick >= 0 && tick - _lastTick > 1)
                 _skippedTicks += tick - _lastTick - 1;
             _lastTick = tick;
-            int count = Math.Min(_queue.Count, _settings.MaxAdvancesPerTick);
+            int visitLimit = _settings.AdaptivePacketVisits
+                ? _currentVisitLimit : _settings.MaxAdvancesPerTick;
+            int count = Math.Min(_queue.Count, visitLimit);
             int forwarded = 0;
+            int visited = 0;
             for (var i = 0; i < count; i++)
             {
                 if (cancellationToken.IsCancellationRequested) break;
@@ -290,6 +373,7 @@ public sealed class RadioPacketTransport
                     _tickBudgetStops++;
                     break;
                 }
+                visited++;
                 var packet = _queue.Dequeue();
                 if (tick - packet.CreatedTick >= _settings.MaxAgeTicks)
                 {
@@ -406,6 +490,37 @@ public sealed class RadioPacketTransport
             }
             var elapsedUs = (long)((Stopwatch.GetTimestamp() - started) *
                 1_000_000.0 / Stopwatch.Frequency);
+            _forwardingVisits += visited;
+            if (visited == visitLimit && _queue.Count != 0)
+                _visitBudgetStops++;
+            if (_settings.AdaptivePacketVisits && visited > 0)
+            {
+                // AIMD-like visit ceiling. CPU/wall-time deadline still takes
+                // precedence and prevents increased visit counts from
+                // monopolizing the dedicated forwarding tick thread.
+                long budgetUs = (long)_settings.MaxTickWorkMilliseconds * 1000;
+                if (elapsedUs >= budgetUs * 8 / 10)
+                {
+                    int lower = Math.Max(1, Math.Min(1024, _settings.MaxAdvancesPerTick));
+                    int reduced = Math.Max(lower, visitLimit - Math.Max(64, visitLimit / 4));
+                    if (reduced < visitLimit)
+                    {
+                        _currentVisitLimit = reduced;
+                        _adaptiveDecreases++;
+                    }
+                }
+                else if (visited == visitLimit && _queue.Count > 0 &&
+                    elapsedUs <= budgetUs * 6 / 10)
+                {
+                    int increased = Math.Min(_settings.MaxAdvancesPerTick,
+                        visitLimit + Math.Max(64, visitLimit / 4));
+                    if (increased > visitLimit)
+                    {
+                        _currentVisitLimit = increased;
+                        _adaptiveIncreases++;
+                    }
+                }
+            }
             _forwardUs[(int)(_forwardSampleCount++ % SampleWindow)] = elapsedUs;
             return forwarded;
         }
