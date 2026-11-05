@@ -11,6 +11,14 @@ public readonly record struct RadioDomainKey(uint Channel, int Z);
 public readonly record struct RadioMediumCell(RadioDomainKey Domain, int X, int Y);
 
 /// <summary>
+/// ChannelWide preserves legacy one-budget-per-channel behaviour. SpatialCells
+/// reserves all cells touched by an interference region around a wireless hop.
+/// Independent distant hops may transmit at the same tick, while overlapping
+/// regions compete for airtime. The model is deliberately conservative.
+/// </summary>
+public enum RadioAirtimeScope { ChannelWide = 0, SpatialCells = 1 }
+
+/// <summary>
 /// A coherent view of the physical graph and spatial radio membership.
 /// It is published as a single immutable object, so route readers never mix
 /// pre-move wireless membership with post-move physical positions.
@@ -42,7 +50,10 @@ public readonly record struct SharedMediumStatistics(
     long RejectedStaleRoute, long RejectedInvalidPath,
     long RejectedTransferTooLarge, long RejectedCapacity,
     long RejectedOldTick, long AttemptedWirelessHops,
-    long AcceptedRevalidatedTransfers);
+    long AcceptedRevalidatedTransfers,
+    long SpatialSuccessfulHops, long SpatialBusyHops,
+    long SpatialPayloadBytes, long SpatialCellReservations,
+    int SpatialActiveCells, long SpatialLastTick);
 
 public readonly record struct RadioMediumCellView(
     uint Channel, int Z, int X, int Y, int Count);
@@ -59,8 +70,14 @@ public sealed class SharedMediumNetwork
     private readonly object _airtimeLock = new();
     private readonly RouteCache _cache = new(8_192);
     private readonly Dictionary<RadioDomainKey, (long Tick, long Used)> _airtime = new();
+    // Cells are scoped to one logical tick and cleared atomically on advance:
+    // allocation size is bounded by occupied airtime regions, not elapsed time.
+    private readonly Dictionary<RadioMediumCell, long> _spatialAirtime = new();
+    private long _spatialTick = -1;
+    private long _spatialHops, _spatialBusy, _spatialBytes, _spatialCellReservations;
     private readonly long _bytesPerTick;
     private readonly SharedRadioSearchMode _searchMode;
+    private readonly RadioAirtimeScope _airtimeScope;
     private readonly int _maximumRadioRange;
     private readonly uint _minimumRadioCost;
     private SharedMediumSnapshot _current;
@@ -72,7 +89,8 @@ public sealed class SharedMediumNetwork
 
     public SharedMediumNetwork(NetworkRuntime runtime, long bytesPerTick = 8_192,
         SharedRadioSearchMode searchMode = SharedRadioSearchMode.Dijkstra,
-        int maximumRadioRange = 128, uint minimumRadioCost = 1)
+        int maximumRadioRange = 128, uint minimumRadioCost = 1,
+        RadioAirtimeScope airtimeScope = RadioAirtimeScope.ChannelWide)
     {
         ArgumentNullException.ThrowIfNull(runtime);
         if (bytesPerTick is < 1 or > 1_000_000)
@@ -83,9 +101,12 @@ public sealed class SharedMediumNetwork
             throw new ArgumentOutOfRangeException(nameof(minimumRadioCost));
         if (!Enum.IsDefined(searchMode))
             throw new ArgumentOutOfRangeException(nameof(searchMode));
+        if (!Enum.IsDefined(airtimeScope))
+            throw new ArgumentOutOfRangeException(nameof(airtimeScope));
         _runtime = runtime;
         _bytesPerTick = bytesPerTick;
         _searchMode = searchMode;
+        _airtimeScope = airtimeScope;
         _maximumRadioRange = maximumRadioRange;
         _minimumRadioCost = minimumRadioCost;
         var physical = runtime.Topology.Snapshot;
@@ -99,6 +120,7 @@ public sealed class SharedMediumNetwork
 
     public long BytesPerTick => _bytesPerTick;
     public SharedRadioSearchMode SearchMode => _searchMode;
+    public RadioAirtimeScope AirtimeScope => _airtimeScope;
     public SharedMediumSnapshot Snapshot => Volatile.Read(ref _current);
 
     public SharedMediumStatistics Stats()
@@ -107,6 +129,13 @@ public sealed class SharedMediumNetwork
         var domains = snapshot.Devices
             .Select(pair => DomainOf(pair.Value, snapshot.Physical.Nodes[pair.Key].Position!.Value))
             .ToHashSet();
+        int spatialActive;
+        long spatialLastTick;
+        lock (_airtimeLock)
+        {
+            spatialActive = _spatialAirtime.Count;
+            spatialLastTick = _spatialTick;
+        }
         return new SharedMediumStatistics(snapshot.Version, snapshot.Physical.Version,
             snapshot.Devices.Count, domains.Count, snapshot.Cells.Count, 0,
             Interlocked.Read(ref _accepted), Interlocked.Read(ref _rejected),
@@ -117,7 +146,12 @@ public sealed class SharedMediumNetwork
             Interlocked.Read(ref _rejectedCapacity),
             Interlocked.Read(ref _rejectedOldTick),
             Interlocked.Read(ref _attemptedWirelessHops),
-            Interlocked.Read(ref _acceptedRevalidated));
+            Interlocked.Read(ref _acceptedRevalidated),
+            Interlocked.Read(ref _spatialHops),
+            Interlocked.Read(ref _spatialBusy),
+            Interlocked.Read(ref _spatialBytes),
+            Interlocked.Read(ref _spatialCellReservations),
+            spatialActive, spatialLastTick);
     }
 
     /// <summary>
@@ -474,16 +508,65 @@ public sealed class SharedMediumNetwork
 
         lock (_airtimeLock)
         {
-            var slot = _airtime.TryGetValue(domain, out var existing)
-                ? existing : (Tick: -1L, Used: 0L);
-            if (slot.Tick > tick)
-                return RadioHopOutcome.OldTick;
-            if (bytes > _bytesPerTick)
-                return RadioHopOutcome.PacketTooLarge;
-            if (slot.Tick == tick && slot.Used + bytes > _bytesPerTick)
-                return RadioHopOutcome.ChannelBusy;
-            var used = slot.Tick == tick ? slot.Used : 0L;
-            _airtime[domain] = (tick, used + bytes);
+            if (_airtimeScope == RadioAirtimeScope.ChannelWide)
+            {
+                var slot = _airtime.TryGetValue(domain, out var existing)
+                    ? existing : (Tick: -1L, Used: 0L);
+                if (slot.Tick > tick) return RadioHopOutcome.OldTick;
+                if (bytes > _bytesPerTick) return RadioHopOutcome.PacketTooLarge;
+                if (slot.Tick == tick && slot.Used + bytes > _bytesPerTick)
+                    return RadioHopOutcome.ChannelBusy;
+                var used = slot.Tick == tick ? slot.Used : 0L;
+                _airtime[domain] = (tick, used + bytes);
+                return RadioHopOutcome.TransmittedRadio;
+            }
+
+            if (tick < _spatialTick) return RadioHopOutcome.OldTick;
+            if (bytes > _bytesPerTick) return RadioHopOutcome.PacketTooLarge;
+            if (tick > _spatialTick)
+            {
+                _spatialTick = tick;
+                _spatialAirtime.Clear();
+            }
+
+            // A wireless hop reserves the same payload in EVERY intersecting
+            // coarse interference cell: two overlapping transmissions are
+            // serialized even if their transmitter tiles differ. The swept
+            // bounding rectangle is conservative and includes both endpoints'
+            // configured coverage radii. No partial reservations are allowed.
+            var fromPos = snapshot.Physical.Nodes[from].Position!.Value;
+            var toPos = snapshot.Physical.Nodes[to].Position!.Value;
+            int radius = Math.Max(snapshot.Devices[from].Range, snapshot.Devices[to].Range);
+            long left = Math.Max(int.MinValue, Math.Min((long)fromPos.X, toPos.X) - radius);
+            long right = Math.Min(int.MaxValue, Math.Max((long)fromPos.X, toPos.X) + radius);
+            long top = Math.Max(int.MinValue, Math.Min((long)fromPos.Y, toPos.Y) - radius);
+            long bottom = Math.Min(int.MaxValue, Math.Max((long)fromPos.Y, toPos.Y) + radius);
+            int x0 = FloorCell((int)left), x1 = FloorCell((int)right);
+            int y0 = FloorCell((int)top), y1 = FloorCell((int)bottom);
+
+            for (long x = x0; x <= x1; x++)
+            for (long y = y0; y <= y1; y++)
+            {
+                var cell = new RadioMediumCell(domain, (int)x, (int)y);
+                if (_spatialAirtime.TryGetValue(cell, out var occupied) &&
+                    occupied + bytes > _bytesPerTick)
+                {
+                    Interlocked.Increment(ref _spatialBusy);
+                    return RadioHopOutcome.ChannelBusy;
+                }
+            }
+            long reservedCells = 0;
+            for (long x = x0; x <= x1; x++)
+            for (long y = y0; y <= y1; y++)
+            {
+                var cell = new RadioMediumCell(domain, (int)x, (int)y);
+                _spatialAirtime.TryGetValue(cell, out var occupied);
+                _spatialAirtime[cell] = occupied + bytes;
+                reservedCells++;
+            }
+            Interlocked.Increment(ref _spatialHops);
+            Interlocked.Add(ref _spatialBytes, bytes);
+            Interlocked.Add(ref _spatialCellReservations, reservedCells);
             return RadioHopOutcome.TransmittedRadio;
         }
     }
