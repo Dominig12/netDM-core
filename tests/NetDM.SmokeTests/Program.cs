@@ -991,6 +991,11 @@ static async Task CheckDedicatedPacketTicksAsync()
         Check(state.FailedTicks == 0);
         Check(state.LastTick >= tick);
         Check(state.ExecutionP95Milliseconds >= 0);
+        Check(state.MaxExecutionMilliseconds >= state.ExecutionP95Milliseconds);
+        Check(state.OverPeriodExecutionTicks >= 0);
+        var packetTiming = packets.Capture();
+        Check(packetTiming.MaxAdvanceMilliseconds >= packetTiming.ForwardingP95Milliseconds);
+        Check(packetTiming.MaxLockWaitMilliseconds >= 0);
         Check(saturated.Capture().Queued == 1);
         Check(packets.Capture().TickAdmissionFailures == 0);
     }

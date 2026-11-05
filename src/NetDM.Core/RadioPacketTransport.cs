@@ -84,7 +84,9 @@ public sealed record PacketTransportCounters(
     int ReservedAdmissions, long AdmissionReservations,
     int ReadyPackets, int DelayedPackets, int AwaitingReroutePackets,
     long TimerWakeups, long TopologyWakeups, long ExpiredWhileParked,
-    int CapacityBlockedPackets, long CapacityWakeups);
+    int CapacityBlockedPackets, long CapacityWakeups,
+    double MaxAdvanceMilliseconds, double MaxLockWaitMilliseconds,
+    long LockWaitOver100Milliseconds);
 
 /// <summary>
 /// Bounded round-robin store-and-forward. Advance never calculates a route:
@@ -157,6 +159,7 @@ public sealed class RadioPacketTransport
     private readonly long[] _firstHopAges = new long[SampleWindow];
     private readonly long[] _rerouteWaitAges = new long[SampleWindow];
     private readonly long[] _forwardUs = new long[SampleWindow];
+    private long _maxAdvanceUs, _maxLockWaitUs, _lockWaitOver100Ms;
     private long _enqueued, _rejected, _delivered, _dropped, _expired;
     private long _reroutes, _busy, _radioHops, _cableHops, _bytesDelivered;
     private long _noRouteDeferrals, _linkFailureDrops, _oversizeDrops;
@@ -416,7 +419,9 @@ public sealed class RadioPacketTransport
                 _reservedAdmissions, _admissionReservations,
                 _settings.EventDrivenPacketWaiting ? _active.Count - _delayedCount - _reroutingCount - _capacityBlockedCount : _queue.Count,
                 _delayedCount, _reroutingCount, _timerWakeups, _topologyWakeups,
-                _expiredWhileParked, _capacityBlockedCount, _capacityWakeups);
+                _expiredWhileParked, _capacityBlockedCount, _capacityWakeups,
+                _maxAdvanceUs / 1000.0, _maxLockWaitUs / 1000.0,
+                _lockWaitOver100Ms);
         }
     }
 
@@ -579,6 +584,12 @@ public sealed class RadioPacketTransport
             (long)_settings.MaxTickWorkMilliseconds * Stopwatch.Frequency / 1_000);
         lock (_gate)
         {
+            // Diagnostic: distinguish monitor contention from work inside
+            // the forwarding pass. One Stopwatch read, zero allocations.
+            long lockWaitUs = (long)Math.Max(0,
+                (Stopwatch.GetTimestamp() - started) * 1_000_000.0 / Stopwatch.Frequency);
+            _maxLockWaitUs = Math.Max(_maxLockWaitUs, lockWaitUs);
+            if (lockWaitUs >= 100_000) _lockWaitOver100Ms++;
             if (tick <= _lastTick) return 0;
             if (_lastTick >= 0 && tick - _lastTick > 1)
                 _skippedTicks += tick - _lastTick - 1;
@@ -754,6 +765,7 @@ public sealed class RadioPacketTransport
                 }
             }
             _forwardUs[(int)(_forwardSampleCount++ % SampleWindow)] = elapsedUs;
+            _maxAdvanceUs = Math.Max(_maxAdvanceUs, elapsedUs);
             return forwarded;
         }
     }

@@ -1040,6 +1040,22 @@ changing the default.
 
 ## M18 — Event-driven packet waiting (opt-in)
 
+### M18.2 — stall attribution counters
+
+The packet runner now exports `maxExecutionMilliseconds` (maximum
+wall time in any individual `Advance` call) and
+`overPeriodExecutionTicks` (calls exceeding the scheduled tick period).
+Packet transport adds `maxAdvanceMilliseconds`,
+`maxLockWaitMilliseconds`, and `lockWaitOver100Milliseconds`.
+All maxima cover the entire isolated benchmark, not a rolling window.
+These counters are included in the existing three-scenario JSON export.
+
+The counters distinguish slow forwarding or monitor contention from
+delayed packet-thread scheduling. They cannot identify the underlying
+OS cause by themselves. The H/I results at seed 1337 showed several
+5–6 second telemetry gaps with tick skipping; controlled repeats with
+these diagnostics are required before assigning cause to I.
+
 ### M18.1 — event-driven reroute capacity (experimental profile I)
 
 `eventDrivenRerouteCapacity` extends H with a capacity-blocked state.

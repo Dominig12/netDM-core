@@ -9,7 +9,8 @@ namespace NetDM.Core;
 public sealed record PacketTickRunnerCounters(
     long ExecutedTicks, long SkippedIntervals, long FailedTicks, long LastTick,
     double StartLagP95Milliseconds, double ExecutionP95Milliseconds,
-    double MaxStartLagMilliseconds);
+    double MaxStartLagMilliseconds,
+    double MaxExecutionMilliseconds, long OverPeriodExecutionTicks);
 
 /// <summary>
 /// Dedicated packet tick driver: one call to Advance per observed monotonic
@@ -28,6 +29,7 @@ public sealed class PacketTickRunner
     private readonly long[] _workUs = new long[Window];
     private Task? _task;
     private long _executed, _skipped, _failures, _lastTick = -1, _maxLagUs;
+    private long _maxExecutionUs, _overPeriodExecutionTicks;
 
     public PacketTickRunner(RadioPacketTransport packets, int periodMilliseconds = 100)
     {
@@ -59,7 +61,9 @@ public sealed class PacketTickRunner
             Interlocked.Read(ref _skipped),
             Interlocked.Read(ref _failures),
             Interlocked.Read(ref _lastTick),
-            P95(lag), P95(work), Interlocked.Read(ref _maxLagUs) / 1000.0);
+            P95(lag), P95(work), Interlocked.Read(ref _maxLagUs) / 1000.0,
+            Interlocked.Read(ref _maxExecutionUs) / 1000.0,
+            Interlocked.Read(ref _overPeriodExecutionTicks));
     }
 
     /// <summary>
@@ -126,10 +130,14 @@ public sealed class PacketTickRunner
             }
 
             var elapsed = Stopwatch.GetTimestamp() - started;
+            var elapsedUs = (long)Math.Max(0,
+                elapsed * 1_000_000.0 / Stopwatch.Frequency);
+            InterlockedExtensions.Max(ref _maxExecutionUs, elapsedUs);
+            if (elapsed > _periodTicks)
+                Interlocked.Increment(ref _overPeriodExecutionTicks);
             var index = Interlocked.Read(ref _executed) % Window;
             Interlocked.Exchange(ref _lagUs[(int)index], lag);
-            Interlocked.Exchange(ref _workUs[(int)index],
-                (long)Math.Max(0, elapsed * 1_000_000.0 / Stopwatch.Frequency));
+            Interlocked.Exchange(ref _workUs[(int)index], elapsedUs);
             Interlocked.Exchange(ref _lastTick, observedTick);
             Interlocked.Increment(ref _executed);
             nextTick = observedTick + 1;
