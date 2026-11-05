@@ -19,7 +19,10 @@ public sealed record BenchmarkOptions(
     bool PacketTransportEnabled = false,
     bool SpatialReuseEnabled = true,
     int PacketMaxAgeTicks = 900,
-    int PacketMaxAdvancesPerTick = 1024)
+    int PacketMaxAdvancesPerTick = 1024,
+    int PacketRerouteWorkers = 1,
+    int PacketRerouteQueueCapacity = 32,
+    int PacketRerouteCpuBudgetMs = 25)
 {
     public void Validate()
     {
@@ -33,6 +36,12 @@ public sealed record BenchmarkOptions(
             throw new ArgumentOutOfRangeException(nameof(PacketMaxAgeTicks));
         if (PacketMaxAdvancesPerTick is < 1 or > 65_536)
             throw new ArgumentOutOfRangeException(nameof(PacketMaxAdvancesPerTick));
+        if (PacketRerouteWorkers is < 1 or > 4)
+            throw new ArgumentOutOfRangeException(nameof(PacketRerouteWorkers));
+        if (PacketRerouteQueueCapacity is < 1 or > 256)
+            throw new ArgumentOutOfRangeException(nameof(PacketRerouteQueueCapacity));
+        if (PacketRerouteCpuBudgetMs is < 0 or > 100)
+            throw new ArgumentOutOfRangeException(nameof(PacketRerouteCpuBudgetMs));
         if (PacketTransportEnabled && (!WirelessEnabled || RadioModel != "shared"))
             throw new ArgumentException(
                 "Hop-by-hop packets require wireless Shared Medium mode.",
@@ -52,7 +61,8 @@ public sealed record BenchmarkState(
     string Status, BenchmarkOptions? Options, DateTimeOffset? StartedUtc,
     double ElapsedSeconds, int WorldWidth, int WorldHeight, string? Error,
     RadioStats? Radio, SharedMediumStatistics? SharedMedium, BenchmarkLoadStats Load,
-    PacketTransportCounters? PacketTransport);
+    PacketTransportCounters? PacketTransport,
+    WorkSchedulerCounters? RerouteScheduler);
 
 public sealed record BenchmarkSample(
     DateTimeOffset At, double ElapsedSeconds, double ActualRoutesPerSecond,
@@ -78,7 +88,13 @@ public sealed record BenchmarkSample(
     double GcPauseMillisecondsPerSecond, int Gen2CollectionsInInterval,
     double DeliveryP95AgeTicks, double AverageDeliveredHops,
     double NoRouteDeferralsPerSecond, double SpatialBusyHopsPerSecond,
-    double SpatialSuccessfulHopsPerSecond, int SpatialActiveCells);
+    double SpatialSuccessfulHopsPerSecond, int SpatialActiveCells,
+    int ReroutesQueued, int ReroutesInFlight,
+    double RerouteStartedPerSecond, double RerouteCompletedPerSecond,
+    double RerouteQueueDeferralsPerSecond, double RerouteRejectedPerSecond,
+    double RerouteWaitP95Ticks, double PacketForwardingP95Milliseconds,
+    double PacketSkippedTicksPerSecond, double PacketTickAdmissionFailuresPerSecond,
+    int RerouteCpuQueued, double RerouteCpuWaitP95Us);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -102,6 +118,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     private DynamicRadioNetwork? _radioEngine;
     private SharedMediumNetwork? _sharedMedium;
     private RadioPacketTransport? _packets;
+    private PriorityWorkScheduler? _rerouteScheduler;
 
     public PacketTransportCounters? PacketStatistics
     {
@@ -119,7 +136,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
         lock (_gate)
             return new BenchmarkState(_status, _options, _started, _elapsed, _width, _height, _error,
                 _radioEngine?.Stats(), _sharedMedium?.Stats(), LoadStats(),
-                _packets?.Capture());
+                _packets?.Capture(), _rerouteScheduler?.Capture());
     }
 
     public BenchmarkSample[] History() => _history.ToArray();
@@ -175,6 +192,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             _radioEngine = null;
             _sharedMedium = null;
             _packets = null;
+            _rerouteScheduler = null;
             while (_history.TryDequeue(out _)) { }
             _task = Task.Run(() => RunAsync(options, _cts.Token));
             return true;
@@ -265,11 +283,21 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             var packets = medium is not null && options.PacketTransportEnabled
                 ? new RadioPacketTransport(medium, new PacketTransportOptions(
                     MaxAgeTicks: options.PacketMaxAgeTicks,
-                    MaxAdvancesPerTick: options.PacketMaxAdvancesPerTick))
+                    MaxAdvancesPerTick: options.PacketMaxAdvancesPerTick,
+                    MaxConcurrentReroutes: options.PacketRerouteWorkers))
                 : null;
+            // Reroute computation is never executed while holding the packet
+            // queue lock. A separate bounded CPU executor prevents it from
+            // monopolizing the live routing scheduler or forwarding ticks.
+            await using var rerouteScheduler = packets is null ? null :
+                new PriorityWorkScheduler(new WorkSchedulerOptions(
+                    Workers: options.PacketRerouteWorkers,
+                    QueueCapacity: options.PacketRerouteQueueCapacity,
+                    BudgetMillisecondsPer100Ms: options.PacketRerouteCpuBudgetMs));
             lock (_gate)
             {
                 _packets = packets;
+                _rerouteScheduler = rerouteScheduler;
                 _width = columns * 12;
                 _height = ((options.Nodes + columns - 1) / columns) * 12;
                 _radioEngine = radio;
@@ -285,7 +313,11 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             if (options.MovesPerSecond > 0 || options.LinkChangesPerSecond > 0)
                 workers.Add(Task.Run(() => MutationWorkerAsync(options, positions, radio, medium, ct), ct));
             if (packets is not null)
+            {
                 workers.Add(Task.Run(() => PacketWorkerAsync(packets, ct), ct));
+                workers.Add(Task.Run(() => RerouteWorkerAsync(
+                    packets, medium!, rerouteScheduler!, ct), ct));
+            }
 
             var previous = runtime.Metrics.Capture(runtime.Cache.Count);
             var previousRadio = radio?.Stats();
@@ -304,6 +336,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 var radioSnapshot = radio?.Stats();
                 var mediumSnapshot = medium?.Stats();
                 var packetSnapshot = packets?.Capture();
+                var rerouteCpuSnapshot = rerouteScheduler?.Capture();
                 var interval = Math.Max(0.001, seconds - previousTime);
                 var schedulerSnapshot = scheduler.Capture();
                 var loadSnapshot = LoadStats();
@@ -355,7 +388,23 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                         (previousMedium?.SpatialBusyHops ?? 0)) / interval,
                     ((mediumSnapshot?.SpatialSuccessfulHops ?? 0) -
                         (previousMedium?.SpatialSuccessfulHops ?? 0)) / interval,
-                    mediumSnapshot?.SpatialActiveCells ?? 0);
+                    mediumSnapshot?.SpatialActiveCells ?? 0,
+                    packetSnapshot?.RerouteQueued ?? 0,
+                    packetSnapshot?.RerouteInFlight ?? 0,
+                    ((packetSnapshot?.Reroutes ?? 0) - (previousPackets?.Reroutes ?? 0)) / interval,
+                    ((packetSnapshot?.RerouteCompleted ?? 0) -
+                        (previousPackets?.RerouteCompleted ?? 0)) / interval,
+                    ((packetSnapshot?.RerouteQueueDeferrals ?? 0) -
+                        (previousPackets?.RerouteQueueDeferrals ?? 0)) / interval,
+                    ((packetSnapshot?.RerouteSchedulerRejections ?? 0) -
+                        (previousPackets?.RerouteSchedulerRejections ?? 0)) / interval,
+                    packetSnapshot?.RerouteWaitP95Ticks ?? 0,
+                    packetSnapshot?.ForwardingP95Milliseconds ?? 0,
+                    ((packetSnapshot?.SkippedTicks ?? 0) - (previousPackets?.SkippedTicks ?? 0)) / interval,
+                    ((packetSnapshot?.TickAdmissionFailures ?? 0) -
+                        (previousPackets?.TickAdmissionFailures ?? 0)) / interval,
+                    rerouteCpuSnapshot?.Queued ?? 0,
+                    rerouteCpuSnapshot?.QueueWaitP95Us ?? 0);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;
@@ -485,8 +534,72 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 {
                     await pass!;
                 }
+                else
+                    packets.RecordTickAdmissionFailure();
             }
             await Task.Delay(20, ct);
+        }
+    }
+
+    /// <summary>
+    /// Dedicated bounded reroute executor. Only the short ticket acquisition
+    /// and result application touch the packet queue lock. Actual A*/Dijkstra
+    /// work happens on a separate CPU worker with its own soft budget.
+    /// </summary>
+    private async Task RerouteWorkerAsync(RadioPacketTransport packets,
+        SharedMediumNetwork medium, PriorityWorkScheduler rerouteScheduler,
+        CancellationToken ct)
+    {
+        var pending = new List<Task>(packets.Options.MaxConcurrentReroutes);
+        try
+        {
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                pending.RemoveAll(t => t.IsCompleted);
+                while (pending.Count < packets.Options.MaxConcurrentReroutes &&
+                    packets.TryTakeReroute(out var ticket))
+                {
+                    if (rerouteScheduler.TrySchedule(
+                        token => medium.Route(ticket.Source, ticket.Destination,
+                            cancellationToken: token),
+                        WorkPriority.Background, ct, out Task<RouteResult>? result))
+                    {
+                        pending.Add(HandleRerouteAsync(ticket, result!));
+                    }
+                    else
+                    {
+                        packets.CancelReroute(ticket, schedulerRejected: true);
+                        break;
+                    }
+                }
+                await Task.Delay(20, ct);
+            }
+        }
+        finally
+        {
+            // The benchmark cancellation token is propagated to every task.
+            // Await the bounded set so a stale reroute never mutates a later run.
+            try { await Task.WhenAll(pending); }
+            catch (OperationCanceledException) { }
+        }
+
+        async Task HandleRerouteAsync(PacketRerouteRequest ticket, Task<RouteResult> result)
+        {
+            try
+            {
+                var path = await result.ConfigureAwait(false);
+                packets.CompleteReroute(ticket, path);
+            }
+            catch (OperationCanceledException)
+            {
+                packets.CancelReroute(ticket);
+            }
+            catch (Exception ex)
+            {
+                packets.CancelReroute(ticket);
+                log.LogError(ex, "Packet reroute worker failed for request {Id}", ticket.Id);
+            }
         }
     }
 
