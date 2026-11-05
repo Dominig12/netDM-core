@@ -81,6 +81,7 @@ CheckSharedMedium();
 CheckSharedMediumOracle();
 CheckRadioAStar();
 CheckPacketTransport();
+await CheckDedicatedPacketTicksAsync();
 CheckSpatialRadioAirtime();
 CheckRadioSafety();
 CheckWirelessTopology();
@@ -566,6 +567,86 @@ static void CheckPacketTransport()
     Check(ttlQueue.Enqueue(same,100,2));
     ttlQueue.Advance(3);
     Check(ttlQueue.Capture().Delivered==1);
+}
+
+static async Task CheckDedicatedPacketTicksAsync()
+{
+    var runtime = new NetworkRuntime();
+    runtime.Apply([
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+            Position: new NodePosition(0, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+            Position: new NodePosition(10, 0))
+    ]);
+    var network = new SharedMediumNetwork(runtime, bytesPerTick: 4096);
+    network.Update([
+        new RadioNodeUpdate(new NodeId(1),
+            Profile: new RadioProfile(14, 1, 8), ChangeProfile: true),
+        new RadioNodeUpdate(new NodeId(2),
+            Profile: new RadioProfile(14, 1, 8), ChangeProfile: true)
+    ]);
+    var path = network.Route(new NodeId(1), new NodeId(2));
+    Check(path.Found);
+    var packets = new RadioPacketTransport(network,
+        new PacketTransportOptions(MaxAdvancesPerTick: 64,
+            MaxTickWorkMilliseconds: 25, MaxAgeTicks: 200));
+    using var cancelled = new CancellationTokenSource();
+    var runner = new PacketTickRunner(packets, periodMilliseconds: 20);
+    // Global routing worker is fully occupied, with another task queued
+    // and the queue rejecting new admissions. The dedicated packet tick
+    // thread must remain independent of that queue.
+    await using var saturated = new PriorityWorkScheduler(
+        new WorkSchedulerOptions(Workers: 1, QueueCapacity: 1,
+            BudgetMillisecondsPer100Ms: 0));
+    using var held = new ManualResetEventSlim(false);
+    using var entered = new ManualResetEventSlim(false);
+    Check(saturated.TrySchedule(token =>
+    {
+        entered.Set();
+        held.Wait(token);
+        return 1;
+    }, WorkPriority.Critical, CancellationToken.None, out Task<int>? holdingTask));
+    Check(entered.Wait(3000));
+    Check(saturated.TrySchedule(_ => 2, WorkPriority.Background,
+        CancellationToken.None, out Task<int>? queuedTask));
+    Check(!saturated.TrySchedule(_ => 3, WorkPriority.Interactive,
+        CancellationToken.None, out Task<int>? rejectedTask));
+    Check(rejectedTask is null);
+    // The runner and the route producer use the same monotonic tick epoch.
+    long tick = Stopwatch.GetTimestamp() /
+        Math.Max(1, Stopwatch.Frequency * 20L / 1000);
+    for (var i = 0; i < 12; i++)
+        Check(packets.Enqueue(path, 100, tick));
+    var worker = runner.Start(cancelled.Token);
+    bool refusedSecondStart = false;
+    try { runner.Start(cancelled.Token); }
+    catch (InvalidOperationException) { refusedSecondStart = true; }
+    Check(refusedSecondStart);
+    try
+    {
+        Check(SpinWait.SpinUntil(
+            () => packets.Capture().Delivered == 12, 3500));
+        var state = runner.Capture();
+        Check(state.ExecutedTicks >= 1);
+        Check(state.FailedTicks == 0);
+        Check(state.LastTick >= tick);
+        Check(state.ExecutionP95Milliseconds >= 0);
+        Check(saturated.Capture().Queued == 1);
+        Check(packets.Capture().TickAdmissionFailures == 0);
+    }
+    finally
+    {
+        cancelled.Cancel();
+        held.Set();
+        await worker.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+    await Task.WhenAll(holdingTask!, queuedTask!);
+    Check(runner.Capture().ExecutedTicks >= 1);
+    var invalid = new PacketTransportOptions(MaxTickWorkMilliseconds: 0);
+    bool rejectedBadBudget = false;
+    try { invalid.Validate(); }
+    catch (ArgumentOutOfRangeException) { rejectedBadBudget = true; }
+    Check(rejectedBadBudget);
 }
 
 static void CheckSpatialRadioAirtime()
