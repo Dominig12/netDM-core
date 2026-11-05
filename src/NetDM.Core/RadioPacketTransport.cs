@@ -56,7 +56,9 @@ public sealed record PacketTransportCounters(
     long RerouteCancelled, long RerouteQueueDeferrals,
     long RerouteSchedulerRejections, double RerouteWaitP95Ticks,
     long SkippedTicks, long TickAdmissionFailures,
-    double ForwardingP95Milliseconds);
+    double ForwardingP95Milliseconds,
+    double FirstHopAgeP50Ticks, double FirstHopAgeP95Ticks,
+    long FirstHopSamples);
 
 /// <summary>
 /// Bounded round-robin store-and-forward. Advance never calculates a route:
@@ -91,6 +93,7 @@ public sealed class RadioPacketTransport
     private readonly Queue<PacketRerouteRequest> _rerouteQueue = new();
     private readonly Dictionary<long, PendingPacket> _inflight = new();
     private readonly long[] _completedAges = new long[SampleWindow];
+    private readonly long[] _firstHopAges = new long[SampleWindow];
     private readonly long[] _rerouteWaitAges = new long[SampleWindow];
     private readonly long[] _forwardUs = new long[SampleWindow];
     private long _enqueued, _rejected, _delivered, _dropped, _expired;
@@ -99,7 +102,7 @@ public sealed class RadioPacketTransport
     private long _fullRejects, _invalidRejects, _totalAge, _totalDeliveredHops;
     private long _rerouteCompleted, _rerouteCancelled, _rerouteQueueDeferrals;
     private long _rerouteSchedulerRejections, _skippedTicks, _tickAdmissionFailures;
-    private long _rerouteSampleCount, _forwardSampleCount;
+    private long _rerouteSampleCount, _forwardSampleCount, _firstHopSampleCount;
     private long _lastTick = -1, _nextPacketId, _nextRequestId;
     private int _peak;
 
@@ -120,6 +123,10 @@ public sealed class RadioPacketTransport
             var ages = new long[deliveredLength];
             Array.Copy(_completedAges, ages, deliveredLength);
             Array.Sort(ages);
+            int firstHopLength = (int)Math.Min(_firstHopSampleCount, SampleWindow);
+            var firstHopAges = new long[firstHopLength];
+            Array.Copy(_firstHopAges, firstHopAges, firstHopLength);
+            Array.Sort(firstHopAges);
             int rerouteLength = (int)Math.Min(_rerouteSampleCount, SampleWindow);
             var rerouteAges = new long[rerouteLength];
             Array.Copy(_rerouteWaitAges, rerouteAges, rerouteLength);
@@ -141,7 +148,9 @@ public sealed class RadioPacketTransport
                 _totalAge, _rerouteQueue.Count, _inflight.Count,
                 _rerouteCompleted, _rerouteCancelled, _rerouteQueueDeferrals,
                 _rerouteSchedulerRejections, Percentile(rerouteAges, .95),
-                _skippedTicks, _tickAdmissionFailures, Percentile(forwardUs, .95) / 1000.0);
+                _skippedTicks, _tickAdmissionFailures, Percentile(forwardUs, .95) / 1000.0,
+                Percentile(firstHopAges, .5), Percentile(firstHopAges, .95),
+                _firstHopSampleCount);
         }
     }
 
@@ -221,6 +230,9 @@ public sealed class RadioPacketTransport
                 {
                     case RadioHopOutcome.TransmittedRadio:
                     case RadioHopOutcome.TransmittedCable:
+                        if (packet.SuccessfulHops == 0)
+                            _firstHopAges[(int)(_firstHopSampleCount++ % SampleWindow)] =
+                                Math.Max(0, tick - packet.CreatedTick);
                         packet.Index++;
                         packet.SuccessfulHops++;
                         forwarded++;
