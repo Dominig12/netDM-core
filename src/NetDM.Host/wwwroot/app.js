@@ -482,6 +482,7 @@ $("bench-form").addEventListener("submit",async event=>{
     packetMaxAdvancesPerTick:Number($("packet-max-visits").value),
     packetQueueCapacity:Number($("packet-queue-capacity").value),
     packetPreRouteBackpressure:$("packet-backpressure").value==="on",
+    eventDrivenPacketWaiting:$("packet-wait-mode").value==="event",
     packetMaxNoRouteRetryDelayTicks:Number($("packet-backoff-cap").value),
     packetRerouteQueueRetryDelayTicks:Number($("packet-reroute-cooldown").value),
     radioRange:Number($("radio-range").value)
@@ -740,7 +741,8 @@ async function pollSuite(){
         (opts?.packetQueueCapacity||2048)+"-v"+
         (opts?.packetMaxAdvancesPerTick||1024)+"-"+
         (opts?.adaptivePacketVisits?"adaptive":"fixed")+"-"+
-        (opts?.packetPreRouteBackpressure?"reserved":"openloop")+
+        (opts?.packetPreRouteBackpressure?"reserved":"openloop")+"-"+
+        (opts?.eventDrivenPacketWaiting?"eventwait":"fifo")+
         "-seed"+(opts?.seed||1337)+".zip";
     }
   }catch(error){console.warn("Suite telemetry unavailable",error);}
@@ -761,10 +763,12 @@ $("suite-compare-preset").addEventListener("change",()=>{
   $("suite-reroute-cooldown").value="8";
   const advanced=preset.startsWith("transport-");
   $("suite-visit-mode").value=preset==="transport-adaptive"||
-    preset==="transport-backpressure"?"adaptive":"fixed";
+    preset==="transport-backpressure"||preset==="transport-eventwait"?"adaptive":"fixed";
   $("suite-max-visits").value=advanced&&preset!=="transport-control"?"4096":"1024";
   $("suite-queue-capacity").value=advanced&&preset!=="transport-control"?"4096":"2048";
-  $("suite-backpressure").value=preset==="transport-backpressure"?"on":"off";
+  $("suite-backpressure").value=preset==="transport-backpressure"||
+    preset==="transport-eventwait"?"on":"off";
+  $("suite-wait-mode").value=preset==="transport-eventwait"?"event":"fifo";
 });
 $("suite-start").addEventListener("click",async()=>{
   try{
@@ -783,6 +787,7 @@ $("suite-start").addEventListener("click",async()=>{
         packetMaxAdvancesPerTick:Number($("suite-max-visits").value),
         packetQueueCapacity:Number($("suite-queue-capacity").value),
         packetPreRouteBackpressure:$("suite-backpressure").value==="on",
+        eventDrivenPacketWaiting:$("suite-wait-mode").value==="event",
         packetMaxNoRouteRetryDelayTicks:Number($("suite-backoff-cap").value),
         packetRerouteQueueRetryDelayTicks:Number($("suite-reroute-cooldown").value)
       })
