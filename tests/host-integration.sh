@@ -302,7 +302,7 @@ PY
 # New radio routing / transport modes. A* must be a selectable production
 # candidate, while multi-tick packets are queued and forwarded separately
 # from the legacy whole-path airtime reservation.
-grep -q 'A\* · Admissible spatial heuristic' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+grep -q 'A\* · Original allocations (control)' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 grep -q 'HOPWISE · One hop per simulation tick' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 curl -fsS -X POST "$base/api/benchmark/start" \
   -H 'Content-Type: application/json' \
