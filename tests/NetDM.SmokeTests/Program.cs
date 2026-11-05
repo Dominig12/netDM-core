@@ -80,6 +80,7 @@ await CheckSchedulerAsync();
 CheckSharedMedium();
 CheckSharedMediumOracle();
 CheckRadioAStar();
+CheckPacketTransport();
 CheckRadioSafety();
 CheckWirelessTopology();
 CheckRadioOracle();
@@ -370,6 +371,89 @@ static void CheckSharedMediumOracle()
             }
         }
     }
+}
+
+static void CheckPacketTransport()
+{
+    static (SharedMediumNetwork Medium, RouteResult Route) MakeChain(int capacity)
+    {
+        var runtime = new NetworkRuntime();
+        runtime.Apply([
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+                Position: new NodePosition(0,0)),
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+                Position: new NodePosition(10,0)),
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(3),
+                Position: new NodePosition(20,0))
+        ]);
+        var medium = new SharedMediumNetwork(runtime, bytesPerTick: capacity);
+        medium.Update([1,2,3].Select(i => new RadioNodeUpdate(
+            new NodeId((ulong)i), Profile: new RadioProfile(14,1,8),
+            ChangeProfile:true)).ToArray());
+        var route = medium.Route(new NodeId(1),new NodeId(3));
+        Check(route.Found && route.Path.Count == 3);
+        return (medium, route);
+    }
+
+    // Whole-route reservation rejects a 2*400-byte path with a 512-byte
+    // budget. Store-and-forward delivers it over two independent ticks.
+    var (medium, route) = MakeChain(512);
+    Check(!medium.TryTransmit(route, 400, 0));
+    var queue = new RadioPacketTransport(medium,
+        new PacketTransportOptions(Capacity:2,MaxAgeTicks:10,
+            MaxReroutes:2,MaxAdvancesPerTick:2));
+    Check(queue.Enqueue(route,400,0));
+    Check(queue.Enqueue(route,400,0));
+    Check(!queue.Enqueue(route,400,0));
+    Check(queue.Capture().Rejected == 1);
+    Check(queue.Advance(1) == 1);
+    Check(queue.Advance(1) == 0); // Never two hops in one tick.
+    Check(queue.Capture().Delivered == 0);
+    for (var tick = 2; tick <= 6; tick++) queue.Advance(tick);
+    var stats = queue.Capture();
+    Check(stats.Delivered == 2 && stats.Queued == 0);
+    Check(stats.WirelessHops == 4);
+    Check(stats.BusyDeferrals > 0);
+    Check(stats.DeliveredBytes == 800);
+
+    // One disconnected hop triggers rerouting from the packet's current
+    // position. An absent alternative is dropped rather than delivered.
+    var (broken, original) = MakeChain(600);
+    var disconnected = new RadioPacketTransport(broken,
+        new PacketTransportOptions(MaxReroutes:2));
+    Check(disconnected.Enqueue(original,300,0));
+    Check(disconnected.Advance(1)==1);
+    broken.Update([new RadioNodeUpdate(new NodeId(3),Profile:null,
+        ChangeProfile:true)]);
+    disconnected.Advance(2);
+    Check(disconnected.Capture().Dropped==1);
+    Check(disconnected.Capture().Reroutes==1);
+    Check(disconnected.Capture().Delivered==0);
+
+    // A physical cable can restore the missing hop while a packet is
+    // already en route. The final hop uses the cable, not shared airtime.
+    var (cableMedium, cablePath) = MakeChain(400);
+    var cableQueue = new RadioPacketTransport(cableMedium);
+    Check(cableQueue.Enqueue(cablePath,300,0));
+    Check(cableQueue.Advance(1)==1);
+    cableMedium.Update([new RadioNodeUpdate(new NodeId(3),
+        Profile:null,ChangeProfile:true)]);
+    Check(cableMedium.SetCable(new NodeId(2),new NodeId(3),1));
+    Check(cableQueue.Advance(2)==1);
+    Check(cableQueue.Capture().Delivered==1);
+    Check(cableQueue.Capture().CableHops==1);
+
+    // TTL / zero-hop packets / copies of externally mutable path buffers.
+    var (ttlMedium,ttlRoute)=MakeChain(400);
+    var ttlQueue=new RadioPacketTransport(ttlMedium,new PacketTransportOptions(
+        MaxAgeTicks:2,MaxAdvancesPerTick:1));
+    Check(ttlQueue.Enqueue(ttlRoute,300,0));
+    Check(ttlQueue.Advance(2)==0);
+    Check(ttlQueue.Capture().Expired==1);
+    var same=ttlMedium.Route(new NodeId(1),new NodeId(1));
+    Check(ttlQueue.Enqueue(same,100,2));
+    ttlQueue.Advance(3);
+    Check(ttlQueue.Capture().Delivered==1);
 }
 
 static void CheckRadioAStar()
