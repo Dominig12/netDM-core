@@ -2,7 +2,17 @@ using NetDM.Core;
 using NetDM.Host.Benchmarks;
 using NetDM.Host.Transport;
 
-var builder = WebApplication.CreateBuilder(args);
+var workingDirectory = Directory.GetCurrentDirectory();
+var projectDirectory = Directory.Exists(Path.Combine(workingDirectory, "wwwroot"))
+    ? workingDirectory
+    : Path.Combine(workingDirectory, "src", "NetDM.Host");
+var contentRoot = Directory.Exists(Path.Combine(projectDirectory, "wwwroot"))
+    ? projectDirectory : AppContext.BaseDirectory;
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = contentRoot
+});
 // Deliberately localhost-only; this development observability endpoint has no authentication.
 builder.WebHost.UseUrls("http://127.0.0.1:5087");
 builder.Services.AddSingleton<NetworkRuntime>();
@@ -68,7 +78,7 @@ app.MapGet("/api/map", (NetworkRuntime runtime,
     var ids = nodes.Select(node => node.Id).ToHashSet();
     var edges = nodes.SelectMany(node => node.Links.Values
         .Where(edge => node.Id.Value < edge.To.Value && ids.Contains(edge.To))
-        .Select(edge => new { a = node.Id.Value, b = edge.To.Value, cost = edge.Cost }))
+        .Select(edge => new { a = node.Id.ToString(), b = edge.To.ToString(), cost = edge.Cost }))
         .Take(maxNodes * 8)
         .ToArray();
 
@@ -80,7 +90,7 @@ app.MapGet("/api/map", (NetworkRuntime runtime,
         truncated = nodes.Count >= maxNodes,
         nodes = nodes.Select(node => new
         {
-            id = node.Id.Value,
+            id = node.Id.ToString(),
             x = node.Position!.Value.X,
             y = node.Position!.Value.Y,
             z = node.Position!.Value.Z,
