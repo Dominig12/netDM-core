@@ -561,3 +561,97 @@ $("network-mode").addEventListener("change",()=>{
       ? "Radio devices share channel airtime without generating pairwise graph edges. View domain tiles, routing, and congestion."
       : "Nodes connect through physical proximity. Link changes simulate radio outages.";
 });
+
+let suiteState=null;
+async function pollSuite(){
+  try{
+    const response=await fetch("/api/benchmark-suite",{cache:"no-store"});
+    if(!response.ok)return;
+    const state=await response.json();
+    suiteState=state;
+    const running=state.status==="running"||state.status==="stopping";
+    $("suite-start").disabled=running;
+    $("suite-stop").disabled=!running||state.status==="stopping";
+    const titles={idle:"READY",running:"RUNNING",stopping:"STOPPING",
+      complete:"ALL THREE COMPLETE",stopped:"STOPPED",failed:"FAILED"};
+    $("suite-status").textContent=titles[state.status]||state.status.toUpperCase();
+    const opts=state.options;
+    if(opts){
+      $("suite-settings").textContent=
+        format(opts.nodes)+" nodes · "+format(opts.routesPerSecond)+
+        " requested routes/s · seed "+opts.seed+" · radio range "+opts.radioRange+
+        " · "+format(opts.mediumBytesPerTick)+" bytes/tick · "+
+        opts.durationSeconds+" seconds per scenario.";
+    }
+    const rows=document.querySelectorAll("[data-suite-case]");
+    for(const row of rows){
+      const number=Number(row.dataset.suiteCase);
+      const result=(state.reports||[]).find(r=>r.number===number);
+      const active=running&&state.currentScenario===number&&!result;
+      row.classList.toggle("running",active);
+      row.classList.toggle("ready",!!result);
+      row.querySelector(".suite-step-state").textContent=
+        result?"COMPLETE":active?"RUNNING":state.status==="failed"&&state.currentScenario===number
+          ?"FAILED":state.status==="stopped"&&state.currentScenario===number
+            ?"INTERRUPTED":"PENDING";
+      const slot=row.querySelector(".suite-step-download");
+      slot.replaceChildren();
+      if(result&&state.runId){
+        const link=document.createElement("a");
+        link.href="/api/benchmark-suite/download/"+number+
+          "?runId="+encodeURIComponent(state.runId);
+        link.download=result.fileName;
+        link.textContent="DOWNLOAD JSON · "+format(result.bytes/1024)+" KiB";
+        slot.append(link);
+      }
+    }
+    const elapsed=running&&currentMetrics?.benchmark?.elapsedSeconds||0;
+    const progress=Math.min(100,100*((state.completed||0)+
+      (running&&opts?.durationSeconds&&state.currentScenario>state.completed
+        ?Math.min(.99,elapsed/opts.durationSeconds):0))/3);
+    $("suite-progress-fill").style.width=progress+"%";
+    const message=state.error
+      ?state.error
+      :state.status==="complete"
+        ?"All three reports are ready. Download them and attach to ChatGPT."
+        :running?"Scenario "+state.currentScenario+"/3 · "+
+          (state.currentTitle||"Preparing topology")+
+          " · "+format(elapsed)+"s elapsed"
+          :state.status==="stopped"
+            ?"Stopped. Completed JSON reports remain available."
+            :"The suite continues on the host even if you close this tab.";
+    $("suite-message").textContent=message;
+    const zip=$("suite-zip");
+    zip.hidden=state.status!=="complete"||state.reports.length!==3;
+    if(!zip.hidden&&state.runId){
+      zip.href="/api/benchmark-suite/download-all?runId="+
+        encodeURIComponent(state.runId);
+      zip.download="netdm-three-scenarios.zip";
+    }
+  }catch(error){console.warn("Suite telemetry unavailable",error);}
+}
+$("suite-start").addEventListener("click",async()=>{
+  try{
+    const response=await fetch("/api/benchmark-suite/start",{
+      method:"POST",headers:{"Content-Type":"application/json"},body:"{}"
+    });
+    if(!response.ok){
+      const payload=await response.json();
+      throw Error(payload.error||response.statusText);
+    }
+    cameraInitialized=false;selected=null;previousTraffic.clear();heat.clear();
+    toast("Three-scenario benchmark suite started.");
+    await pollSuite();
+    await pollMetrics();
+  }catch(error){toast("Unable to start suite: "+error.message);}
+});
+$("suite-stop").addEventListener("click",async()=>{
+  try{
+    const response=await fetch("/api/benchmark-suite/stop",{method:"POST"});
+    if(!response.ok)throw Error(response.statusText);
+    await pollSuite();
+    toast("Stopping suite after cancelling the active benchmark.");
+  }catch(error){toast("Unable to stop suite: "+error.message);}
+});
+pollSuite();
+setInterval(pollSuite,1750);

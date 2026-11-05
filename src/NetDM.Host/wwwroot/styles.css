@@ -146,3 +146,32 @@ h1{font-size:27px;font-weight:650;letter-spacing:-.6px;margin:7px 0 0}
 /* Diagnostic chart colors: orange hop-budget, red contention, blue stale,
    purple invalid/old tick, green route availability. */
 #reachability-chart,#rejections-chart{width:100%;height:150px;display:block}
+
+/* Sequential reproducible diagnostic workload */
+.suite-panel{background:var(--panel);border:1px solid var(--stroke);border-radius:var(--radius);margin:0 0 16px;overflow:hidden}
+.suite-body{padding:18px}
+.suite-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.suite-actions button{padding:11px 15px;white-space:nowrap}
+.suite-actions button:disabled{opacity:.45;cursor:default}
+.suite-status{font-size:11px;font-weight:700;letter-spacing:.7px;color:var(--cyan);margin-left:auto}
+.suite-settings{font-size:11px;color:#97abc0;line-height:1.6;margin:12px 0}
+.suite-progress{height:5px;border-radius:4px;overflow:hidden;background:#17283b}
+#suite-progress-fill{height:100%;background:#57ccd9;transition:width .4s;width:0}
+.suite-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:14px 0 10px}
+.suite-step{border:1px solid #2e3d53;border-radius:6px;background:#101e2f;padding:14px;display:flex;flex-direction:column;gap:7px}
+.suite-step > div:first-child{display:flex;flex-direction:column;gap:6px}
+.suite-step small{color:#718eab;font-size:9px;letter-spacing:.8px}
+.suite-step strong{color:#d7e9f3;font-size:12px}
+.suite-step div:first-child > span{color:#849db5;font-size:10px}
+.suite-step-state{font-weight:700;color:#8196ad;font-size:10px;letter-spacing:.6px}
+.suite-step.running{border-color:#5babc1;background:#112a3b}
+.suite-step.running .suite-step-state{color:#6cdbec}
+.suite-step.ready{border-color:#3a806f}
+.suite-step.ready .suite-step-state{color:#72e3bf}
+.suite-step-download{margin-top:auto}
+.suite-step-download a,.suite-zip-link{font-size:10px;color:#75d7e6;text-decoration:none;font-weight:700;letter-spacing:.5px}
+.suite-step-download a:hover,.suite-zip-link:hover{text-decoration:underline}
+.suite-footer{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;color:#899fb4;font-size:10px;line-height:1.5}
+.suite-zip-link[hidden]{display:none}
+.suite-description{margin:9px 0 0;color:#6e829b;font-size:10px;line-height:1.6}
+@media(max-width:900px){.suite-steps{grid-template-columns:1fr}.suite-status{margin-left:0}}
