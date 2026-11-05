@@ -118,3 +118,39 @@ assert any(x["radioLinksRemovedPerSecond"] > 0 for x in h), h
 print("Dynamic radio benchmark / topology churn / telemetry: PASS")
 PY
 curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null
+
+# Shared-medium model: a dense radio network remains sparse in the physical graph.
+# The routing engine discovers neighbors lazily and reserves a per-channel airtime budget.
+for i in $(seq 1 20); do
+  status="$(curl -fsS "$base/api/metrics" | python3 -c 'import sys,json;print(json.load(sys.stdin)["benchmark"]["status"])')"
+  if [[ "$status" == "stopped" || "$status" == "complete" ]]; then break; fi
+  sleep 1
+done
+curl -fsS -X POST "$base/api/benchmark/start" \
+  -H 'Content-Type: application/json' \
+  -d '{"nodes":180,"routesPerSecond":60,"movesPerSecond":30,"linkChangesPerSecond":6,"durationSeconds":9,"seed":632,"wirelessEnabled":true,"radioModel":"shared","radioRange":128,"mediumBytesPerTick":512}' >/dev/null
+sleep 4
+curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-shared-metrics.json"
+curl -fsS "$base/api/map?minX=-20&minY=-20&maxX=180&maxY=180&limit=1000" > "${RUNNER_TEMP:-/tmp}/netdm-shared-map.json"
+curl -fsS "$base/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-shared-history.json"
+python3 - <<'PY'
+import json, os
+directory=os.environ.get("RUNNER_TEMP","/tmp")
+def load(name):
+    with open(os.path.join(directory,name),encoding="utf-8") as f: return json.load(f)
+m=load("netdm-shared-metrics.json")
+v=load("netdm-shared-map.json")
+h=load("netdm-shared-history.json")
+b=m["benchmark"]
+assert b["options"]["radioModel"]=="shared" and b["options"]["wirelessEnabled"] is True, b
+assert b["sharedMedium"]["configuredDevices"] <= 180, b
+assert b["sharedMedium"]["domains"] == 1, b
+assert b["sharedMedium"]["pairwiseRadioEdges"] == 0, b
+assert m["nodeCount"] == 180 and m["edgeCount"] == 0, m
+assert len(v["domainCells"]) > 0 and v["mediumVersion"] is not None, v
+assert m["runtime"]["routes"] > 0, m
+assert any(x["mediumDomains"] == 1 for x in h), h
+assert b["sharedMedium"]["acceptedTransfers"]+b["sharedMedium"]["rejectedTransfers"]>0, b
+print("Shared-medium routing / domain cells / airtime diagnostics: PASS")
+PY
+curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null

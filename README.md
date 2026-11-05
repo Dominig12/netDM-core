@@ -243,3 +243,62 @@ Do not treat the 128-candidate threshold as a gameplay rule.
 
 Long-running radio discovery accepts a `CancellationToken`; cancellation
 before the graph commit leaves the current topology unchanged.
+
+## Shared Medium: dense radio networks without quadratic edge storage
+
+The new **SHARED · Lazy medium domains** mode in Network Observatory uses
+`SharedMediumNetwork` instead of `DynamicRadioNetwork`. It keeps radio
+membership indexed by `(channel, Z-level, spatial cell)` and discovers
+eligible neighbours **during routing**, without generating a pairwise
+edge for every device within radio range.
+
+This is an alternative execution model, not an automatic replacement for
+the earlier pairwise radio engine. Both remain selectable in the benchmark.
+
+The model preserves geometric reachability:
+devices must use the same channel and Z-level, and their distance must
+be no greater than the smaller configured range. **Being in the same
+channel-domain does not give two distant devices an imaginary direct route.**
+Paths may traverse multiple short-range radio hops or explicitly
+registered physical cables. A domain is the shared airtime accounting scope,
+not a connected component.
+
+There is also a deterministic **per-channel capacity** expressed as bytes
+per simulation tick. A successful route can call `TryTransmit(route, size, tick)`.
+All wireless hops on that route reserve bytes against their shared
+channel's budget. Reservation is atomic across all domains used; if any
+domain is saturated, the transfer is rejected without partial debits.
+Cable-only hops do not consume wireless capacity.
+
+This is a **logical contention approximation**. It does not yet simulate
+radio interference, collision backoff, spatial reuse, packet queues,
+propagation delays or wall occlusion. A domain's budget is shared even
+between geographically disconnected clusters using the same channel/Z.
+Simulation tick is explicitly supplied by the caller; in the benchmark
+one tick is approximately 100 ms of monotonic host time.
+
+The dashboard shows occupied radio-domain cells as translucent tiles,
+current domains and registered devices, and a chart of successful vs
+rejected transmissions. Its dynamic graph map displays **physical edges**;
+shared-medium radio reachability is deliberately not serialized as a
+quadratic set of visual edges.
+
+### Example live benchmark request
+
+```json
+{"nodes":2500,"routesPerSecond":300,"movesPerSecond":200,"linkChangesPerSecond":20,"durationSeconds":60,"seed":1337,"wirelessEnabled":true,"radioModel":"shared","radioRange":64,"mediumBytesPerTick":8192}
+```
+
+The default `radioModel` is `pairwise` for backward compatibility;
+`wirelessEnabled=false` selects the wired graph.
+
+Shared-medium route computations run against one composite immutable
+snapshot containing both physical topology and radio membership. A profile
+change invalidates radio-route caches even when the physical graph edges
+remain unchanged. Do not bypass this layer to mutate its physical graph;
+ownership checks reject subsequent updates if they detect an external write.
+
+Tests compare its routes to the pairwise model on randomized channels,
+positions, and moved devices; also cover a dense 400-device cell without
+adding any physical radio edges, movement snapshot consistency,
+stale-route transmission rejection and shared capacity saturation.
