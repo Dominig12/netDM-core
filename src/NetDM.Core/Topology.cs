@@ -20,11 +20,12 @@ public sealed record Node(NodeId Id, ImmutableDictionary<NodeId, Edge> Links, No
 
 public sealed record TopologySnapshot(
     long Version,
+    long ConnectivityVersion,
     ImmutableDictionary<NodeId, Node> Nodes,
     ImmutableDictionary<GridCell, ImmutableHashSet<NodeId>> SpatialCells)
 {
     public static TopologySnapshot Empty { get; } = new(
-        0, ImmutableDictionary<NodeId, Node>.Empty,
+        0, 0, ImmutableDictionary<NodeId, Node>.Empty,
         ImmutableDictionary<GridCell, ImmutableHashSet<NodeId>>.Empty);
 }
 
@@ -87,6 +88,7 @@ public sealed class TopologyStore
             var nodes = current.Nodes.ToBuilder();
             var cells = current.SpatialCells.ToBuilder();
             int applied = 0;
+            bool connectivityChanged = false;
 
             foreach (var change in changes)
             {
@@ -98,6 +100,7 @@ public sealed class TopologyStore
                         if (change.Position is { } newPosition)
                             AddToCell(cells, change.A, newPosition);
                         applied++;
+                        connectivityChanged = true;
                         break;
 
                     case TopologyOperation.RemoveNode:
@@ -155,7 +158,9 @@ public sealed class TopologyStore
 
             if (applied == 0) return new BatchResult(current.Version, 0, changes.Count);
             var next = new TopologySnapshot(
-                checked(current.Version + 1), nodes.ToImmutable(), cells.ToImmutable());
+                checked(current.Version + 1),
+                current.ConnectivityVersion + (connectivityChanged ? 1 : 0),
+                nodes.ToImmutable(), cells.ToImmutable());
             Volatile.Write(ref _current, next);
             return new BatchResult(next.Version, applied, changes.Count - applied);
         }
@@ -167,7 +172,11 @@ public sealed class TopologyStore
         lock (_writerGate)
         {
             var current = Snapshot;
-            var next = TopologySnapshot.Empty with { Version = checked(current.Version + 1) };
+            var next = TopologySnapshot.Empty with
+            {
+                Version = checked(current.Version + 1),
+                ConnectivityVersion = checked(current.ConnectivityVersion + 1)
+            };
             Volatile.Write(ref _current, next);
             return next.Version;
         }

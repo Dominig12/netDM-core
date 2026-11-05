@@ -22,10 +22,10 @@ public sealed class RouteCache(int capacity = 16_384)
         return false;
     }
 
-    public void Store(RouteResult value, NodeId source, NodeId target)
+    public void Store(long connectivityVersion, RouteResult value, NodeId source, NodeId target)
     {
         if (capacity <= 0) return;
-        var key = (value.Version, source, target);
+        var key = (connectivityVersion, source, target);
         if (!_items.TryAdd(key, value)) return;
         _order.Enqueue(key);
         while (_items.Count > capacity && _order.TryDequeue(out var eldest))
@@ -100,9 +100,9 @@ public sealed class NetworkRuntime
         var result = Topology.ApplyBatch(changes);
         if (result.Applied > 0)
         {
-            // Versions already prevent stale cache hits. Clear entries to prevent
-            // moving graph workloads retaining obsolete results.
-            Cache.Clear();
+            // Position-only updates must not invalidate connectivity route caches.
+            if (changes.Any(change => change.Operation != TopologyOperation.MoveNode))
+                Cache.Clear();
             Metrics.MutationCompleted(result,
                 changes.Count(c => c.Operation == TopologyOperation.MoveNode));
         }
@@ -121,13 +121,15 @@ public sealed class NetworkRuntime
     {
         var start = Stopwatch.GetTimestamp();
         var snapshot = Topology.Snapshot;
-        var cached = Cache.TryGet(snapshot.Version, from, to, out var result);
+        var cached = Cache.TryGet(snapshot.ConnectivityVersion, from, to, out var result);
         if (!cached)
         {
             result = Router.Find(snapshot, from, to, maxExplored, cancellationToken);
-            Cache.Store(result, from, to);
+            Cache.Store(snapshot.ConnectivityVersion, result, from, to);
         }
 
+        if (cached && result.Version != snapshot.Version)
+            result = result with { Version = snapshot.Version };
         Metrics.RouteCompleted(result.Found, cached, Stopwatch.GetTimestamp() - start);
 
         // Sample one route out of 16: traffic heat is approximate and bounded in cost.

@@ -46,6 +46,7 @@ Check(TopologyStore.QueryViewport(store.Snapshot, -10, -10, 32, 0).Count == 1);
 Check(TopologyStore.QueryViewport(oldSnapshot, -10, -10, 32, 0).Count == 2);
 Check(TopologyStore.QueryViewport(store.Snapshot, 90, 90, 110, 110).Count == 2);
 Check(!store.MoveNode(a, new NodePosition(100, 100)));
+Check(oldSnapshot.ConnectivityVersion == store.Snapshot.ConnectivityVersion);
 
 var runtime = new NetworkRuntime();
 runtime.Apply(batch);
@@ -57,7 +58,7 @@ Check(!runtime.Route(a, c).Found);
 
 // Verify parallel immutable reads remain consistent during batches of moves.
 var errors = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
-var tasks = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+var tasks = Enumerable.Range(0, 4).Select(worker => Task.Run(() =>
 {
     try
     {
