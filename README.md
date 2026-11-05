@@ -1037,3 +1037,116 @@ The new dense index trades additional snapshot-update work/memory for
 faster read-side searches; measure actual movement rate, original
 route throughput, p95, allocations, GC, and packet delivery before
 changing the default.
+
+## M17 — Adaptive packet forwarding and pre-route backpressure
+
+The Dense A* 12k-node test found that a static network can calculate
+~419 original routes/s while the forwarding loop, limited to 1,024
+packet visits each 100ms tick, performs only ~10k hops/s. At ~72 radio
+hops/delivery, that is about 140 packet deliveries/s even in an ideal
+uncongested model. The full transport queue rejects the surplus AFTER
+expensive A* work has been spent. Faster routing alone cannot fix that.
+
+### Independent budgets and fair packet rotation
+
+A new opt-in `adaptivePacketVisits` switch adjusts packet visits per
+tick. It starts at **min(1024, maxVisits)** and grows the limit by up to
+25% when the queue remains full enough and wall work takes at most
+60% of the tick's CPU/wall-time budget. If work reaches 80% of the
+budget, it reduces the limit by 25%, never below the starting floor.
+Every tick still honors **maxVisits** as a hard visit count and
+`packetTickWorkBudgetMs` (25ms default) as a soft wall-time cutoff.
+Packets are processed in bounded FIFO round-robin order and **never
+advance twice in one simulation tick**. If the limit or time budget
+expires, unvisited packets retain their place in the queue.
+
+The new `packetQueueCapacity` option (default 2048) is intentionally
+separate from the visit limit. With a 2048-packet queue, raising
+maxVisits to 4096 cannot process more than 2048 *different* packets in
+one tick. The comparison presets therefore raise both when testing
+4096 visits. This is an application processing limit, **not more
+physical radio capacity**; channel/Z spatial airtime rules remain
+unchanged and are checked on every hop.
+
+### Reserve queue capacity before computing A*
+
+Opt-in `packetPreRouteBackpressure` uses
+`RadioPacketTransport.TryReserveAdmission` to reserve one bounded
+queue slot **before** submitting a route task to the main work
+scheduler. If the transport is full, that offered route is recorded
+as a **transport-backpressured rejection**, not a route that was
+computed and subsequently discarded.
+
+The reservation is a single-owner, idempotently disposable
+`PacketAdmissionLease`. A running route consumes its lease upon
+enqueue; routes without a path and failed/cancelled tasks dispose
+theirs. The route producer also releases it if CPU admission fails
+or the scheduled task is cancelled before it starts. Unreserved
+enqueues cannot steal reserved capacity. Each lease is included in
+the queue-capacity check; no unbounded implicit admission occurs.
+
+Rejections are stage-specific: `load.offered` still counts every
+generated request, `load.admitted` means **the main CPU scheduler
+accepted the route computation**, and `load.rejected` includes both
+scheduler and transport admission denials. The additional
+`load.transportBackpressured` is the TRANSPORT subset of rejected
+requests, not an extra category to add to offered/admitted totals.
+
+### Useful-work and fairness telemetry
+
+- Packet counters: `forwardingVisits`, `visitBudgetStops`,
+  `currentVisitLimit`, `adaptiveLimitIncreases`,
+  `adaptiveLimitDecreases`, `preRouteBackpressureRejections`,
+  `reservedAdmissions`, and `admissionReservations`.
+- Each history sample: routes offered/admitted/rejected per second,
+  packets enqueued per second, packets delivered per second,
+  *transport-backpressured* requests per second, forwarding visits
+  per second, adaptive visit limit, visit-budget stops, and current
+  outstanding admission leases.
+- Network Observatory charts: **Transport pipeline** and
+  **Adaptive forwarding**, in addition to previous delivery p95,
+  reroute pressure and packet timing.
+
+### Controlled E / F / G three-scenario experiments
+
+Select one of these profiles in **Three-scenario diagnostic suite**:
+
+| Profile | Dense A* | Visit scheduling | Queue capacity | Pre-route backpressure |
+|---|---|---|---:|---|
+| **E — control** | yes | fixed 1024 visits/tick | 2048 | off |
+| **F — adaptive** | yes | adaptive up to 4096 visits/tick | 4096 | off |
+| **G — backpressure** | yes | adaptive up to 4096 visits/tick | 4096 | on |
+
+All profiles use two reroute workers, negative route backoff cap 96
+ticks, TTL=900, dedicated packet ticks and spatial reuse. Run each
+profile separately: **3 × 120s, 12k nodes, 1500 offered routes/s,
+seed 1337**. The ZIP/JSON names include search mode, worker count,
+backoff, packet queue capacity, visit budget, and the adaptive/
+backpressure flags to keep downloads distinct.
+
+E→F isolates a *combination* of adaptive visit count and a larger
+queue, not the effect of each parameter individually. F→G isolates
+pre-route backpressure at identical queue and visit settings. The
+manual benchmark can vary either value individually for extra A/B
+experiments.
+
+Compare actual offered/admitted routes, found routes, packet
+acceptance, **delivered packets and latency p95**, queue occupancy,
+visit-budget stops, tick execution p95 and achieved moves/s.
+An increase in route admissions that is not accompanied by better
+packet delivery is not an improvement in the end-to-end service.
+
+Smoke tests verify concurrent lease admission, cancellation/release,
+queue bounds, adaptive growth, fixed-visit regression, and one-hop
+per packet per tick. Linux/Windows integration validates the
+three-scenario ZIP and per-stage transport accounting.
+
+### Limits
+
+The benchmark remains a logical packet simulator, not a true RF
+collision MAC or a production transport protocol. Backpressure
+rejects new transport-bound route requests rather than blocking or
+retrying them, so interactive callers need their own bounded retry
+policy. The 25ms budget is soft and does not preempt a single hop.
+Neither the effectiveness of the new strategy nor latency under the
+full 12k-node load is claimed before running E/F/G on target hardware.
