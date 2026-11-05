@@ -207,7 +207,7 @@ mapCanvas.addEventListener("wheel",event=>{
 $("fit").addEventListener("click",fitMap);
 const observe=new ResizeObserver(()=>{drawMap();drawCharts();drawSchedulerCharts();drawComparisonPlot();});
 observe.observe(frame);
-for(const id of ["routes-chart","latency-chart","memory-chart","links-chart","reachability-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
+for(const id of ["routes-chart","load-chart","latency-chart","memory-chart","links-chart","reachability-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
 
 function plot(id,series,color,extra){
   const canvas=$(id),{ctx,w,h}=resizeCanvas(canvas);
@@ -228,6 +228,16 @@ function plot(id,series,color,extra){
 function drawCharts(){
   const last=history[history.length-1];
   plot("routes-chart",[{values:history.map(x=>x.actualRoutesPerSecond),color:"#60d9e6"}],"#60d9e6");
+  plot("load-chart",[
+    {values:history.map(x=>x.offeredRoutesPerSecond||0),color:"#85acff"},
+    {values:history.map(x=>x.admittedRoutesPerSecond||0),color:"#60d9e6"},
+    {values:history.map(x=>x.rejectedRoutesPerSecond||0),color:"#f29e81"}
+  ],"#85acff");
+  $("chart-load").textContent=last
+    ? format(last.offeredRoutesPerSecond||0)+" / "+
+      format(last.admittedRoutesPerSecond||0)+" / "+
+      format(last.rejectedRoutesPerSecond||0)
+    : "—";
   plot("latency-chart",[
     {values:history.map(x=>x.p50Us),color:"#4a85cc",width:1.1},
     {values:history.map(x=>x.p95Us),color:"#5bd5db",width:2},

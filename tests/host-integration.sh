@@ -182,3 +182,15 @@ assert s["rejected"] >= 0 and s["queueWaitP95Us"] >= 0, s
 assert s["budgetMillisecondsPer100Ms"] == 65, s
 print("Global scheduled routing / bounded backlog / telemetry: PASS")
 PY
+
+# Admission accounting must be independent of scheduler completion.
+curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-load-metrics.json"
+python3 - <<'PY'
+import json, os
+path=os.path.join(os.environ.get("RUNNER_TEMP","/tmp"),"netdm-load-metrics.json")
+with open(path,encoding="utf-8") as f: data=json.load(f)
+load=data["benchmark"]["load"]
+assert load["offered"] == load["admitted"] + load["rejected"],load
+assert load["offered"] > 0,load
+print("Offered, admitted and rejected arrival accounting: PASS",load)
+PY
