@@ -227,9 +227,10 @@ async function pollMetrics(){
       $("kpi-cache").textContent=routes>0?format(hits/routes*100)+"%":"0%";
     }
     previousCounters=data.runtime;lastMetricsAt=performance.now();
-    if(!cameraInitialized && bench.worldWidth>0)fitMap();
-    if(!currentMetrics?.nodeCount && data.nodeCount>0)setTimeout(loadMap,100);
+    const wasEmpty=!currentMetrics?.nodeCount;
     currentMetrics=data;
+    if(!cameraInitialized && bench.worldWidth>0)fitMap();
+    if(wasEmpty && data.nodeCount>0)setTimeout(loadMap,100);
   }catch(error){
     $("connection").classList.add("offline");
     $("connection").innerHTML='<span class="status-dot"></span> HOST OFFLINE';
