@@ -42,7 +42,9 @@ public sealed class RouteCache(int capacity = 16_384)
 public sealed record RuntimeCounters(
     long Routes, long Found, long CacheHits, long Mutations, long Moves,
     double P50Microseconds, double P95Microseconds, double P99Microseconds,
-    int CacheEntries, long ManagedBytes, int Gen2Collections);
+    int CacheEntries, long ManagedBytes, int Gen2Collections,
+    long TotalExploredNodes, long TotalRouteAllocatedBytes,
+    double GcTotalPauseMilliseconds);
 
 /// <summary>Rolling latency window + monotonic counters. Approximate percentiles.</summary>
 public sealed class NetworkMetrics
@@ -51,8 +53,10 @@ public sealed class NetworkMetrics
     private readonly long[] _routeLatenciesUs = new long[Window];
     private long _latencyIndex;
     private long _routes, _found, _cacheHits, _mutations, _moves;
+    private long _exploredNodes, _allocatedBytes;
 
-    public void RouteCompleted(bool found, bool hit, long elapsedTicks)
+    public void RouteCompleted(bool found, bool hit, long elapsedTicks,
+        int explored, long allocatedBytes)
     {
         var us = Math.Max(1, elapsedTicks * 1_000_000 / Stopwatch.Frequency);
         var index = Interlocked.Increment(ref _latencyIndex) - 1;
@@ -60,6 +64,8 @@ public sealed class NetworkMetrics
         Interlocked.Increment(ref _routes);
         if (found) Interlocked.Increment(ref _found);
         if (hit) Interlocked.Increment(ref _cacheHits);
+        Interlocked.Add(ref _exploredNodes, explored);
+        Interlocked.Add(ref _allocatedBytes, Math.Max(0, allocatedBytes));
     }
 
     public void MutationCompleted(BatchResult result, int moves)
@@ -81,7 +87,10 @@ public sealed class NetworkMetrics
             Volatile.Read(ref _routes), Volatile.Read(ref _found),
             Volatile.Read(ref _cacheHits), Volatile.Read(ref _mutations),
             Volatile.Read(ref _moves), Percentile(0.5), Percentile(0.95),
-            Percentile(0.99), cacheEntries, GC.GetTotalMemory(false), GC.CollectionCount(2));
+            Percentile(0.99), cacheEntries, GC.GetTotalMemory(false), GC.CollectionCount(2),
+            Interlocked.Read(ref _exploredNodes),
+            Interlocked.Read(ref _allocatedBytes),
+            GC.GetTotalPauseDuration().TotalMilliseconds);
     }
 }
 
@@ -120,6 +129,7 @@ public sealed class NetworkRuntime
         CancellationToken cancellationToken = default)
     {
         var start = Stopwatch.GetTimestamp();
+        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
         var snapshot = Topology.Snapshot;
         // Exploration-limited requests must not reuse or poison full-budget cached routes.
         // A bounded search returning Missing may simply have exceeded its work budget.
@@ -134,7 +144,8 @@ public sealed class NetworkRuntime
 
         if (cached && result.Version != snapshot.Version)
             result = result with { Version = snapshot.Version };
-        RecordExternalRoute(result, cached, Stopwatch.GetTimestamp() - start);
+        RecordExternalRoute(result, cached, Stopwatch.GetTimestamp() - start,
+            GC.GetAllocatedBytesForCurrentThread() - allocatedBefore);
         return result;
     }
 
@@ -142,10 +153,12 @@ public sealed class NetworkRuntime
     /// Shared telemetry sink for alternate routing layers. The caller must
     /// measure elapsed ticks, not Stopwatch.ElapsedMilliseconds.
     /// </summary>
-    public void RecordExternalRoute(RouteResult result, bool cached, long elapsedTicks)
+    public void RecordExternalRoute(RouteResult result, bool cached, long elapsedTicks,
+        long allocatedBytes = 0)
     {
         ArgumentNullException.ThrowIfNull(result);
-        Metrics.RouteCompleted(result.Found, cached, elapsedTicks);
+        Metrics.RouteCompleted(result.Found, cached, elapsedTicks,
+            cached ? 0 : result.Explored, allocatedBytes);
 
         // Sample one route in 16: sampled activity is not packet throughput.
         if (result.Found && (Interlocked.Increment(ref _sampleCounter) & 15) == 0)

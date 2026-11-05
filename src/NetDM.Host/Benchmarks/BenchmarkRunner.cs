@@ -66,7 +66,9 @@ public sealed record BenchmarkSample(
     double RevalidatedTransfersPerSecond,
     int PacketsQueued, double PacketsDeliveredPerSecond,
     double PacketsDroppedPerSecond, double PacketsExpiredPerSecond,
-    double PacketWirelessHopsPerSecond, double CapacityDeferralsPerSecond);
+    double PacketWirelessHopsPerSecond, double CapacityDeferralsPerSecond,
+    double ExploredPerRoute, double AllocatedBytesPerRoute,
+    double GcPauseMillisecondsPerSecond, int Gen2CollectionsInInterval);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -326,7 +328,11 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     ((packetSnapshot?.Dropped ?? 0) - (previousPackets?.Dropped ?? 0)) / interval,
                     ((packetSnapshot?.Expired ?? 0) - (previousPackets?.Expired ?? 0)) / interval,
                     ((packetSnapshot?.WirelessHops ?? 0) - (previousPackets?.WirelessHops ?? 0)) / interval,
-                    ((packetSnapshot?.BusyDeferrals ?? 0) - (previousPackets?.BusyDeferrals ?? 0)) / interval);
+                    ((packetSnapshot?.BusyDeferrals ?? 0) - (previousPackets?.BusyDeferrals ?? 0)) / interval,
+                    deltaRoutes == 0 ? 0 : (double)(current.TotalExploredNodes - previous.TotalExploredNodes) / deltaRoutes,
+                    deltaRoutes == 0 ? 0 : (double)(current.TotalRouteAllocatedBytes - previous.TotalRouteAllocatedBytes) / deltaRoutes,
+                    Math.Max(0, current.GcTotalPauseMilliseconds - previous.GcTotalPauseMilliseconds) / interval,
+                    Math.Max(0, current.Gen2Collections - previous.Gen2Collections));
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;

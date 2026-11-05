@@ -274,6 +274,7 @@ public sealed class SharedMediumNetwork
         CancellationToken cancellationToken = default)
     {
         var started = Stopwatch.GetTimestamp();
+        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
         var snapshot = Snapshot;
         RouteResult cachedResult = null!;
         var eligible = maxExplored == 100_000;
@@ -286,7 +287,8 @@ public sealed class SharedMediumNetwork
                 : RouteCore(snapshot, source, destination, maxExplored, cancellationToken);
         if (!cached && eligible && result.Explored <= maxExplored)
             _cache.Store(snapshot.Version, result, source, destination);
-        _runtime.RecordExternalRoute(result, cached, Stopwatch.GetTimestamp() - started);
+        _runtime.RecordExternalRoute(result, cached, Stopwatch.GetTimestamp() - started,
+            GC.GetAllocatedBytesForCurrentThread() - allocatedBefore);
         return result;
     }
 

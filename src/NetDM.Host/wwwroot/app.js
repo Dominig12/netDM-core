@@ -207,7 +207,7 @@ mapCanvas.addEventListener("wheel",event=>{
 $("fit").addEventListener("click",fitMap);
 const observe=new ResizeObserver(()=>{drawMap();drawCharts();drawSchedulerCharts();drawComparisonPlot();});
 observe.observe(frame);
-for(const id of ["routes-chart","load-chart","latency-chart","memory-chart","links-chart","reachability-chart","packets-chart","packet-queue-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
+for(const id of ["routes-chart","load-chart","latency-chart","explored-chart","gc-chart","memory-chart","links-chart","reachability-chart","packets-chart","packet-queue-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
 
 function plot(id,series,color,extra){
   const canvas=$(id),{ctx,w,h}=resizeCanvas(canvas);
@@ -244,6 +244,11 @@ function drawCharts(){
     {values:history.map(x=>x.p99Us),color:"#f3a572",width:1.3}
   ],"#5bd5db");
   plot("memory-chart",[{values:history.map(x=>x.managedBytes/1048576),color:"#87a5ff"}],"#87a5ff");
+  plot("explored-chart",[{values:history.map(x=>x.exploredPerRoute||0),color:"#69d5e2"}],"#69d5e2");
+  plot("gc-chart",[{values:history.map(x=>x.gcPauseMillisecondsPerSecond||0),color:"#eea576"}],"#eea576");
+  $("chart-explored").textContent=last
+    ?format(last.exploredPerRoute||0)+" nodes / "+format((last.allocatedBytesPerRoute||0)/1024)+" KiB":"—";
+  $("chart-gc").textContent=last?format(last.gcPauseMillisecondsPerSecond||0)+" ms/s":"—";
   plot("reachability-chart",[
     {values:history.map(x=>x.foundPercent||0),color:"#56dfbc"},
     {values:history.map(x=>x.mediumConfiguredDevices>0
