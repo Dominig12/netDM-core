@@ -309,15 +309,23 @@ public sealed class RadioPacketTransport
                     // rather than invalidating every disconnected route after
                     // any unrelated global snapshot update.
                     var revision = LocalRevision(packet);
-                    if (revision > packet.SeenLocalRevision &&
-                        packet.LastRouteAttemptTick >= 0 &&
-                        tick - packet.LastRouteAttemptTick >= _settings.NoRouteRetryDelayTicks)
+                    if (revision > packet.SeenLocalRevision)
                     {
                         packet.SeenLocalRevision = revision;
-                        packet.NextRetryTick = tick;
-                        _localWakes++;
+                        var from = packet.Path[packet.Index];
+                        var to = packet.Path[packet.Index + 1];
+                        // Local recovery does not need another full A* search
+                        // and must not wait for an exponential backoff deadline.
+                        if (_network.HasUsableHop(from, to) ||
+                            (packet.LastRouteAttemptTick >= 0 &&
+                             tick - packet.LastRouteAttemptTick >=
+                                 _settings.NoRouteRetryDelayTicks))
+                        {
+                            packet.NextRetryTick = tick;
+                            _localWakes++;
+                        }
                     }
-                    else
+                    if (tick < packet.NextRetryTick)
                     {
                         _cooldownSkips++;
                         _queue.Enqueue(packet);
