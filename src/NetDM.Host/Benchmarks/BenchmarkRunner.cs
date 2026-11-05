@@ -49,7 +49,8 @@ public sealed record BenchmarkSample(
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
 /// reported throughput is observed throughput, never the requested rate.
 /// </summary>
-public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRunner> log)
+public sealed class BenchmarkRunner(NetworkRuntime runtime,
+    PriorityWorkScheduler scheduler, ILogger<BenchmarkRunner> log)
 {
     private readonly object _gate = new();
     private readonly ConcurrentQueue<BenchmarkSample> _history = new();
@@ -269,23 +270,34 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime, ILogger<BenchmarkRun
             due += quota;
             var count = (int)due;
             due -= count;
+            // Burst-submit the current 100 ms quota without spawning a task
+            // per route. The shared scheduler bounds queued work and CPU workers.
+            var pending = new List<Task<RouteResult>>(Math.Min(count, 300));
             for (var i = 0; i < count; i++)
             {
                 ct.ThrowIfCancellationRequested();
                 var a = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
                 var b = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
-                if (medium is null)
-                    runtime.Route(a, b, cancellationToken: ct);
-                else
-                {
-                    var route = medium.Route(a, b, cancellationToken: ct);
-                    if (route.Found)
+                var payload = rng.Next(128, 1025);
+                if (scheduler.TrySchedule(token =>
                     {
-                        var tick = Stopwatch.GetTimestamp() / Math.Max(1, Stopwatch.Frequency / 10);
-                        medium.TryTransmit(route, rng.Next(128, 1025), tick);
-                    }
-                }
+                        var route = medium is null
+                            ? runtime.Route(a, b, cancellationToken: token)
+                            : medium.Route(a, b, cancellationToken: token);
+                        if (route.Found && medium is not null)
+                        {
+                            var tick = Stopwatch.GetTimestamp() /
+                                Math.Max(1, Stopwatch.Frequency / 10);
+                            medium.TryTransmit(route, payload, tick);
+                        }
+                        return route;
+                    }, WorkPriority.Background, ct, out Task<RouteResult>? result))
+                    pending.Add(result!);
+                // Rejected routes are measured by scheduler counters. Never queue
+                // an unbounded backlog in the synthetic benchmark generator.
             }
+            if (pending.Count > 0)
+                await Task.WhenAll(pending);
             await Task.Delay(100, ct);
         }
     }
