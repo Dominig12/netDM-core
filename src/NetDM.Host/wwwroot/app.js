@@ -736,8 +736,12 @@ async function pollSuite(){
       zip.download="netdm-three-scenarios-"+
         (opts?.sharedSearch||"unknown")+"-w"+
         (opts?.packetRerouteWorkers||1)+"-b"+
-        (opts?.packetMaxNoRouteRetryDelayTicks||96)+"-seed"+
-        (opts?.seed||1337)+".zip";
+        (opts?.packetMaxNoRouteRetryDelayTicks||96)+"-q"+
+        (opts?.packetQueueCapacity||2048)+"-v"+
+        (opts?.packetMaxAdvancesPerTick||1024)+"-"+
+        (opts?.adaptivePacketVisits?"adaptive":"fixed")+"-"+
+        (opts?.packetPreRouteBackpressure?"reserved":"openloop")+
+        "-seed"+(opts?.seed||1337)+".zip";
     }
   }catch(error){console.warn("Suite telemetry unavailable",error);}
 }
