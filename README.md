@@ -517,3 +517,96 @@ curl -OJ 'http://127.0.0.1:5087/api/benchmark-suite/download-all?runId=...'
 The API accepts optional smaller `nodes`, `routesPerSecond`, `durationSeconds`
 etc. solely to allow quick CI verification of the same three-stage
 lifecycle. The dashboard button always requests the canonical settings.
+
+## M10 — Radio A*, hopwise packet transport and allocation diagnostics
+
+### Routing: exact Dijkstra versus radio-aware A*
+
+Network Observatory's Shared Medium mode has a **Shortest-path solver**
+control. `dijkstra` remains the baseline; `astar` uses an admissible
+spatial lower bound to prioritize nodes nearer the destination:
+
+```
+floor(EuclideanDistance(node, goal) / maxRegisteredRadioRange) * minRadioLinkCost
+```
+
+The enforced maximum range and minimum link cost come from the radio
+configuration. For the benchmark's homogeneous grid they are **14 world
+units** and **cost 8**. When arbitrary-length cable edges exist, the
+heuristic is forced to zero; this preserves exact optimality (the
+A* engine effectively becomes Dijkstra).
+
+The implementation does **not** assume that all radio devices on one
+channel are directly connected. Same channel/Z is necessary for a
+radio-only route; actual neighbour discovery still enforces each
+endpoint's range.
+
+Randomized correctness tests compare route existence and exact cost
+against the existing Shared Medium Dijkstra before and after radio
+mutations, with channels, Z-layers, and cable shortcuts. A 900-node
+grid regression compares explored nodes for a long, fully connected path.
+
+### Transport: single-tick versus store-and-forward packets
+
+Shared Medium's **Delivery simulation** selector provides:
+
+- **Legacy**: `TryTransmit` reserves radio airtime for every hop of the
+  entire path in one tick; retains previous benchmark semantics.
+- **Hopwise**: `RadioPacketTransport` admits a packet to a bounded
+  (2,048 slot) queue; each accepted packet advances **at most one hop
+  per 100ms simulation tick**. Every hop is checked against the current
+  immutable network and debits only that hop's bytes from its channel's
+  airtime budget. A busy channel defers the packet to a later tick.
+  A broken link triggers a bounded route recomputation from the packet's
+  current node; retries, age (default 180 ticks) and tick work are bounded.
+
+The new option measures **completed packet delivery**, not merely
+successful reservation of airtime. Counters include enqueued, rejected,
+delivered, dropped, expired, queued/peak, reroutes, congestion deferrals,
+wireless/cable hops and delivered payload bytes. Packet queues live
+inside the benchmark's runtime; a fresh test resets them. The same
+fixed-priority worker scheduler runs packet forwarding with
+`Interactive` priority, while route generation stays `Background`.
+
+**Important:** the packet simulator does not yet model actual RF
+collisions, propagation, retransmission acknowledgements, real packet
+serialization or delivery guarantees across concurrent topology
+updates. It is a bounded, ticked logical transport prototype. The old
+legacy API remains available for before/after comparison.
+
+### Three-scenario suite
+
+The three-stage diagnostic button now exposes routing and transport
+selectors as well. Every stage uses the chosen pair, with the same
+seed and workload, so all three downloaded JSON reports can be
+compared to each other. The default remains **Dijkstra + Legacy**, to
+preserve the methodology of previously exported tests.
+
+For a new run, select **A* spatial search** and **Hop-by-hop packet
+forwarding** before pressing **RUN ALL THREE SCENARIOS**. Report fields
+`suite.parameters.sharedSearch` and
+`suite.parameters.packetTransportEnabled` identify the variant;
+each `benchmark.packetTransport` contains terminal packet counters.
+
+**Do not compare** the raw count of legacy airtime reservations with
+hopwise packet deliveries as if they represented the same operation.
+
+### Host instrumentation
+
+The runtime now reports `totalExploredNodes`,
+`totalRouteAllocatedBytes`, and `gcTotalPauseMilliseconds`.
+Each history sample includes average **explored nodes and allocated
+bytes per completed route**, **GC pause milliseconds per wall second**,
+and number of Gen2 collections since the preceding sample. The new
+Observatory charts show explored nodes and GC pauses. These are
+process-level managed allocation/GC measurements, not exact
+per-command profiling of DreamDaemon or x86 bridge overhead.
+
+### Example
+
+```bash
+curl -X POST http://127.0.0.1:5087/api/benchmark/start \
+  -H 'Content-Type: application/json' \
+  -d '{"nodes":10000,"routesPerSecond":1000,"movesPerSecond":0,"linkChangesPerSecond":0,"durationSeconds":60,"seed":1337,"wirelessEnabled":true,"radioModel":"shared","radioRange":14,"mediumBytesPerTick":8192,"sharedSearch":"astar","packetTransportEnabled":true}'
+curl http://127.0.0.1:5087/api/packets
+```
