@@ -345,11 +345,12 @@ public sealed class SharedMediumNetwork
     }
 
     public IReadOnlyList<RadioMediumCellView> ViewCells(
-        int minX, int minY, int maxX, int maxY, int z = 0, int limit = 1_000)
+        int minX, int minY, int maxX, int maxY, int z = 0, int limit = 1_000,
+        SharedMediumSnapshot? pinnedSnapshot = null)
     {
         if (minX > maxX || minY > maxY) throw new ArgumentException("Invalid viewport.");
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
-        var snapshot = Snapshot;
+        var snapshot = pinnedSnapshot ?? Snapshot;
         var result = new List<RadioMediumCellView>();
         var clampedLimit = Math.Min(limit, 4_000);
         foreach (var (cell, occupants) in snapshot.Cells)
