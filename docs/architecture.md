@@ -188,3 +188,23 @@ and report median and variance. Introduce links that appear/disappear when movin
 within radio range, and replay topology deltas from BlueMoon-Station. Then
 implement a partitioned/compact-hot immutable read projection only if the
 measurements show a net benefit after rebuild and memory costs.
+
+## Benchmark automation / artifacts
+
+To reproduce comparative measurements rather than trusting one result,
+`scripts/run-profiles.ps1` drives the comparison HTTP API across 1k, 10k,
+and 30k nodes and the seeds `1337,42,2026`. It writes one JSON per
+configuration and a consolidated CSV containing the lowest observed p95
+algorithm per run. No actual large-network performance claims have yet been
+established by these implementation changes alone.
+
+The script is cross-platform PowerShell 7. With `-LaunchHost` it starts the
+Release .NET 10 host on loopback and terminates it after testing. Use it
+only when the loopback port `5087` is available and the live benchmark is
+not running. The manual Actions workflow stores the reports as artifacts;
+shared CI runners are not suitable for capacity planning.
+
+Note: the current comparison uses one query worker and isolates its
+synthetic graph from the live network, but competes for process CPU
+and memory if some other workload is started independently. It is intended
+for algorithm selection before integration, not for hard latency guarantees.

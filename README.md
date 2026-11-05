@@ -161,3 +161,29 @@ visualizer is not overwritten. Live and isolated benchmark HTTP start requests
 reject most overlapping runs, but they are not yet coordinated by a single
 atomic admission lock. The synthetic workloads are **not** real SS13 traffic traces.
 On Windows, the new CI build also compiles and executes the core smoke tests.
+
+## Repeatable large-network profiles
+
+Run the same isolated comparison on 1k, 10k and 30k nodes with three random
+seeds, preserving JSON reports and a CSV summary on disk:
+
+```powershell
+# Build once, launch and stop NetDM.Host automatically
+dotnet build src/NetDM.Host/NetDM.Host.csproj -c Release
+pwsh -File scripts/run-profiles.ps1 -LaunchHost
+
+# Or use an already-running local host for a smaller targeted matrix
+pwsh -File scripts/run-profiles.ps1 -Sizes '1000,10000' -Seeds '1337,42' -Routes 200
+```
+
+Output: `benchmarks/results/nodes-<count>-seed-<seed>.json` and `summary.csv`.
+The JSON includes hardware/OS metadata, build time, allocations, route p95/p99,
+index versus full-scan cost and movement cost. Results are useful for **relative
+comparisons on the same machine**, not for production SLO claims.
+
+The optional **Routing profiles (manual)** GitHub Actions workflow uploads
+the report matrix as a CI artifact. GitHub displays manually triggered
+workflows once the workflow file is available on the repository default branch.
+Until then use the PowerShell script or run the workflow from a supported ref.
+
+CI also runs a small profile-script smoke test on both Linux and Windows.
