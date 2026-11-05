@@ -504,3 +504,57 @@ successive monotonic totals divided by elapsed sample seconds.
 - Calibrate A* on static connected 12k-node workloads before choosing a
   default; fewer explored nodes does not automatically mean lower
   p95 latency if spatial heuristic overhead dominates.
+
+## M11: per-cell interference budget, retry fairness and metrics
+
+`SharedMediumNetwork.TryTransmitHop` chooses either
+`RadioAirtimeScope.ChannelWide` or `RadioAirtimeScope.SpatialCells`
+when instantiated. The legacy `TryTransmit` method deliberately
+retains whole-route global capacity semantics for compatibility.
+Switching the hop scope is per Shared Medium instance, not runtime
+mutable configuration. The benchmark uses SpatialCells by default
+for the opt-in hopwise transport, but can select ChannelWide for an
+A/B experiment.
+
+SpatialCells approximates channel contention by reserving the
+payload bytes across all grid cells of a swept, range-inflated
+rectangle containing the transmitter and receiver. Its width is
+proportional to the larger endpoint range, and it is keyed by
+(channel, Z, Xcell, Ycell). Under one medium lock it performs
+two phases: verify **every** touched cell can admit the packet, then
+debit **every** cell. A single busy cell denies the entire hop with
+no partial charge. Separate distant cells can share the channel.
+The ledger resets on increasing simulation tick; older ticks are
+rejected. No physical throughput claim should be inferred from the
+count of cell reservations: it is deliberately duplicated airtime
+bookkeeping per cell, not unique payload bytes transmitted.
+
+`RadioPacketTransport` uses a bounded FIFO round-robin rotation.
+At the start of `Advance(tick)`, it fixes a maximum visit count
+and never reprocesses a packet in the same tick. Full queues still
+cannot grow without bound and each accepted packet remains eligible
+for a visit within approximately
+`ceil(Capacity / MaxAdvancesPerTick)` ticks. Busy packets are deferred
+without allocating new tasks. Retries after missing links wait for
+`NoRouteRetryDelayTicks` (default 3), and max reroutes and TTL remain
+hard bounds. Default TTL has been raised to 900 ticks and the per-tick
+visit budget to 1024.
+
+Delivery-age p50/p95 are quantiles over a ring of 1,024 most recently
+delivered packets; this is NOT a full-history percentile. Mean delivered
+hops is cumulative over delivered packets only. Per-sample deferrals
+and spatial-success counts are differences of cumulative counters.
+
+No actual RF behavior, packet serialization, sender isolation,
+packet acknowledgements, or hard deadline scheduling are implemented.
+The queue is still processed by the shared priority work scheduler,
+and expensive reroute computations are cooperative, not preemptible.
+
+### M11 verification
+
+Smoke tests exercise two distant radio pairs sharing a channel in the
+**same tick**, overlapping interference regions denying simultaneous
+transmission, tick rollover and old-tick rejection, bounded packet
+admission, recovery after temporary disconnection and delivery ages.
+HTTP integration runs A* with spatial hopwise forwarding and checks
+per-stage JSON statistics from the three-scenario suite.
