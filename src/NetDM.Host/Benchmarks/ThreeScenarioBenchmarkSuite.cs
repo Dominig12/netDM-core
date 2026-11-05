@@ -29,7 +29,10 @@ public sealed record ThreeScenarioSuiteOptions(
     bool DedicatedPacketTicks = true,
     int PacketTickWorkBudgetMs = 25,
     int PacketMaxNoRouteRetryDelayTicks = 96,
-    int PacketRerouteQueueRetryDelayTicks = 8)
+    int PacketRerouteQueueRetryDelayTicks = 8,
+    int PacketQueueCapacity = 2048,
+    bool AdaptivePacketVisits = false,
+    bool PacketPreRouteBackpressure = false)
 {
     public void Validate()
     {
@@ -56,7 +59,10 @@ public sealed record ThreeScenarioSuiteOptions(
             DedicatedPacketTicks: DedicatedPacketTicks,
             PacketTickWorkBudgetMs: PacketTickWorkBudgetMs,
             PacketMaxNoRouteRetryDelayTicks: PacketMaxNoRouteRetryDelayTicks,
-            PacketRerouteQueueRetryDelayTicks: PacketRerouteQueueRetryDelayTicks);
+            PacketRerouteQueueRetryDelayTicks: PacketRerouteQueueRetryDelayTicks,
+            PacketQueueCapacity: PacketQueueCapacity,
+            AdaptivePacketVisits: AdaptivePacketVisits,
+            PacketPreRouteBackpressure: PacketPreRouteBackpressure);
 }
 
 public sealed record ScenarioResultSummary(

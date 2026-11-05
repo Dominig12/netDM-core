@@ -207,7 +207,7 @@ mapCanvas.addEventListener("wheel",event=>{
 $("fit").addEventListener("click",fitMap);
 const observe=new ResizeObserver(()=>{drawMap();drawCharts();drawSchedulerCharts();drawComparisonPlot();});
 observe.observe(frame);
-for(const id of ["routes-chart","load-chart","latency-chart","explored-chart","gc-chart","memory-chart","links-chart","reachability-chart","packets-chart","packet-queue-chart","reroute-pressure-chart","retry-backoff-chart","tick-health-chart","tick-timing-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
+for(const id of ["routes-chart","load-chart","latency-chart","explored-chart","gc-chart","memory-chart","links-chart","reachability-chart","packets-chart","packet-queue-chart","transport-pipeline-chart","adaptive-forwarding-chart","reroute-pressure-chart","retry-backoff-chart","tick-health-chart","tick-timing-chart","rejections-chart","sched-queue-chart","sched-reject-chart","compare-chart"])observe.observe($(id));
 
 function plot(id,series,color,extra){
   const canvas=$(id),{ctx,w,h}=resizeCanvas(canvas);
@@ -270,6 +270,23 @@ function drawCharts(){
     format((last.deliveryP95AgeTicks||0)/10)+"s · first-hop p95 "+
     format((last.packetFirstHopP95Ticks||0)/10)+"s":"—";
   $("chart-packet-queue").textContent=last?format(last.packetsQueued||0)+" queued":"—";
+  plot("transport-pipeline-chart",[
+    {values:history.map(x=>x.admittedRoutesPerSecond||0),color:"#92adfa"},
+    {values:history.map(x=>x.packetEnqueuedPerSecond||0),color:"#5dcfcd"},
+    {values:history.map(x=>x.packetsDeliveredPerSecond||0),color:"#65dbb2"},
+    {values:history.map(x=>x.packetPreRouteRejectedPerSecond||0),color:"#ee9977"}
+  ],"#65dbb2");
+  plot("adaptive-forwarding-chart",[
+    {values:history.map(x=>x.packetForwardingVisitsPerSecond||0),color:"#5dd1e3"},
+    {values:history.map(x=>(x.packetVisitLimit||0)*10),color:"#f0b878"}
+  ],"#5dd1e3");
+  $("chart-transport-pipeline").textContent=last
+    ?format(last.packetEnqueuedPerSecond||0)+" enqueued/s · "+
+      format(last.packetsDeliveredPerSecond||0)+" delivered/s · "+
+      format(last.packetPreRouteRejectedPerSecond||0)+" blocked/s":"—";
+  $("chart-adaptive-forwarding").textContent=last
+    ?format(last.packetVisitLimit||0)+" visits/tick · "+
+      format(last.packetReservedAdmissions||0)+" reserved":"—";
   plot("reroute-pressure-chart",[
     {values:history.map(x=>x.reroutesQueued||0),color:"#8d9dff"},
     {values:history.map(x=>x.reroutesInFlight||0),color:"#77d8d6"},
@@ -461,6 +478,10 @@ $("bench-form").addEventListener("submit",async event=>{
     packetRerouteWorkers:Number($("packet-reroute-workers").value),
     dedicatedPacketTicks:$("packet-tick-mode").value==="dedicated",
     packetTickWorkBudgetMs:Number($("packet-tick-budget").value),
+    adaptivePacketVisits:$("packet-visit-mode").value==="adaptive",
+    packetMaxAdvancesPerTick:Number($("packet-max-visits").value),
+    packetQueueCapacity:Number($("packet-queue-capacity").value),
+    packetPreRouteBackpressure:$("packet-backpressure").value==="on",
     packetMaxNoRouteRetryDelayTicks:Number($("packet-backoff-cap").value),
     packetRerouteQueueRetryDelayTicks:Number($("packet-reroute-cooldown").value),
     radioRange:Number($("radio-range").value)
@@ -734,6 +755,12 @@ $("suite-compare-preset").addEventListener("change",()=>{
   $("suite-tick-budget").value="25";
   $("suite-backoff-cap").value=preset==="short-wait"?"24":"96";
   $("suite-reroute-cooldown").value="8";
+  const advanced=preset.startsWith("transport-");
+  $("suite-visit-mode").value=preset==="transport-adaptive"||
+    preset==="transport-backpressure"?"adaptive":"fixed";
+  $("suite-max-visits").value=advanced&&preset!=="transport-control"?"4096":"1024";
+  $("suite-queue-capacity").value=advanced&&preset!=="transport-control"?"4096":"2048";
+  $("suite-backpressure").value=preset==="transport-backpressure"?"on":"off";
 });
 $("suite-start").addEventListener("click",async()=>{
   try{
@@ -748,6 +775,10 @@ $("suite-start").addEventListener("click",async()=>{
         packetRerouteWorkers:Number($("suite-reroute-workers").value),
         dedicatedPacketTicks:$("suite-tick-mode").value==="dedicated",
         packetTickWorkBudgetMs:Number($("suite-tick-budget").value),
+        adaptivePacketVisits:$("suite-visit-mode").value==="adaptive",
+        packetMaxAdvancesPerTick:Number($("suite-max-visits").value),
+        packetQueueCapacity:Number($("suite-queue-capacity").value),
+        packetPreRouteBackpressure:$("suite-backpressure").value==="on",
         packetMaxNoRouteRetryDelayTicks:Number($("suite-backoff-cap").value),
         packetRerouteQueueRetryDelayTicks:Number($("suite-reroute-cooldown").value)
       })
