@@ -768,3 +768,77 @@ under mobility remain **unmeasured** until another three-scenario
 12k-node run. Old and new data should be compared by actual offered,
 admitted, completed and delivered rates, and by sampled task execution
 and queue latencies.
+
+## M13 — Dedicated packet tick runner (100ms monotonic clock)
+
+The PR #12 three-scenario stress run showed that reroute isolation helped
+original routing, but the packet tick task still competed with thousands
+of route requests in the global scheduler. Roughly 810/861/625 of
+~1,200 possible intervals were missed in static/movement/outage cases,
+and packet-tick admission was rejected under heavy CPU load.
+
+**`PacketTickRunner` now executes forwarding on a dedicated long-running
+.NET thread** (rather than submitting ticks to `PriorityWorkScheduler`).
+It uses the same absolute `Stopwatch` epoch as packet enqueue timestamps
+and wakes at 100ms monotonic boundaries. When the process is delayed,
+it executes **only the current clock tick**, recording skipped intervals,
+never replaying old intervals back-to-back or letting a packet traverse
+many hops immediately to catch up.
+
+The packet queue still limits visits/tick (1,024 default). A new soft
+**`MaxTickWorkMilliseconds` = 25ms** stops the scan between packets
+once the per-tick work budget has elapsed; unvisited packets retain
+their FIFO position and are eligible next tick. A single hop cannot be
+preempted, and the limit includes lock/wall-clock delays, not strictly
+measured CPU cycles.
+
+For controlled comparisons, hopwise transport offers both modes:
+
+| Tick mode | Behavior |
+|---|---|
+| **Dedicated (default)** | Own long-running worker, no global route admission needed |
+| Shared (baseline) | Former Interactive task submitted to global bounded scheduler |
+
+The manual benchmark and three-scenario suite expose
+`dedicatedPacketTicks` (default true) and
+`packetTickWorkBudgetMs` (default 25; range 1–1000).
+The earlier isolated reroute CPU scheduler remains independent and
+unchanged.
+
+### Telemetry
+
+Every scenario's JSON includes `benchmark.tickRunner` when dedicated
+mode is active:
+
+- `executedTicks` — actual monotonic forwarding passes;
+- `skippedIntervals` — intervals skipped while the worker was busy;
+- `startLagP95Milliseconds`, `maxStartLagMilliseconds` — deviation
+  from the scheduled tick boundary;
+- `executionP95Milliseconds`, `failedTicks`.
+
+Also available: packet `tickBudgetStops` when forwarding hits the
+soft 25ms per-tick cap, and per-interval
+`tickExecutedPerSecond`, `tickRunnerSkippedPerSecond`,
+`tickBudgetStopsPerSecond`, `tickStartLagP95Milliseconds`,
+`tickExecutionP95Milliseconds`.
+
+Network Observatory now has **Packet tick health** and **Tick timing**
+plots. In dedicated mode, `packetTickAdmissionFailures` should remain
+zero, since packet passes are no longer submitted to the global
+work-queue. They can still miss a monotonic tick due to OS/GC scheduling
+or work overruns; dedicated means queue isolation, **not a hard
+real-time guarantee or reserved CPU core**.
+
+### Next reproducible experiment
+
+Use **A* / Hop-by-hop / Spatial reuse / TTL 900 / 1 reroute
+worker / 25ms reroute budget / Dedicated packet ticks /
+25ms forwarding budget** in the one-click three-scenario suite.
+Download its ZIP and compare against the PR #12 measurements:
+delivered packets, first-hop/delivery p95, executed ticks per second,
+skipped intervals, packet work p95 and original route throughput.
+
+Linux/Windows smoke tests include a deliberately saturated
+`PriorityWorkScheduler` while a separate packet tick thread continues
+to forward packets. HTTP integration exercises all three scenario
+exports and tick runner fields.

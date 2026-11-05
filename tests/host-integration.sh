@@ -202,7 +202,7 @@ PY
 grep -q 'RUN ALL THREE SCENARIOS' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 curl -fsS -X POST "$base/api/benchmark-suite/start" \
   -H 'Content-Type: application/json' \
-  -d '{"nodes":90,"routesPerSecond":45,"movesPerSecond":55,"linkChangesPerSecond":6,"durationSeconds":3,"seed":1337,"radioRange":14,"mediumBytesPerTick":8192,"sharedSearch":"astar","packetTransportEnabled":true,"spatialReuseEnabled":true,"packetMaxAgeTicks":100,"packetMaxAdvancesPerTick":60}' \
+  -d '{"nodes":90,"routesPerSecond":45,"movesPerSecond":55,"linkChangesPerSecond":6,"durationSeconds":3,"seed":1337,"radioRange":14,"mediumBytesPerTick":8192,"sharedSearch":"astar","packetTransportEnabled":true,"spatialReuseEnabled":true,"packetMaxAgeTicks":100,"packetMaxAdvancesPerTick":60,"dedicatedPacketTicks":true,"packetTickWorkBudgetMs":25}' \
   > "${RUNNER_TEMP:-/tmp}/netdm-suite-start.json"
 python3 - <<'PY'
 import json,os
@@ -265,6 +265,13 @@ for number,key in enumerate(scenarios,1):
     assert bench["options"]["spatialReuseEnabled"] is True,bench
     assert bench["options"]["packetMaxAgeTicks"]==100,bench
     assert bench["options"]["packetMaxAdvancesPerTick"]==60,bench
+    assert bench["options"]["dedicatedPacketTicks"] is True,bench
+    assert bench["options"]["packetTickWorkBudgetMs"]==25,bench
+    assert bench["tickRunner"] is not None,bench
+    assert bench["tickRunner"]["executedTicks"]>0,bench
+    assert bench["tickRunner"]["failedTicks"]==0,bench
+    assert bench["tickRunner"]["skippedIntervals"]>=0,bench
+    assert bench["tickRunner"]["executionP95Milliseconds"]>=0,bench
     assert bench["packetTransport"] is not None,bench
     assert bench["rerouteScheduler"] is not None,bench
     assert bench["rerouteScheduler"]["workers"]==1,bench
@@ -294,7 +301,7 @@ grep -q 'A\* · Admissible spatial heuristic' "${RUNNER_TEMP:-/tmp}/netdm-index.
 grep -q 'HOPWISE · One hop per simulation tick' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 curl -fsS -X POST "$base/api/benchmark/start" \
   -H 'Content-Type: application/json' \
-  -d '{"nodes":121,"routesPerSecond":75,"movesPerSecond":0,"linkChangesPerSecond":0,"durationSeconds":7,"seed":1337,"wirelessEnabled":true,"radioModel":"shared","radioRange":14,"mediumBytesPerTick":512,"sharedSearch":"astar","packetTransportEnabled":true}' \
+  -d '{"nodes":121,"routesPerSecond":75,"movesPerSecond":0,"linkChangesPerSecond":0,"durationSeconds":7,"seed":1337,"wirelessEnabled":true,"radioModel":"shared","radioRange":14,"mediumBytesPerTick":512,"sharedSearch":"astar","packetTransportEnabled":true,"dedicatedPacketTicks":true,"packetTickWorkBudgetMs":25}' \
   > "${RUNNER_TEMP:-/tmp}/netdm-packet-start.json"
 sleep 5
 curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-packet-metrics.json"
@@ -326,6 +333,14 @@ assert stats["rerouteQueued"]+stats["rerouteInFlight"]<=64,stats
 assert stats["rerouteCompleted"]<=stats["reroutes"],stats
 assert stats["firstHopAgeP95Ticks"]>=0,stats
 assert stats["forwardingP95Milliseconds"]>=0,stats
+assert stats["tickBudgetStops"]>=0,stats
+assert bench["tickRunner"] is not None,bench
+assert bench["tickRunner"]["executedTicks"]>0,bench
+assert bench["tickRunner"]["failedTicks"]==0,bench
+assert bench["tickRunner"]["startLagP95Milliseconds"]>=0,bench
+assert bench["tickRunner"]["executionP95Milliseconds"]>=0,bench
+assert bench["options"]["dedicatedPacketTicks"] is True,bench
+assert bench["options"]["packetTickWorkBudgetMs"]==25,bench
 assert m["benchmark"]["rerouteScheduler"]["workers"]==1,m
 assert stats["peakQueued"]<=2048,stats
 assert stats["lastTick"]>=0,stats
@@ -338,6 +353,12 @@ assert all(x["rerouteStartedPerSecond"]>=0 for x in h),h
 assert all(x["rerouteCompletedPerSecond"]>=0 for x in h),h
 assert all(x["packetSkippedTicksPerSecond"]>=0 for x in h),h
 assert all(x["packetTickAdmissionFailuresPerSecond"]>=0 for x in h),h
+assert all(x["tickExecutedPerSecond"]>=0 for x in h),h
+assert all(x["tickRunnerSkippedPerSecond"]>=0 for x in h),h
+assert all(x["tickBudgetStopsPerSecond"]>=0 for x in h),h
+assert all(x["tickStartLagP95Milliseconds"]>=0 for x in h),h
+assert all(x["tickExecutionP95Milliseconds"]>=0 for x in h),h
+assert all(x["tickRunnerFailed"]==0 for x in h),h
 assert all(x["packetFirstHopP95Ticks"]>=0 for x in h),h
 assert all(x["rerouteCpuWaitP95Us"]>=0 for x in h),h
 assert all(x["packetsDeliveredPerSecond"]>=0 for x in h),h
@@ -350,3 +371,9 @@ assert m["runtime"]["gcTotalPauseMilliseconds"]>=0,m
 print("A* radio + packet forwarding + GC diagnostics HTTP integration: PASS")
 PY
 curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null
+
+# Dedicated tick mode is the default for new hopwise experiments. The old
+# shared-queue mode remains available for A/B comparison; do not conflate
+# "offered routes" with tick cadence.
+grep -q 'DEDICATED · Monotonic 100ms runner' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+grep -q 'Shared global CPU queue (baseline)' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
