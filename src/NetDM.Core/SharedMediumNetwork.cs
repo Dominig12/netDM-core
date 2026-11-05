@@ -166,7 +166,8 @@ public sealed partial class SharedMediumNetwork
             ImmutableDictionary<RadioMediumCell, ImmutableHashSet<NodeId>>.Empty)
         {
             HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0),
-            Dense = DenseRadioIndex.Build(physical, ImmutableDictionary<NodeId, RadioProfile>.Empty)
+            Dense = DenseRadioIndex.Build(physical, ImmutableDictionary<NodeId, RadioProfile>.Empty,
+                ImmutableDictionary<RadioMediumCell, ImmutableHashSet<NodeId>>.Empty)
         };
     }
 
@@ -282,11 +283,13 @@ public sealed partial class SharedMediumNetwork
             if (moves.Count > 0) _runtime.Apply(moves);
             var physical = _runtime.Topology.Snapshot;
             var nextDevices = devices.ToImmutable();
+            var nextCells = cells.ToImmutable();
             var next = new SharedMediumSnapshot(checked(before.Version + 1), physical,
-                nextDevices, cells.ToImmutable())
+                nextDevices, nextCells)
             {
                 HasPhysicalLinks = before.HasPhysicalLinks,
-                Dense = before.Dense?.WithChanges(physical, nextDevices, updates.Select(u => u.Id))
+                Dense = before.Dense?.WithChanges(physical, nextDevices, nextCells,
+                    updates.Select(u => u.Id))
             };
             _cache.Clear();
             Volatile.Write(ref _current, next);
@@ -343,11 +346,13 @@ public sealed partial class SharedMediumNetwork
                 new TopologyChange(TopologyOperation.RemoveNode, id)).ToArray();
             _runtime.Apply(changes);
             var physical = _runtime.Topology.Snapshot;
+            var nextDevices = devices.ToImmutable();
+            var nextCells = cells.ToImmutable();
             var next = new SharedMediumSnapshot(checked(before.Version + 1),
-                physical, devices.ToImmutable(), cells.ToImmutable())
+                physical, nextDevices, nextCells)
             {
                 HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0),
-                Dense = DenseRadioIndex.Build(physical, devices.ToImmutable())
+                Dense = DenseRadioIndex.Build(physical, nextDevices, nextCells)
             };
             _cache.Clear();
             Volatile.Write(ref _current, next);
@@ -993,7 +998,7 @@ public sealed partial class SharedMediumNetwork
             Version = checked(before.Version + 1),
             Physical = physical,
             HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0),
-            Dense = before.Dense?.WithChanges(physical, before.Devices, [a, b])
+            Dense = before.Dense?.WithChanges(physical, before.Devices, before.Cells, [a, b])
         };
         _cache.Clear();
         Volatile.Write(ref _current, next);

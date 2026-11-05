@@ -84,7 +84,7 @@ public sealed partial class SharedMediumNetwork
         ArgumentOutOfRangeException.ThrowIfZero(minimumRadioCost);
 
         var dense = snapshot.Dense ??
-            DenseRadioIndex.Build(snapshot.Physical, snapshot.Devices);
+            DenseRadioIndex.Build(snapshot.Physical, snapshot.Devices, snapshot.Cells);
         if (!dense.TryIndex(source, out int sourceIndex) ||
             !dense.TryIndex(target, out int targetIndex))
             return RouteResult.Missing(snapshot.Version);
@@ -165,7 +165,7 @@ public sealed partial class SharedMediumNetwork
                 }
 
                 var node = dense.At(current);
-                foreach (var cable in node.Cables.Values)
+                foreach (var cable in node.Cables)
                     if (dense.TryIndex(cable.To, out int to))
                         Relax(to, cable.Cost);
 
@@ -185,13 +185,11 @@ public sealed partial class SharedMediumNetwork
                 for (long y = fromY; y <= toY; y++)
                 {
                     var cell = new RadioMediumCell(domain, (int)x, (int)y);
-                    if (!snapshot.Cells.TryGetValue(cell, out var members))
+                    if (!dense.TryCell(cell, out var members))
                         continue;
-                    foreach (var neighborId in members)
+                    foreach (var nextIndex in members)
                     {
-                        if (neighborId == dense.IdAt(current) ||
-                            !dense.TryIndex(neighborId, out int nextIndex))
-                            continue;
+                        if (nextIndex == current) continue;
                         var neighbor = dense.At(nextIndex);
                         if (neighbor.Radio is not { } other) continue;
                         var destination = neighbor.Position!.Value;
