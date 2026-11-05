@@ -18,8 +18,10 @@ for i in $(seq 1 30); do
 done
 
 curl -fsS "$base/api/health" | python3 -c 'import json,sys; assert json.load(sys.stdin)["status"]=="ok"'
-curl -fsS "$base/" | grep -q 'Network Observatory'
-curl -fsS "$base/app.js" | grep -q 'fitMap'
+curl -fsS "$base/" > "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+grep -q 'Network Observatory' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+curl -fsS "$base/app.js" > "${RUNNER_TEMP:-/tmp}/netdm-app.js"
+grep -q 'fitMap' "${RUNNER_TEMP:-/tmp}/netdm-app.js"
 node --check src/NetDM.Host/wwwroot/app.js
 
 
