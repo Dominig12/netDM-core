@@ -235,7 +235,9 @@ function drawCharts(){
   ],"#5bd5db");
   plot("memory-chart",[{values:history.map(x=>x.managedBytes/1048576),color:"#87a5ff"}],"#87a5ff");
   plot("reachability-chart",[
-    {values:history.map(x=>x.foundPercent||0),color:"#56dfbc"}
+    {values:history.map(x=>x.foundPercent||0),color:"#56dfbc"},
+    {values:history.map(x=>x.mediumConfiguredDevices>0
+      ?100*x.mediumConfiguredDevices/Math.max(1,x.nodeCount):0),color:"#729cf6",width:1.2}
   ],"#56dfbc");
   plot("rejections-chart",[
     {values:history.map(x=>x.rejectedTooLargePerSecond||0),color:"#f19f72"},

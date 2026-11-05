@@ -358,3 +358,55 @@ The dense 400-device test checks the returned exact cost and that
 the search visits at most two nodes for a direct target. General
 multi-hop networks can still trigger expensive neighbor enumeration;
 profile worst-case geometry before switching the live default.
+
+## Benchmark health diagnostics (M6)
+
+The 12k-node / 120-second shared-radio stress scenario found that the
+observed route throughput changed drastically over time while radio
+profiles were being toggled. **A fast rejected/unreachable route is not
+proof of a fast connected graph.**
+
+The benchmark now records **`actualFoundPerSecond`** and
+**`foundPercent`** every sampling interval, plus
+**`mediumConfiguredDevices`**. The **Route reachability** chart overlays
+the fraction of successfully found routes (green) with the fraction of
+configured shared-radio devices (blue). This makes progressive network
+fragmentation visible alongside the existing route throughput plot.
+
+The **Radio rejection reasons** chart and `sharedMedium` statistics now
+separately count:
+
+- `rejectedStaleRoute`: route snapshot invalidated before transmit.
+- `rejectedInvalidPath`: absent or inconsistent route/hop sequence.
+- `rejectedTransferTooLarge`: total radio-hop bytes for **one**
+  payload exceed the entire domain capacity in a tick.
+- `rejectedCapacity`: a normally admissible payload exceeds the
+  **remaining** budget in the active tick.
+- `rejectedOldTick`: an attempted older tick would roll back a
+  domain's monotonic transmission ledger.
+
+`attemptedWirelessHops` tracks the combined hop count of all
+eligible radio transmissions, including those that ultimately fail to
+reserve airtime. Counters sum to `rejectedTransfers`; each rejection
+has exactly one reason.
+
+For reproducible comparisons, hold the source graph and radio settings
+constant before attributing routing changes to an optimization. Run
+three separate **Shared Medium** tests with the same seed, routes/s
+and node count:
+
+| Scenario | Moves/s | Link changes/s | Measures |
+|---|---:|---:|---|
+| Static baseline | 0 | 0 | Routing performance on an intact graph |
+| Movement only | 1,000 | 0 | Position churn and route-cache invalidation |
+| Movement + outages | 1,000 | 30 | Fragmentation plus mutation cost |
+
+Compare observed routes/s, **found percentage**, queue-wait p95,
+radio rejection causes and active-device percentage. At 12k nodes,
+radioRange=14 and mediumBytesPerTick=8192, expect a long radio path
+to require many more bytes of airtime than its payload size: a
+30-hop route carrying 512 bytes consumes **15,360 radio-hop bytes**,
+which is too large for even an idle 8,192-byte/tick channel.
+
+Important: the capacity budget is an intentionally simple shared-airtime
+approximation, not a physically accurate radio bandwidth model.

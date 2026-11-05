@@ -152,6 +152,18 @@ assert len(v["domainCells"]) > 0 and v["mediumVersion"] is not None, v
 assert m["runtime"]["routes"] > 0, m
 assert any(x["mediumDomains"] == 1 for x in h), h
 assert b["sharedMedium"]["acceptedTransfers"]+b["sharedMedium"]["rejectedTransfers"]>0, b
+radio=b["sharedMedium"]
+reasons=[
+  radio["rejectedStaleRoute"],radio["rejectedInvalidPath"],
+  radio["rejectedTransferTooLarge"],radio["rejectedCapacity"],
+  radio["rejectedOldTick"]
+]
+assert sum(reasons)==radio["rejectedTransfers"],radio
+assert radio["attemptedWirelessHops"]>=radio["acceptedTransfers"],radio
+assert all(0<=sample["foundPercent"]<=100 for sample in h),h
+assert all(0<=sample["mediumConfiguredDevices"]<=180 for sample in h),h
+assert all(sample["schedulerQueued"]>=0 for sample in h),h
+assert all(sample["rejectedTooLargePerSecond"]>=0 for sample in h),h
 print("Shared-medium routing / domain cells / airtime diagnostics: PASS")
 PY
 curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null
