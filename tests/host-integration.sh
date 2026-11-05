@@ -266,6 +266,15 @@ for number,key in enumerate(scenarios,1):
     assert bench["options"]["packetMaxAgeTicks"]==100,bench
     assert bench["options"]["packetMaxAdvancesPerTick"]==60,bench
     assert bench["packetTransport"] is not None,bench
+    assert bench["rerouteScheduler"] is not None,bench
+    assert bench["rerouteScheduler"]["workers"]==1,bench
+    packet=bench["packetTransport"]
+    assert packet["rerouteInFlight"]<=1,packet
+    assert packet["rerouteQueued"]+packet["rerouteInFlight"]<=64,packet
+    assert packet["rerouteCompleted"]<=packet["reroutes"],packet
+    assert packet["rerouteSchedulerRejections"]<=packet["rerouteCancelled"],packet
+    assert packet["firstHopAgeP95Ticks"]>=0,packet
+    assert packet["firstHopSamples"]<=packet["wirelessHops"]+packet["cableHops"],packet
     assert bench["packetTransport"]["delivered"]+bench["packetTransport"]["dropped"]+bench["packetTransport"]["expired"]+bench["packetTransport"]["queued"]==bench["packetTransport"]["enqueued"],bench
 with zipfile.ZipFile(os.path.join(root,"netdm-three-scenarios.zip")) as z:
     names=z.namelist()
@@ -313,6 +322,11 @@ assert stats["queueFullRejections"]+stats["invalidRejections"]==stats["rejected"
 assert stats["linkFailureDrops"]+stats["oversizeDrops"]<=stats["dropped"],stats
 assert stats["deliveryAgeP95Ticks"]>=0,stats
 assert stats["meanDeliveredHops"]>=0,stats
+assert stats["rerouteQueued"]+stats["rerouteInFlight"]<=64,stats
+assert stats["rerouteCompleted"]<=stats["reroutes"],stats
+assert stats["firstHopAgeP95Ticks"]>=0,stats
+assert stats["forwardingP95Milliseconds"]>=0,stats
+assert m["benchmark"]["rerouteScheduler"]["workers"]==1,m
 assert stats["peakQueued"]<=2048,stats
 assert stats["lastTick"]>=0,stats
 assert all(x["packetsQueued"]>=0 for x in h),h
@@ -320,6 +334,12 @@ assert all(x["deliveryP95AgeTicks"]>=0 for x in h),h
 assert all(x["spatialBusyHopsPerSecond"]>=0 for x in h),h
 assert all(x["spatialSuccessfulHopsPerSecond"]>=0 for x in h),h
 assert all(x["noRouteDeferralsPerSecond"]>=0 for x in h),h
+assert all(x["rerouteStartedPerSecond"]>=0 for x in h),h
+assert all(x["rerouteCompletedPerSecond"]>=0 for x in h),h
+assert all(x["packetSkippedTicksPerSecond"]>=0 for x in h),h
+assert all(x["packetTickAdmissionFailuresPerSecond"]>=0 for x in h),h
+assert all(x["packetFirstHopP95Ticks"]>=0 for x in h),h
+assert all(x["rerouteCpuWaitP95Us"]>=0 for x in h),h
 assert all(x["packetsDeliveredPerSecond"]>=0 for x in h),h
 assert all(x["exploredPerRoute"]>=0 for x in h),h
 assert all(x["allocatedBytesPerRoute"]>=0 for x in h),h
