@@ -428,3 +428,31 @@ Packet routing and transmission are still concurrent: a topology change
 after the pinned snapshot is read is not synchronously prevented. The
 next milestone is reliable per-hop packet progression with bounded queues
 and per-hop version/availability checks.
+
+## Three-scenario experiment orchestration (M9)
+
+`ThreeScenarioBenchmarkSuite` runs fixed ordered experiment cases using
+`BenchmarkRunner` with an exclusive reservation. Reservation is checked
+inside the benchmark's writer lock: a manual benchmark cannot reset
+the runtime between stages, and manual stop cannot cancel the suite's
+current stage. The algorithm-comparison endpoint also refuses starts
+while the suite is active.
+
+The suite runs on the ASP.NET Core host regardless of browser connection.
+It waits for each underlying benchmark task to **finish** (including its
+producer/mutation worker drain), captures current metrics/history, then
+starts the next stage with identical network size, seed and radio settings.
+The old runner declared its status `complete` slightly *before* worker
+drain; this was moved after the drain to ensure a stable captured report.
+
+Three reports are retained in memory, each scoped to a random run ID, and
+can be requested individually or as a ZIP once all three complete.
+Reports have compact topology summaries to avoid serializing 12k nodes;
+their metrics and per-interval history match the manual export envelope.
+The data survives browser reloads but **not host restarts**. The next
+suite invalidates old download links and clears the three reports.
+
+CI runs a small 3 x 3-second server-owned experiment, verifies that a
+manual start is rejected during execution, and downloads/inspects every
+JSON plus the combined ZIP. The canonical dashboard button starts
+3 x 120-second runs on 12k devices.
