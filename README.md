@@ -1040,6 +1040,30 @@ changing the default.
 
 ## M18 — Event-driven packet waiting (opt-in)
 
+### M18.1 — event-driven reroute capacity (experimental profile I)
+
+`eventDrivenRerouteCapacity` extends H with a capacity-blocked state.
+When a reroute finishes/cancels, the transport wakes only as many
+waiting packets as there are free reroute slots, rather than polling
+the saturated queue every eight ticks. H remains the timer-only control.
+
+Blocked packets remain indexed for local topology changes and receive
+a bounded fallback probe (default 32 ticks) to recover unannounced
+physical cable repairs. Versioned FIFO entries ignore obsolete wakeups;
+admission limits, TTL and one-hop-per-tick guarantees are unchanged.
+Counters: `capacityBlockedPackets`, `capacityWakeups`.
+
+TTL expiry heap compaction is now amortized to at most one rebuild per
+512 packet retirements, preventing repeated full-heap rebuilds while
+holding the forwarding lock. Tick runner maximum start lag now
+correctly includes overdue and skipped intervals.
+
+**I** = H + `eventDrivenRerouteCapacity=true`. The new three-scenario
+profile has filenames ending `-eventwait-capacitywake` for safe
+comparison against G and H. This remains opt-in until measured.
+
+
+
 The `eventDrivenPacketWaiting` option is disabled by default to preserve
 the original FIFO as a reproducible control. When enabled, ready packets
 run through a round-robin FIFO while packets delayed by negative-route

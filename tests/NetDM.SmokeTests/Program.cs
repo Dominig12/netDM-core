@@ -85,6 +85,7 @@ CheckDenseRadioAStar();
 CheckPacketTransport();
 CheckAdaptivePacketTransport();
 CheckEventDrivenPacketWaiting();
+CheckEventDrivenRerouteCapacity();
 CheckRerouteAdaptiveBackoff();
 await CheckDedicatedPacketTicksAsync();
 CheckSpatialRadioAirtime();
@@ -755,6 +756,53 @@ static void CheckEventDrivenPacketWaiting()
     var ttl = expiring.Capture();
     Check(ttl.Expired == 1 && ttl.ExpiredWhileParked == 1 && ttl.Queued == 0);
     Check(ttl.AwaitingReroutePackets == 0);
+}
+
+static void CheckEventDrivenRerouteCapacity()
+{
+    var runtime = new NetworkRuntime();
+    runtime.Apply([
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+            Position: new NodePosition(0, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+            Position: new NodePosition(10, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(3),
+            Position: new NodePosition(20, 0))
+    ]);
+    var medium = new SharedMediumNetwork(runtime, bytesPerTick: 8192);
+    var profile = new RadioProfile(14, 1, 8);
+    medium.Update(Enumerable.Range(1, 3).Select(i => new RadioNodeUpdate(
+        new NodeId((ulong)i), Profile: profile, ChangeProfile: true)).ToArray());
+    var route = medium.Route(new NodeId(1), new NodeId(3));
+    Check(route.Found && route.Path.Count == 3);
+    var packets = new RadioPacketTransport(medium, new PacketTransportOptions(
+        MaxAgeTicks: 100, MaxPendingReroutes: 1, MaxConcurrentReroutes: 1,
+        EventDrivenPacketWaiting: true, EventDrivenRerouteCapacity: true));
+    Check(packets.Enqueue(route, 100, 0));
+    Check(packets.Enqueue(route, 100, 0));
+    Check(packets.Advance(1) == 2);
+    var disabled = new RadioNodeUpdate(new NodeId(3), Profile: null, ChangeProfile: true);
+    medium.Update([disabled]);
+    packets.NotifyRadioUpdates([disabled]);
+    Check(packets.Advance(2) == 0);
+    Check(packets.Capture().CapacityBlockedPackets == 1);
+    Check(packets.Capture().AwaitingReroutePackets == 1);
+    Check(packets.TryTakeReroute(out var ticket));
+    var missing = medium.Route(ticket.Source, ticket.Destination);
+    Check(!missing.Found);
+    Check(packets.CompleteReroute(ticket, missing));
+    Check(packets.Capture().CapacityWakeups == 1);
+    Check(packets.Capture().CapacityBlockedPackets == 0);
+    Check(packets.Advance(3) == 0);
+    Check(packets.Capture().RerouteQueued == 1);
+    // Cable repair without radio update: the safety probe must recover.
+    Check(medium.SetCable(new NodeId(2), new NodeId(3), 1));
+    for (int tick = 4; tick <= 40 && packets.Capture().Queued > 0; tick++)
+        packets.Advance(tick);
+    var result = packets.Capture();
+    Check(result.Delivered == 2 && result.Queued == 0);
+    Check(result.CapacityBlockedPackets == 0 && result.ReservedAdmissions == 0);
+    Check(!packets.CompleteReroute(ticket, missing));
 }
 
 static void CheckRerouteAdaptiveBackoff()

@@ -83,6 +83,11 @@
               <option value="fifo">FIFO · Scan waiting packets (G)</option>
               <option value="event">EVENT · Park until wakeup (H)</option>
             </select>
+            <label for="packet-capacity-wake">Reroute queue capacity waiting</label>
+            <select id="packet-capacity-wake" class="workload-select">
+              <option value="off">TIMER · Retry after 8 ticks (H)</option>
+              <option value="on">EVENT · Wake on freed reroute slots (I)</option>
+            </select>
             <label for="packet-backoff-cap">No-route retry cap <small>100ms ticks</small></label>
             <input id="packet-backoff-cap" type="number" min="3" max="10000" value="96">
             <label for="packet-reroute-cooldown">Full reroute queue retry <small>100ms ticks</small></label>
@@ -150,8 +155,9 @@
               <option value="transport-adaptive">F · Dense + adaptive 4096 visits + 4096 packet queue</option>
               <option value="transport-backpressure">G · Dense + adaptive 4096 visits + pre-route backpressure</option>
               <option value="transport-eventwait">H · G + event-driven packet waiting</option>
+              <option value="transport-capacitywake">I · H + reroute capacity release notifications</option>
             </select>
-            <small>Compare E/F/G/H. H matches G except for event-driven waiting. Each generates three reports.</small>
+            <small>Compare G/H/I on the same workload. H parks waiting packets; I wakes reroute-capacity waiters when a slot is freed. Each generates three reports.</small>
           </div>
           <div class="suite-choices">
             <label for="suite-search">Routing
@@ -214,6 +220,12 @@
               <select id="suite-wait-mode" class="workload-select">
                 <option value="fifo">FIFO (G control)</option>
                 <option value="event">Event-driven (H)</option>
+              </select>
+            </label>
+            <label for="suite-capacity-wake">Reroute capacity wakeups
+              <select id="suite-capacity-wake" class="workload-select">
+                <option value="off">Timer-only control (H)</option>
+                <option value="on">Slot release events (I)</option>
               </select>
             </label>
             <label for="suite-backoff-cap">Max no-route retry delay (ticks)
