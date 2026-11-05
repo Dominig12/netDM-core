@@ -973,3 +973,67 @@ scenario-local delta, `allocatedBytesPerRoute`, completed original
 routes/s, found%, p95, Gen2 and GC pauses, reroutes, packet deliveries
 and delivery p95. Global counters in the host's `metrics.runtime`
 may include earlier scenarios; use per-interval history or deltas.
+
+## M16 — Dense array-backed exact A*
+
+The previous A/B/C hardware experiments confirmed that `astar-pooled`
+decreased managed allocations by about 70% compared with the original
+A*, but connected movement scenarios still spent about 60 ms at the
+end-of-run p95 and admitted only ~113 original route requests per
+second. M16 adds an independent **`astar-dense`** candidate to attack
+CPU time in the hottest search loop.
+
+### Dense topology view, published with each immutable snapshot
+
+- A persistent `NodeId → dense int index` map is built **once for a
+  stable node set**; moving radios and changing profiles reuse it.
+- Route lookups use indexed node state: coordinates, active radio
+  profile, and a precomputed array of physical cable edges.
+- Spatial radio cells hold immutable `int[]` member arrays in the
+  dense view. Changes to one device update **only affected cells**,
+  and copy only the 64-entry node blocks that actually changed.
+- New nodes are not accepted from outside the Shared Medium owner.
+  Removing nodes explicitly rebuilds the index to avoid stale offsets.
+- Every dense view is created before one atomic snapshot publication.
+  Old snapshots retain their original positions, cell membership and
+  cable arrays even while other threads move devices.
+- Arbitrary sparse 64-bit Node IDs are supported; array indexes are
+  **never** calculated from NodeId numeric values.
+
+### Search workspace
+
+`RouteAStarDenseCore` replaces cost/parent/hash-state dictionaries with
+resizable `ulong[]`, `int[]` and epoch-stamped `int[]`, and uses
+indexed priority-queue entries. Epoch stamping avoids clearing the
+arrays after every request. A concurrent worker rents a private
+workspace; at most eight workspaces with bounded size are pooled.
+The original exact A* heuristic is unchanged, including the safe
+zero-heuristic fallback when cables could shortcut Euclidean distance.
+Same-cost routes and graph expansion are verified against pooled A*.
+
+### Controlled benchmark
+
+Use **Three-scenario diagnostic suite → Controlled A/B experiment presets**:
+
+| Preset | Search | Reroute workers | Negative backoff |
+|---|---|---:|---:|
+| **B** | Pooled A* | 2 | 96 ticks |
+| **D** | Dense A* | 2 | 96 ticks |
+
+Both preserve all other conditions: 12k nodes, 1500 offered routes/s,
+120 seconds per scenario, seed 1337, spatial airtime reuse, hopwise
+delivery, TTL 900, dedicated packet ticks, and 25ms soft budgets.
+Each produces a ZIP with three uniquely named JSON reports; new
+`astar-dense` keeps the original `astar` and `astar-pooled` modes
+available. A separate C profile tests backoff 24 ticks, **not** dense
+algorithm performance.
+
+The accompanying small-grid smoke tests check path cost/exploration
+and exact path parity with pooled A* and Dijkstra on moving networks,
+cable shortcuts, radio toggles, sparse IDs, node removal and concurrent
+queries. They also print allocation/timing micro-probes. Those
+micro-probes are **not equivalent** to the full 12k-node benchmark.
+The new dense index trades additional snapshot-update work/memory for
+faster read-side searches; measure actual movement rate, original
+route throughput, p95, allocations, GC, and packet delivery before
+changing the default.

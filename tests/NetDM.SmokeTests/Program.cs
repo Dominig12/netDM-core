@@ -1122,6 +1122,27 @@ static void CheckDenseRadioAStar()
     Console.WriteLine($"Radio A* allocations per route, 900 nodes: pooled={pooledBytes / samples:N0} B, dense={denseBytes / samples:N0} B");
     Check(denseBytes < pooledBytes);
 
+    // A separately constructed snapshot without a prebuilt dense view
+    // must still be routable by the public static search method.
+    var manual = new SharedMediumSnapshot(initial.Version,
+        initial.Physical, initial.Devices, initial.Cells)
+    { HasPhysicalLinks = initial.HasPhysicalLinks };
+    Check(SharedMediumNetwork.RouteAStarDenseCore(manual, start, finish,
+        14, 8).Cost == SharedMediumNetwork.RouteAStarPooledCore(
+            initial, start, finish, 14, 8).Cost);
+
+    const int timingQueries = 40;
+    long timeBefore = Stopwatch.GetTimestamp();
+    for (int i = 0; i < timingQueries; i++)
+        _ = SharedMediumNetwork.RouteAStarPooledCore(initial, start, finish, 14, 8);
+    long pooledTime = Stopwatch.GetTimestamp() - timeBefore;
+    timeBefore = Stopwatch.GetTimestamp();
+    for (int i = 0; i < timingQueries; i++)
+        _ = SharedMediumNetwork.RouteAStarDenseCore(initial, start, finish, 14, 8);
+    long denseTime = Stopwatch.GetTimestamp() - timeBefore;
+    Console.WriteLine(
+        $"Radio A* CPU micro-probe (900 nodes): pooled={pooledTime * 1_000_000.0 / Stopwatch.Frequency / timingQueries:N1} us/route, dense={denseTime * 1_000_000.0 / Stopwatch.Frequency / timingQueries:N1} us/route");
+
     using var cancellation = new CancellationTokenSource();
     cancellation.Cancel();
     bool cancelled = false;

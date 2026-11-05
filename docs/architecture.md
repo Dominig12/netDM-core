@@ -738,3 +738,45 @@ metrics remain backward-compatible.
 Future: after the user's A/B runs, optimize immutable radio-cell
 enumeration or spatial locality further if allocations remain high.
 Never infer runtime throughput only from reduced allocations.
+
+## M16: dense immutable radio indices with copy-on-write cells
+
+The dense search keeps the existing versioned topology publication
+contract. `SharedMediumSnapshot.Dense` refers to `DenseRadioIndex`,
+constructed and published atomically with the immutable physical and
+radio cell views.
+
+A dense index stores node IDs once in an array and a persistent map
+from arbitrary IDs to stable zero-based array indices. State is kept
+in 64-node copy-on-write blocks. Each block records the exact node
+position/profile, the immutable cable-link reference, and an array
+of cable neighbors. Movement and profile updates copy only changed
+blocks; cable changes copy the affected endpoint blocks. Radio cell
+membership is represented by immutable maps of `int[]` node indexes.
+Only cells whose membership changed are re-materialized. Removing
+nodes rebuilds mappings and cell arrays because indices change.
+
+`RouteAStarDenseCore` rents an exclusive workspace containing
+cost/parent/seen arrays and a priority queue of integer node indices.
+The per-query epoch stamp makes old array entries invisible without
+zeroing the entire graph each time. Requests do not share scratch
+arrays, and the finally path returns the cleared queue on success,
+cancellation or exceptions. Oversized buffers are not retained.
+
+The search retains the exact radio legality checks, edge costs and
+heuristic of pooled A*, and walks radio neighbors in the same order
+as the immutable cell's enumeration at materialization. The
+geometric heuristic is set to zero in the presence of arbitrary
+physical cable links, preserving optimality. Tests compare Found,
+Cost, Explored and full Path across dynamic snapshots, sparse IDs
+and concurrent queries.
+
+**Tradeoff:** Dense cell arrays are rebuilt during topology updates
+rather than during route queries, shifting some work to the writer.
+This is expected to help when route queries greatly outnumber
+movements. Heavy mutation workloads must be benchmarked before
+enabling the mode by default; this branch makes it opt-in.
+
+Keep pooled A* as the reference in profiles B and D. Both use two
+reroute workers and negative backoff cap 96. Existing packet semantics
+and output schema remain unchanged.
