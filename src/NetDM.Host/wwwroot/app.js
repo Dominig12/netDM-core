@@ -90,7 +90,10 @@ function drawMap(){
   if(!currentMap.nodes.length){$("viewport-text").textContent="NO ACTIVE CELLS";return;}
   const byId=new Map(currentMap.nodes.map(n=>[n.id,n]));
   const stroke=Math.max(.5,Math.min(1.25,camera.scale*.7));
-  ctx.lineWidth=stroke;ctx.strokeStyle="rgba(74,115,162,.27)";ctx.beginPath();
+  ctx.lineWidth=stroke;
+  ctx.strokeStyle=currentMetrics?.benchmark?.options?.wirelessEnabled
+    ? "rgba(62,203,216,.42)" : "rgba(74,115,162,.27)";
+  ctx.beginPath();
   for(const e of currentMap.edges){
     const a=byId.get(e.a),b=byId.get(e.b);
     if(!a||!b)continue;
@@ -166,7 +169,7 @@ mapCanvas.addEventListener("wheel",event=>{
 $("fit").addEventListener("click",fitMap);
 const observe=new ResizeObserver(()=>{drawMap();drawCharts();drawComparisonPlot();});
 observe.observe(frame);
-for(const id of ["routes-chart","latency-chart","memory-chart","compare-chart"])observe.observe($(id));
+for(const id of ["routes-chart","latency-chart","memory-chart","links-chart","compare-chart"])observe.observe($(id));
 
 function plot(id,series,color,extra){
   const canvas=$(id),{ctx,w,h}=resizeCanvas(canvas);
@@ -193,9 +196,16 @@ function drawCharts(){
     {values:history.map(x=>x.p99Us),color:"#f3a572",width:1.3}
   ],"#5bd5db");
   plot("memory-chart",[{values:history.map(x=>x.managedBytes/1048576),color:"#87a5ff"}],"#87a5ff");
+  plot("links-chart",[
+    {values:history.map(x=>x.radioLinksAddedPerSecond||0),color:"#5adaba"},
+    {values:history.map(x=>x.radioLinksRemovedPerSecond||0),color:"#f1aa82"}
+  ],"#5adaba");
   $("chart-rps").textContent=last?format(last.actualRoutesPerSecond)+"/s":"—";
   $("chart-latency").textContent=last?format(last.p95Us)+" µs":"—";
   $("chart-memory").textContent=last?mb(last.managedBytes):"—";
+  $("chart-link-churn").textContent=last
+    ? "+"+format(last.radioLinksAddedPerSecond||0)+" / -"+format(last.radioLinksRemovedPerSecond||0)
+    : "—";
 }
 async function pollMetrics(){
   try{
@@ -214,6 +224,10 @@ async function pollMetrics(){
     $("kpi-edges").textContent=format(data.edgeCount)+" connections";
     $("kpi-p95").textContent=format(data.runtime.p95Microseconds)+" µs";
     $("kpi-cache-count").textContent=format(data.runtime.cacheEntries)+" cached routes";
+    $("kpi-radio").textContent=bench.radio ? compact(bench.radio.activeWirelessLinks) : "—";
+    $("kpi-radio-events").textContent=bench.radio
+      ? "+"+format(bench.radio.totalWirelessLinksAdded)+" / -"+format(bench.radio.totalWirelessLinksRemoved)+" lifetime"
+      : "Wired graph / no proximity links";
     $("kpi-version").textContent="topology v"+format(data.version);
     $("connectivity-version").textContent=format(data.connectivityVersion);
     $("kpi-target").textContent="target "+format(bench.options?.routesPerSecond||0)+"/s";
@@ -247,7 +261,9 @@ $("bench-form").addEventListener("submit",async event=>{
   const options={
     nodes:Number($("nodes").value),routesPerSecond:Number($("routes").value),
     movesPerSecond:Number($("moves").value),linkChangesPerSecond:Number($("links").value),
-    durationSeconds:Number($("duration").value),seed:Number($("seed").value)
+    durationSeconds:Number($("duration").value),seed:Number($("seed").value),
+    wirelessEnabled:$("network-mode").value==="radio",
+    radioRange:Number($("radio-range").value)
   };
   try{
     const response=await fetch("/api/benchmark/start",{
@@ -407,3 +423,10 @@ $("compare-export").addEventListener("click",()=>{
 });
 setInterval(pollComparison,1300);
 pollComparison();
+
+$("network-mode").addEventListener("change",()=>{
+  const enabled=$("network-mode").value==="radio";
+  $("radio-options").hidden=!enabled;
+  $("links").labels[0].querySelector("small").textContent=enabled
+    ? "radio toggles / sec" : "0 – 1,000";
+});

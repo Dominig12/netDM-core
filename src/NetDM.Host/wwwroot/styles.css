@@ -113,3 +113,14 @@ h1{font-size:27px;font-weight:650;letter-spacing:-.6px;margin:7px 0 0}
 .comparison-stats span{padding:11px 12px;border:1px solid #293c53;border-radius:5px;background:#111d2d;font-size:10px;color:#9bb2c9;font-variant-numeric:tabular-nums}
 @media(max-width:1400px){.comparison-controls{grid-template-columns:repeat(4,minmax(0,1fr))}.comparison-controls button{width:100%}.comparison-layout{grid-template-columns:1fr}.compare-plot{border-left:0;border-top:1px solid var(--stroke);padding:12px 0 0}}
 @media(max-width:700px){.comparison-controls{grid-template-columns:repeat(2,minmax(0,1fr))}.compare-state{flex-wrap:wrap}.comparison-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-tag{display:none}}
+
+.workload-select{width:100%;background:#121d2f;color:#e2f2ff;border:1px solid #303f56;border-radius:5px;padding:12px;outline:none;margin-top:0}
+#radio-options{padding:8px 0 2px}
+#radio-options[hidden]{display:none}
+.radio-description{line-height:1.55;font-size:10px;color:#7890aa;margin:8px 0}
+.kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media(min-width:1600px){.kpi-grid{grid-template-columns:repeat(6,minmax(0,1fr))}}
+.chart-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media(min-width:1450px){.chart-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:1020px){.chart-grid{grid-template-columns:1fr}}
+@media(max-width:680px){.kpi-grid{grid-template-columns:1fr 1fr}}
