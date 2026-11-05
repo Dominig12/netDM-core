@@ -84,6 +84,7 @@ CheckRadioAStar();
 CheckDenseRadioAStar();
 CheckPacketTransport();
 CheckAdaptivePacketTransport();
+CheckEventDrivenPacketWaiting();
 CheckRerouteAdaptiveBackoff();
 await CheckDedicatedPacketTicksAsync();
 CheckSpatialRadioAirtime();
@@ -686,6 +687,72 @@ static void CheckAdaptivePacketTransport()
     Check(legacy.Capture().AdaptiveLimitIncreases==0);
     Check(legacy.Advance(2)==1024);
     Check(legacy.Capture().Delivered==2048);
+}
+
+static void CheckEventDrivenPacketWaiting()
+{
+    var runtime = new NetworkRuntime();
+    runtime.Apply([
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+            Position: new NodePosition(0, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+            Position: new NodePosition(10, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(3),
+            Position: new NodePosition(20, 0))
+    ]);
+    var medium = new SharedMediumNetwork(runtime, bytesPerTick: 8192);
+    var active = new RadioProfile(14, 1, 8);
+    medium.Update(Enumerable.Range(1, 3).Select(i =>
+        new RadioNodeUpdate(new NodeId((ulong)i),
+            Profile: active, ChangeProfile: true)).ToArray());
+    var route = medium.Route(new NodeId(1), new NodeId(3));
+    Check(route.Found && route.Path.Count == 3);
+    var queue = new RadioPacketTransport(medium, new PacketTransportOptions(
+        Capacity: 1, MaxAgeTicks: 20, EventDrivenPacketWaiting: true,
+        MaxNoRouteRetryDelayTicks: 12));
+    Check(queue.Enqueue(route, 128, 0));
+    Check(queue.Advance(1) == 1);
+    Check(queue.Advance(1) == 0); // One hop at most per tick.
+    var disabled = new RadioNodeUpdate(new NodeId(3),
+        Profile: null, ChangeProfile: true);
+    medium.Update([disabled]);
+    queue.NotifyRadioUpdates([disabled]);
+    Check(queue.Advance(2) == 0);
+    Check(queue.Capture().AwaitingReroutePackets == 1);
+    Check(queue.TryTakeReroute(out var first));
+    var missing = medium.Route(first.Source, first.Destination);
+    Check(!missing.Found && queue.CompleteReroute(first, missing));
+    Check(queue.Capture().DelayedPackets == 1);
+    Check(queue.TryReserveAdmission() is null); // Parked packet occupies capacity.
+    queue.Advance(3);
+    queue.Advance(4);
+    Check(queue.Capture().ForwardingVisits == 2); // No cooldown scans.
+    Check(queue.Advance(5) == 0);
+    Check(queue.TryTakeReroute(out var second));
+    var repaired = new RadioNodeUpdate(new NodeId(3),
+        Profile: active, ChangeProfile: true);
+    medium.Update([repaired]);
+    queue.NotifyRadioUpdates([repaired]);
+    Check(queue.Capture().TopologyWakeups > 0);
+    Check(queue.Advance(6) == 1);
+    Check(queue.Capture().Delivered == 1 && queue.Capture().Queued == 0);
+    Check(!queue.CompleteReroute(second, missing)); // Stale result cannot revive packet.
+    Check(queue.Capture().ReservedAdmissions == 0);
+
+    var expiring = new RadioPacketTransport(medium, new PacketTransportOptions(
+        MaxAgeTicks: 3, EventDrivenPacketWaiting: true));
+    var direct = medium.Route(new NodeId(1), new NodeId(3));
+    Check(direct.Found);
+    Check(expiring.Enqueue(direct, 100, 0));
+    Check(expiring.Advance(1) == 1);
+    medium.Update([disabled]);
+    expiring.NotifyRadioUpdates([disabled]);
+    Check(expiring.Advance(2) == 0);
+    Check(expiring.Capture().AwaitingReroutePackets == 1);
+    Check(expiring.Advance(3) == 0);
+    var ttl = expiring.Capture();
+    Check(ttl.Expired == 1 && ttl.ExpiredWhileParked == 1 && ttl.Queued == 0);
+    Check(ttl.AwaitingReroutePackets == 0);
 }
 
 static void CheckRerouteAdaptiveBackoff()
