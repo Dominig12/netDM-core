@@ -248,6 +248,10 @@ for number,key in enumerate(scenarios,1):
     assert report["suite"]["scenario"]==key,report["suite"]
     assert report["suite"]["number"]==number,report["suite"]
     assert report["suite"]["completed"] is True,report["suite"]
+    assert report["suite"]["schemaVersion"]==1,report["suite"]
+    delta=report["suite"]["schedulerDelta"]
+    assert delta["accepted"]>=0 and delta["rejected"]>=0,delta
+    assert delta["completed"]>=0 and delta["failed"]==0,delta
     assert report["suite"]["parameters"]["seed"]==1337,report["suite"]
     bench=report["metrics"]["benchmark"]
     assert bench["status"]=="complete",bench
