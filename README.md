@@ -1038,6 +1038,50 @@ faster read-side searches; measure actual movement rate, original
 route throughput, p95, allocations, GC, and packet delivery before
 changing the default.
 
+## M20 — Priority reroutes under bounded mixed gameplay load
+
+**Experimental branch** `feature/interactive-reroute-qos`, stacked on M19.
+J/K and the legacy G/H/I settings remain unchanged by default.
+
+- Opt-in `PrioritizeInteractiveReroutes` adds separate interactive and
+  background FIFO reroute ticket lanes; a configurable weighted 3:1 service
+  policy picks tickets when both lanes are queued. Background requests
+  retain a guaranteed share of **tickets taken**, not of CPU time.
+- `InteractiveRerouteReservedSlots` reserves part of the existing
+  `MaxPendingReroutes` budget against background queued and in-flight
+  searches. Interactive requests still cannot exceed the same global
+  total. This is bounded admission, **not** eviction or preemption of
+  already-running background route searches.
+- The event-driven capacity-blocked queues also use weighted class service.
+  Expired and stale tickets are ignored; completion/cancellation frees
+  the correct class capacity. A missing or broken link remains subject to
+  retry backoff and packet TTL.
+- Host schedules interactive reroutes with interactive CPU-work priority
+  only when the new option is enabled. The existing reroute CPU budget,
+  worker count and total search capacity remain unchanged.
+- Telemetry includes per-class queued/in-flight reroutes, started searches,
+  capacity-blocked packets, wakeups and P95 reroute wait.
+- **Correctness fix for M19 weighted ready lanes:** only packets present
+  in a class queue at tick start are eligible to be visited that tick.
+  Newly requeued packets are deferred to the next tick so that no
+  packet can traverse multiple hops in a single 100ms simulation tick.
+
+The Network Observatory offers **L**, identical to K except for reroute
+prioritization (3:1 weighted tickets and four reserved interactive slots
+out of the existing 64 ticket slots). Use J/K/L for controlled A/B/C;
+do not mix with the uniform G/H/I stress profile.
+
+The automated GitHub Actions gameplay workflow runs **J, K and L** (512
+nodes, 6 seconds/scenario) and attaches all three archives plus summaries.
+The smoke is a correctness contract check, not a performance ranking.
+No additional manual benchmark is requested per change. End-to-end
+player responsiveness on the target server still needs a milestone
+test with representative topology and a latency budget.
+
+**Limitations:** This does not yet implement radio-airtime QoS, file
+transfer fragmentation, live game traffic replay, digital entities or
+netrunning gameplay.
+
 ## M19 — SS13 mixed traffic benchmark + opt-in interactive packet service
 
 ### Automated short J/K checks

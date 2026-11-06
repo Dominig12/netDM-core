@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired short J/K smoke through the real Host API; diagnostic, not a performance gate."""
+"""Short J/K/L suites through the Host API; correctness, never a performance gate."""
 import argparse
 import json
 import os
@@ -22,8 +22,10 @@ def api(base, endpoint, payload=None):
 
 
 def collect(base, options, mode, out):
-    config = dict(options, prioritizeInteractiveTraffic=mode == "K",
-                  interactiveReservedSlots=32 if mode == "K" else 0)
+    config = dict(options, prioritizeInteractiveTraffic=mode in ("K", "L"),
+                  interactiveReservedSlots=32 if mode in ("K", "L") else 0,
+                  prioritizeInteractiveReroutes=mode == "L",
+                  interactiveRerouteReservedSlots=4 if mode == "L" else 0)
     accepted = api(base, "/api/benchmark-suite/start", config)
     assert accepted["status"] in ("running", "complete"), accepted
     run_id = accepted["runId"]
@@ -52,7 +54,9 @@ def collect(base, options, mode, out):
             assert suite["scenario"] == expected, suite
             assert suite["parameters"]["seed"] == options["seed"], suite
             assert suite["parameters"]["trafficProfile"] == "ss13-mixed", suite
-            assert suite["parameters"]["prioritizeInteractiveTraffic"] == (mode == "K"), suite
+            assert suite["parameters"]["prioritizeInteractiveTraffic"] == (mode in ("K", "L")), suite
+            assert suite["parameters"]["prioritizeInteractiveReroutes"] == (mode == "L"), suite
+            assert suite["parameters"]["interactiveRerouteReservedSlots"] == (4 if mode == "L" else 0), suite
             b = report["metrics"]["benchmark"]
             assert b["status"] == "complete" and b["tickRunner"]["failedTicks"] == 0, b
             load, p = b["load"], b["packetTransport"]
@@ -66,6 +70,16 @@ def collect(base, options, mode, out):
             assert p["queued"] == p["interactiveQueued"] + p["backgroundQueued"]
             assert p["queued"] <= config["packetQueueCapacity"]
             assert p["reservedAdmissions"] == 0
+            assert p["rerouteQueued"] == (
+                p["interactiveRerouteQueued"] + p["backgroundRerouteQueued"])
+            assert p["rerouteInFlight"] == (
+                p["interactiveRerouteInFlight"] + p["backgroundRerouteInFlight"])
+            assert p["capacityBlockedPackets"] == (
+                p["interactiveCapacityBlocked"] + p["backgroundCapacityBlocked"])
+            assert p["reroutes"] == (
+                p["interactiveReroutesStarted"] + p["backgroundReroutesStarted"])
+            assert p["interactiveRerouteWaitP95Ticks"] >= 0
+            assert p["backgroundRerouteWaitP95Ticks"] >= 0
             assert p["interactiveDelivered"] > 0 and p["backgroundDelivered"] > 0
             assert report["history"]
             rows.append(dict(mode=mode, scenario=expected, offered=load["offered"],
@@ -76,7 +90,11 @@ def collect(base, options, mode, out):
                              firstHopP95Ticks=p["firstHopAgeP95Ticks"],
                              peakQueued=p["peakQueued"],
                              dropped=p["dropped"], expired=p["expired"],
-                             skippedTicks=b["tickRunner"]["skippedIntervals"]))
+                             skippedTicks=b["tickRunner"]["skippedIntervals"],
+                             interactiveReroutes=p["interactiveReroutesStarted"],
+                             backgroundReroutes=p["backgroundReroutesStarted"],
+                             interactiveRerouteWaitP95=p["interactiveRerouteWaitP95Ticks"],
+                             backgroundRerouteWaitP95=p["backgroundRerouteWaitP95Ticks"]))
     return rows
 
 
@@ -114,25 +132,27 @@ def main():
         raise RuntimeError("NetDM Host not ready")
 
     rows = []
-    for mode in ("J", "K"):
+    for mode in ("J", "K", "L"):
         rows.extend(collect(args.url, config, mode, out))
         print(f"{mode}: PASS", flush=True)
 
     summary = [
-        "## SS13 J/K automated smoke",
+        "## SS13 J/K/L automated smoke",
         "",
         "**6s/scenario on a shared CI runner: correctness only, NOT a latency/throughput gate.**",
         "",
         "| Scenario | Mode | Offered | Delivered | Interactive | Background | "
-        "Interactive P95 (ticks) | Background P95 (ticks) | Runner skips |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        "Interactive P95 (ticks) | Background P95 (ticks) | "
+        "Interactive reroutes | Background reroutes | Runner skips |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         summary.append(
             f"| {row['scenario']} | {row['mode']} | {row['offered']} | "
             f"{row['delivered']} | {row['interactiveDelivered']} | "
             f"{row['backgroundDelivered']} | {row['interactiveP95Ticks']} | "
-            f"{row['backgroundP95Ticks']} | {row['skippedTicks']} |"
+            f"{row['backgroundP95Ticks']} | {row['interactiveReroutes']} | "
+            f"{row['backgroundReroutes']} | {row['skippedTicks']} |"
         )
     text = "\n".join(summary) + "\n"
     (out / "summary.md").write_text(text, encoding="utf-8")
@@ -144,7 +164,7 @@ def main():
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
             f.write(text)
     print(text)
-    print("J/K pair passed", flush=True)
+    print("J/K/L trio passed", flush=True)
 
 
 if __name__ == "__main__":
