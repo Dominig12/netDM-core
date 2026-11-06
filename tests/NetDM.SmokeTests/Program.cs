@@ -86,6 +86,7 @@ CheckPacketTransport();
 CheckAdaptivePacketTransport();
 CheckEventDrivenPacketWaiting();
 CheckEventDrivenRerouteCapacity();
+CheckTrafficPriorities();
 CheckRerouteAdaptiveBackoff();
 await CheckDedicatedPacketTicksAsync();
 CheckSpatialRadioAirtime();
@@ -803,6 +804,78 @@ static void CheckEventDrivenRerouteCapacity()
     Check(result.Delivered == 2 && result.Queued == 0);
     Check(result.CapacityBlockedPackets == 0 && result.ReservedAdmissions == 0);
     Check(!packets.CompleteReroute(ticket, missing));
+}
+
+static void CheckTrafficPriorities()
+{
+    var runtime = new NetworkRuntime();
+    runtime.Apply([
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+            Position: new NodePosition(0, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+            Position: new NodePosition(10, 0))
+    ]);
+    var medium = new SharedMediumNetwork(runtime, bytesPerTick: 8192);
+    medium.Update([
+        new RadioNodeUpdate(new NodeId(1),
+            Profile: new RadioProfile(14, 1, 8), ChangeProfile: true),
+        new RadioNodeUpdate(new NodeId(2),
+            Profile: new RadioProfile(14, 1, 8), ChangeProfile: true)
+    ]);
+    var route = medium.Route(new NodeId(1), new NodeId(2));
+    Check(route.Found);
+    var options = new PacketTransportOptions(Capacity: 16, MaxAdvancesPerTick: 1,
+        MaxAgeTicks: 100, EventDrivenPacketWaiting: true,
+        PrioritizeInteractiveTraffic: true, InteractiveReservedSlots: 2);
+    var packets = new RadioPacketTransport(medium, options);
+    for (int i = 0; i < 6; i++)
+        Check(packets.Enqueue(route, 100, 0, PacketTrafficClass.Interactive));
+    for (int i = 0; i < 3; i++)
+        Check(packets.Enqueue(route, 100, 0, PacketTrafficClass.Background));
+    for (int tick = 1; tick <= 4; tick++)
+        packets.Advance(tick);
+    var stats = packets.Capture();
+    Check(stats.InteractiveDelivered == 3 && stats.BackgroundDelivered == 1);
+    Check(stats.InteractiveQueued == 3 && stats.BackgroundQueued == 2);
+    Check(stats.Queued == stats.InteractiveQueued + stats.BackgroundQueued);
+    for (int tick = 5; tick <= 20; tick++) packets.Advance(tick);
+    stats = packets.Capture();
+    Check(stats.Delivered == 9 && stats.Queued == 0);
+    Check(stats.InteractiveDelivered == 6 && stats.BackgroundDelivered == 3);
+    Check(stats.InteractiveDeliveryAgeP95Ticks > 0);
+    Check(stats.BackgroundDeliveryAgeP95Ticks > 0);
+
+    // Background queue cannot consume the two reserved interactive slots.
+    // A consumed lease must keep its class to prevent reservation bypass.
+    var reserved = new RadioPacketTransport(medium,
+        options with { Capacity = 8, MaxAdvancesPerTick = 8 });
+    for (int i = 0; i < 5; i++)
+        Check(reserved.Enqueue(route, 100, 0, PacketTrafficClass.Background));
+    using var backgroundLease = reserved.TryReserveAdmission(PacketTrafficClass.Background);
+    Check(backgroundLease is not null);
+    Check(reserved.TryReserveAdmission(PacketTrafficClass.Background) is null);
+    using var firstInteractive = reserved.TryReserveAdmission(PacketTrafficClass.Interactive);
+    using var secondInteractive = reserved.TryReserveAdmission(PacketTrafficClass.Interactive);
+    Check(firstInteractive is not null && secondInteractive is not null);
+    Check(reserved.TryReserveAdmission(PacketTrafficClass.Interactive) is null);
+    Check(reserved.EnqueueReserved(route, 100, 0, backgroundLease!));
+    Check(reserved.EnqueueReserved(route, 100, 0, firstInteractive!));
+    Check(reserved.EnqueueReserved(route, 100, 0, secondInteractive!));
+    var capacity = reserved.Capture();
+    Check(capacity.Queued == 8 && capacity.ReservedAdmissions == 0);
+    Check(capacity.BackgroundPreRouteRejections == 1);
+    Check(capacity.InteractivePreRouteRejections == 1);
+    Check(capacity.InteractiveQueued == 2 && capacity.BackgroundQueued == 6);
+    reserved.Advance(1);
+    Check(reserved.Capture().Queued < 8);
+    using (var abandoned = reserved.TryReserveAdmission(PacketTrafficClass.Interactive))
+        Check(abandoned is not null);
+    Check(reserved.Capture().ReservedAdmissions == 0);
+
+    bool rejected = false;
+    try { new PacketTransportOptions(PrioritizeInteractiveTraffic: true).Validate(); }
+    catch (ArgumentException) { rejected = true; }
+    Check(rejected);
 }
 
 static void CheckRerouteAdaptiveBackoff()
