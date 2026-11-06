@@ -708,7 +708,10 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                         destinationIndex = Math.Min(options.Nodes - 1, destRow * columns + destCol);
                     }
                     else destinationIndex = rng.Next(options.Nodes);
-                    if (destinationIndex == sourceIndex)
+                    // Keep the historical uniform RNG/path workload byte-for-byte:
+                    // only the new gameplay profile avoids self-directed traffic.
+                    if (options.TrafficProfile == "ss13-mixed" &&
+                        destinationIndex == sourceIndex)
                         destinationIndex = (sourceIndex + 1) % options.Nodes;
                     var a = new NodeId((ulong)(sourceIndex + 1));
                     var b = new NodeId((ulong)(destinationIndex + 1));
