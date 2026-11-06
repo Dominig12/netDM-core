@@ -87,6 +87,7 @@ CheckAdaptivePacketTransport();
 CheckEventDrivenPacketWaiting();
 CheckEventDrivenRerouteCapacity();
 CheckTrafficPriorities();
+CheckInteractiveRerouteQos();
 CheckRerouteAdaptiveBackoff();
 await CheckDedicatedPacketTicksAsync();
 CheckSpatialRadioAirtime();
@@ -877,6 +878,123 @@ static void CheckTrafficPriorities()
     try { new PacketTransportOptions(PrioritizeInteractiveTraffic: true).Validate(); }
     catch (ArgumentException) { rejected = true; }
     Check(rejected);
+}
+
+static void CheckInteractiveRerouteQos()
+{
+    static (SharedMediumNetwork Medium, RouteResult Route) MakeBrokenChain()
+    {
+        var runtime = new NetworkRuntime();
+        runtime.Apply([
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+                Position: new NodePosition(0, 0)),
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+                Position: new NodePosition(10, 0)),
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(3),
+                Position: new NodePosition(20, 0))
+        ]);
+        var radio = new SharedMediumNetwork(runtime, bytesPerTick: 8192);
+        var profile = new RadioProfile(14, 1, 8);
+        radio.Update(Enumerable.Range(1, 3).Select(x => new RadioNodeUpdate(
+            new NodeId((ulong)x), Profile: profile, ChangeProfile: true)).ToArray());
+        var route = radio.Route(new NodeId(1), new NodeId(3));
+        Check(route.Found && route.Path.Count == 3);
+        return (radio, route);
+    }
+
+    // Reserving reroute space must include queued AND running background work.
+    // Background traffic uses six of eight tickets, leaving two for players.
+    var (medium, route) = MakeBrokenChain();
+    var options = new PacketTransportOptions(
+        Capacity: 32, MaxAgeTicks: 100, MaxAdvancesPerTick: 32,
+        MaxPendingReroutes: 8, MaxConcurrentReroutes: 1,
+        EventDrivenPacketWaiting: true, EventDrivenRerouteCapacity: true,
+        PrioritizeInteractiveTraffic: true,
+        PrioritizeInteractiveReroutes: true,
+        InteractiveRerouteReservedSlots: 2);
+    var packets = new RadioPacketTransport(medium, options);
+    for (int i = 0; i < 8; i++)
+        Check(packets.Enqueue(route, 100, 0, PacketTrafficClass.Background));
+    Check(packets.Advance(1) == 8);
+    var offline = new RadioNodeUpdate(new NodeId(3), Profile: null,
+        ChangeProfile: true);
+    medium.Update([offline]);
+    packets.NotifyRadioUpdates([offline]);
+    Check(packets.Advance(2) == 0);
+    var full = packets.Capture();
+    Check(full.RerouteQueued == 6 && full.BackgroundRerouteQueued == 6);
+    Check(full.InteractiveRerouteQueued == 0);
+    Check(full.BackgroundCapacityBlocked == 2);
+    for (int i = 0; i < 4; i++)
+        Check(packets.Enqueue(route, 100, 2, PacketTrafficClass.Interactive));
+    Check(packets.Advance(3) == 4);
+    Check(packets.Advance(4) == 0);
+    full = packets.Capture();
+    Check(full.RerouteQueued == 8 && full.InteractiveRerouteQueued == 2);
+    Check(full.BackgroundRerouteQueued == 6);
+    Check(full.InteractiveCapacityBlocked == 2 &&
+          full.BackgroundCapacityBlocked == 2);
+    Check(full.CapacityBlockedPackets == 4);
+    Check(packets.TryTakeReroute(out var first));
+    Check(first.TrafficClass == PacketTrafficClass.Interactive);
+    var missing = medium.Route(first.Source, first.Destination);
+    Check(!missing.Found);
+    Check(packets.CompleteReroute(first, missing));
+    full = packets.Capture();
+    Check(full.InteractiveCapacityBlocked == 1);
+    Check(full.BackgroundCapacityBlocked == 2);
+    Check(full.InteractiveCapacityWakeups == 1);
+    Check(packets.Advance(5) == 0);
+    full = packets.Capture();
+    Check(full.InteractiveRerouteQueued == 2);
+    Check(full.RerouteQueued + full.RerouteInFlight <= options.MaxPendingReroutes);
+    Check(packets.TryTakeReroute(out var second));
+    Check(second.TrafficClass == PacketTrafficClass.Interactive);
+    Check(packets.CancelReroute(second));
+    Check(packets.Capture().InteractiveCapacityBlocked == 0);
+    Check(packets.Capture().BackgroundCapacityBlocked == 2);
+
+    // Fairness: even under a persistent interactive backlog, the fourth
+    // selected reroute is background (weighted 3:1 service).
+    var (fairMedium, fairRoute) = MakeBrokenChain();
+    var fair = new RadioPacketTransport(fairMedium,
+        options with { MaxPendingReroutes = 16, InteractiveRerouteReservedSlots = 2 });
+    for (int i = 0; i < 6; i++)
+    {
+        Check(fair.Enqueue(fairRoute, 100, 0, PacketTrafficClass.Background));
+        Check(fair.Enqueue(fairRoute, 100, 0, PacketTrafficClass.Interactive));
+    }
+    Check(fair.Advance(1) == 12);
+    fairMedium.Update([offline]);
+    fair.NotifyRadioUpdates([offline]);
+    Check(fair.Advance(2) == 0);
+    Check(fair.Capture().RerouteQueued == 12);
+    int interactive = 0, background = 0;
+    for (int i = 0; i < 12; i++)
+    {
+        Check(fair.TryTakeReroute(out var ticket));
+        if (i < 4)
+            Check(ticket.TrafficClass ==
+                (i == 3 ? PacketTrafficClass.Background : PacketTrafficClass.Interactive));
+        if (ticket.TrafficClass == PacketTrafficClass.Interactive) interactive++;
+        else background++;
+        Check(fair.CancelReroute(ticket));
+    }
+    Check(interactive == 6 && background == 6);
+    var end = fair.Capture();
+    Check(end.RerouteQueued == 0 && end.RerouteInFlight == 0);
+    Check(end.InteractiveReroutesStarted == 6 && end.BackgroundReroutesStarted == 6);
+    Check(end.InteractiveRerouteInFlight == 0 && end.BackgroundRerouteInFlight == 0);
+    Check(!fair.TryTakeReroute(out _));
+
+    bool invalid = false;
+    try { (options with { PrioritizeInteractiveTraffic = false }).Validate(); }
+    catch (ArgumentException) { invalid = true; }
+    Check(invalid);
+    invalid = false;
+    try { (options with { InteractiveRerouteReservedSlots = 8 }).Validate(); }
+    catch (ArgumentOutOfRangeException) { invalid = true; }
+    Check(invalid);
 }
 
 static void CheckRerouteAdaptiveBackoff()
