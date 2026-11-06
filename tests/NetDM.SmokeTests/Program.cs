@@ -91,6 +91,7 @@ CheckInteractiveRerouteQos();
 CheckRerouteAdaptiveBackoff();
 await CheckDedicatedPacketTicksAsync();
 CheckSpatialRadioAirtime();
+CheckInteractiveAirtimeQos();
 CheckRadioSafety();
 CheckWirelessTopology();
 CheckRadioOracle();
@@ -1289,6 +1290,111 @@ static void CheckSpatialRadioAirtime()
     Check(global.TryTransmitHop(new NodeId(3),new NodeId(4),400,100)
         ==RadioHopOutcome.ChannelBusy);
     Check(global.Stats().SpatialSuccessfulHops==0);
+}
+
+static void CheckInteractiveAirtimeQos()
+{
+    static SharedMediumNetwork MakeMedium(RadioAirtimeScope scope)
+    {
+        var runtime = new NetworkRuntime();
+        runtime.Apply([
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+                Position: new NodePosition(0, 0)),
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+                Position: new NodePosition(10, 0)),
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(3),
+                Position: new NodePosition(500, 0)),
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(4),
+                Position: new NodePosition(510, 0))
+        ]);
+        var medium = new SharedMediumNetwork(runtime, bytesPerTick: 400,
+            airtimeScope: scope);
+        medium.Update(Enumerable.Range(1, 4).Select(i => new RadioNodeUpdate(
+            new NodeId((ulong)i), Profile: new RadioProfile(14, 1, 8),
+            ChangeProfile: true)).ToArray());
+        return medium;
+    }
+
+    foreach (var scope in new[] {
+        RadioAirtimeScope.ChannelWide, RadioAirtimeScope.SpatialCells
+    })
+    {
+        var medium = MakeMedium(scope);
+        // Reserve 25% for interactive: background may only consume 300/400.
+        Check(medium.TryTransmitHop(new NodeId(1), new NodeId(2), 300, 1,
+            PacketTrafficClass.Background, 25) == RadioHopOutcome.TransmittedRadio);
+        // This hop fits the physical channel, but exceeds background quota.
+        Check(medium.TryTransmitHop(new NodeId(1), new NodeId(2), 1, 1,
+            PacketTrafficClass.Background, 25) == RadioHopOutcome.ChannelBusy);
+        Check(medium.TryTransmitHop(new NodeId(1), new NodeId(2), 100, 1,
+            PacketTrafficClass.Interactive, 25) == RadioHopOutcome.TransmittedRadio);
+        Check(medium.TryTransmitHop(new NodeId(1), new NodeId(2), 1, 1,
+            PacketTrafficClass.Interactive, 25) == RadioHopOutcome.ChannelBusy);
+        // No protected demand on tick 2; background borrows the full 400B.
+        Check(medium.TryTransmitHop(new NodeId(1), new NodeId(2), 400, 2,
+            PacketTrafficClass.Background) == RadioHopOutcome.TransmittedRadio);
+        Check(medium.TryTransmitHop(new NodeId(1), new NodeId(2), 50, 1,
+            PacketTrafficClass.Background) == RadioHopOutcome.OldTick);
+        var stats = medium.Stats();
+        Check(stats.ProtectedBackgroundDeferrals == 1);
+        Check(stats.InteractiveHopTransmissions == 1);
+        Check(stats.BackgroundHopTransmissions == 2);
+        Check(stats.InteractiveHopBytes == 100);
+        Check(stats.BackgroundHopBytes == 700);
+        if (scope == RadioAirtimeScope.SpatialCells)
+        {
+            // A distant region does not consume any shared local cell budget.
+            Check(medium.TryTransmitHop(new NodeId(3), new NodeId(4), 400, 2,
+                PacketTrafficClass.Background) == RadioHopOutcome.TransmittedRadio);
+            Check(medium.Stats().BackgroundHopBytes == 1100);
+        }
+        else
+        {
+            Check(medium.TryTransmitHop(new NodeId(3), new NodeId(4), 1, 2,
+                PacketTrafficClass.Background) == RadioHopOutcome.ChannelBusy);
+        }
+    }
+
+    // Airtime is protected while tick-start interactive work remains;
+    // the background can borrow unused capacity after that work drains.
+    var shared = MakeMedium(RadioAirtimeScope.SpatialCells);
+    var route = shared.Route(new NodeId(1), new NodeId(2));
+    Check(route.Found);
+    var options = new PacketTransportOptions(Capacity: 16,
+        MaxAdvancesPerTick: 16, EventDrivenPacketWaiting: true,
+        PrioritizeInteractiveTraffic: true,
+        PrioritizeInteractiveAirtime: true, InteractiveAirtimeReservePercent: 25);
+    var transport = new RadioPacketTransport(shared, options);
+    // Ready lane order: I,I,I,B,I,B. First B (320B) is blocked by
+    // the 300B quota, despite fitting physical 400B total at that point.
+    // After last I, second B borrows the full remaining 320B.
+    for (int i = 0; i < 4; i++)
+        Check(transport.Enqueue(route, 20, 0, PacketTrafficClass.Interactive));
+    for (int i = 0; i < 2; i++)
+        Check(transport.Enqueue(route, 320, 0, PacketTrafficClass.Background));
+    Check(transport.Advance(1) == 5);
+    Check(transport.Capture().InteractiveDelivered == 4);
+    Check(transport.Capture().BackgroundDelivered == 1);
+    Check(transport.Capture().BackgroundQueued == 1);
+    Check(shared.Stats().ProtectedBackgroundDeferrals == 1);
+    Check(transport.Advance(2) == 1);
+    Check(transport.Capture().BackgroundDelivered == 2);
+    Check(transport.Capture().Queued == 0);
+    Check(shared.Stats().BackgroundHopBytes == 640);
+
+    bool invalid = false;
+    try { (options with { PrioritizeInteractiveTraffic = false }).Validate(); }
+    catch (ArgumentException) { invalid = true; }
+    Check(invalid);
+    invalid = false;
+    try { (options with { InteractiveAirtimeReservePercent = 100 }).Validate(); }
+    catch (ArgumentOutOfRangeException) { invalid = true; }
+    Check(invalid);
+    invalid = false;
+    try { shared.TryTransmitHop(new NodeId(1), new NodeId(2), 10, 3,
+        (PacketTrafficClass)200, 25); }
+    catch (ArgumentOutOfRangeException) { invalid = true; }
+    Check(invalid);
 }
 
 static void CheckRadioAStar()

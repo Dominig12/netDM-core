@@ -37,6 +37,8 @@ public sealed record BenchmarkOptions(
     int InteractiveReservedSlots = 0,
     bool PrioritizeInteractiveReroutes = false,
     int InteractiveRerouteReservedSlots = 0,
+    bool PrioritizeInteractiveAirtime = false,
+    int InteractiveAirtimeReservePercent = 25,
     int InteractiveTrafficPercent = 20,
     int LocalTrafficPercent = 85,
     int BurstPeriodSeconds = 20,
@@ -100,7 +102,9 @@ public sealed record BenchmarkOptions(
             EventDrivenRerouteCapacity: EventDrivenRerouteCapacity,
             InteractiveReservedSlots: InteractiveReservedSlots,
             PrioritizeInteractiveReroutes: PrioritizeInteractiveReroutes,
-            InteractiveRerouteReservedSlots: InteractiveRerouteReservedSlots).Validate();
+            InteractiveRerouteReservedSlots: InteractiveRerouteReservedSlots,
+            PrioritizeInteractiveAirtime: PrioritizeInteractiveAirtime,
+            InteractiveAirtimeReservePercent: InteractiveAirtimeReservePercent).Validate();
     }
 }
 
@@ -181,7 +185,9 @@ public sealed record BenchmarkSample(
     int InteractiveReroutesQueued, int BackgroundReroutesQueued,
     int InteractiveReroutesInFlight, int BackgroundReroutesInFlight,
     int InteractiveCapacityBlockedPackets, int BackgroundCapacityBlockedPackets,
-    double InteractiveRerouteWaitP95Ticks, double BackgroundRerouteWaitP95Ticks);
+    double InteractiveRerouteWaitP95Ticks, double BackgroundRerouteWaitP95Ticks,
+    double InteractiveRadioBytesPerSecond, double BackgroundRadioBytesPerSecond,
+    double ProtectedBackgroundAirtimeDeferralsPerSecond);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -411,7 +417,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                      PrioritizeInteractiveTraffic: options.PrioritizeInteractiveTraffic,
                      InteractiveReservedSlots: options.InteractiveReservedSlots,
                      PrioritizeInteractiveReroutes: options.PrioritizeInteractiveReroutes,
-                     InteractiveRerouteReservedSlots: options.InteractiveRerouteReservedSlots))
+                     InteractiveRerouteReservedSlots: options.InteractiveRerouteReservedSlots,
+                     PrioritizeInteractiveAirtime: options.PrioritizeInteractiveAirtime,
+                     InteractiveAirtimeReservePercent: options.InteractiveAirtimeReservePercent))
                 : null;
             // Reroute computation is never executed while holding the packet
             // queue lock. A separate bounded CPU executor prevents it from
@@ -626,7 +634,13 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     packetSnapshot?.InteractiveCapacityBlocked ?? 0,
                     packetSnapshot?.BackgroundCapacityBlocked ?? 0,
                     packetSnapshot?.InteractiveRerouteWaitP95Ticks ?? 0,
-                    packetSnapshot?.BackgroundRerouteWaitP95Ticks ?? 0);
+                    packetSnapshot?.BackgroundRerouteWaitP95Ticks ?? 0,
+                    ((mediumSnapshot?.InteractiveHopBytes ?? 0) -
+                        (previousMedium?.InteractiveHopBytes ?? 0)) / interval,
+                    ((mediumSnapshot?.BackgroundHopBytes ?? 0) -
+                        (previousMedium?.BackgroundHopBytes ?? 0)) / interval,
+                    ((mediumSnapshot?.ProtectedBackgroundDeferrals ?? 0) -
+                        (previousMedium?.ProtectedBackgroundDeferrals ?? 0)) / interval);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;

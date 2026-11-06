@@ -34,7 +34,9 @@ public sealed record PacketTransportOptions(
     int InteractiveVisitWeight = 3,
     bool PrioritizeInteractiveReroutes = false,
     int InteractiveRerouteReservedSlots = 0,
-    int InteractiveRerouteWeight = 3)
+    int InteractiveRerouteWeight = 3,
+    bool PrioritizeInteractiveAirtime = false,
+    int InteractiveAirtimeReservePercent = 25)
 {
     public void Validate()
     {
@@ -76,6 +78,10 @@ public sealed record PacketTransportOptions(
             throw new ArgumentOutOfRangeException(nameof(InteractiveRerouteReservedSlots));
         if (InteractiveRerouteWeight is < 1 or > 32)
             throw new ArgumentOutOfRangeException(nameof(InteractiveRerouteWeight));
+        if (PrioritizeInteractiveAirtime && !PrioritizeInteractiveTraffic)
+            throw new ArgumentException("Radio airtime QoS requires interactive packet priorities.");
+        if (InteractiveAirtimeReservePercent is < 1 or > 90)
+            throw new ArgumentOutOfRangeException(nameof(InteractiveAirtimeReservePercent));
     }
 }
 
@@ -781,6 +787,9 @@ public sealed class RadioPacketTransport
             // twice while leaving other original entries unvisited.
             int backgroundReadyAtStart = _settings.EventDrivenPacketWaiting ? _ready.Count : 0;
             int interactiveReadyAtStart = _settings.EventDrivenPacketWaiting ? _readyInteractive.Count : 0;
+            // Protect bytes only while tick-start interactive-ready entries
+            // remain. After the last interactive attempt, background packets
+            // can borrow the unused channel capacity within this SAME tick.
             int count = Math.Min(_settings.EventDrivenPacketWaiting ? ReadyQueueCount : _queue.Count, visitLimit);
             int forwarded = 0;
             int visited = 0;
@@ -863,7 +872,10 @@ public sealed class RadioPacketTransport
 
                 var from = packet.Path[packet.Index];
                 var to = packet.Path[packet.Index + 1];
-                var result = _network.TryTransmitHop(from, to, packet.Bytes, tick);
+                var airtimeReserve = _settings.PrioritizeInteractiveAirtime &&
+                    interactiveReadyAtStart > 0 ? _settings.InteractiveAirtimeReservePercent : 0;
+                var result = _network.TryTransmitHop(from, to, packet.Bytes, tick,
+                    packet.TrafficClass, airtimeReserve);
                 switch (result)
                 {
                     case RadioHopOutcome.TransmittedRadio:

@@ -57,7 +57,10 @@ public readonly record struct SharedMediumStatistics(
     long AcceptedRevalidatedTransfers,
     long SpatialSuccessfulHops, long SpatialBusyHops,
     long SpatialPayloadBytes, long SpatialCellReservations,
-    int SpatialActiveCells, long SpatialLastTick);
+    int SpatialActiveCells, long SpatialLastTick,
+    long InteractiveHopTransmissions, long BackgroundHopTransmissions,
+    long InteractiveHopBytes, long BackgroundHopBytes,
+    long ProtectedBackgroundDeferrals);
 
 public readonly record struct RadioMediumCellView(
     uint Channel, int Z, int X, int Y, int Count);
@@ -120,12 +123,16 @@ public sealed partial class SharedMediumNetwork
         }
         AStarWorkspaces.Add(workspace);
     }
-    private readonly Dictionary<RadioDomainKey, (long Tick, long Used)> _airtime = new();
+    // Background bytes are tracked alongside total usage in the SAME ledger:
+    // interactive reservations must never exceed the physical channel budget.
+    private readonly Dictionary<RadioDomainKey, (long Tick, long Used, long Background)> _airtime = new();
     // Cells are scoped to one logical tick and cleared atomically on advance:
     // allocation size is bounded by occupied airtime regions, not elapsed time.
-    private readonly Dictionary<RadioMediumCell, long> _spatialAirtime = new();
+    private readonly Dictionary<RadioMediumCell, (long Used, long Background)> _spatialAirtime = new();
     private long _spatialTick = -1;
     private long _spatialHops, _spatialBusy, _spatialBytes, _spatialCellReservations;
+    private long _interactiveHopTransmissions, _backgroundHopTransmissions;
+    private long _interactiveHopBytes, _backgroundHopBytes, _protectedBackgroundDeferrals;
     private readonly long _bytesPerTick;
     private readonly SharedRadioSearchMode _searchMode;
     private readonly RadioAirtimeScope _airtimeScope;
@@ -207,7 +214,12 @@ public sealed partial class SharedMediumNetwork
             Interlocked.Read(ref _spatialBusy),
             Interlocked.Read(ref _spatialBytes),
             Interlocked.Read(ref _spatialCellReservations),
-            spatialActive, spatialLastTick);
+            spatialActive, spatialLastTick,
+            Interlocked.Read(ref _interactiveHopTransmissions),
+            Interlocked.Read(ref _backgroundHopTransmissions),
+            Interlocked.Read(ref _interactiveHopBytes),
+            Interlocked.Read(ref _backgroundHopBytes),
+            Interlocked.Read(ref _protectedBackgroundDeferrals));
     }
 
     /// <summary>
@@ -713,11 +725,29 @@ public sealed partial class SharedMediumNetwork
             RadioCost(snapshot, from, to, out _) is not null;
     }
 
-    public RadioHopOutcome TryTransmitHop(NodeId from, NodeId to, int bytes, long tick)
+    /// <summary>
+    /// Optional demand-aware airtime reservation. When a packet scheduler
+    /// has unvisited interactive entries from the tick-start ready snapshot,
+    /// background wireless hops may consume only
+    /// (100 - interactiveReservePercent)% of each channel/cell budget.
+    /// The scheduler passes zero after draining that snapshot, allowing
+    /// background to borrow otherwise idle airtime within the same tick.
+    /// Interactive hops may use any free bytes.
+    /// This is admission control, not preemption or an additional airtime
+    /// pool. With reservePercent=0 the old shared-medium behavior is preserved.
+    /// Cable hops never use radio airtime.
+    /// </summary>
+    public RadioHopOutcome TryTransmitHop(NodeId from, NodeId to, int bytes, long tick,
+        PacketTrafficClass trafficClass = PacketTrafficClass.Background,
+        int interactiveReservePercent = 0)
     {
         if (bytes is < 1 or > 1_000_000)
             throw new ArgumentOutOfRangeException(nameof(bytes));
         ArgumentOutOfRangeException.ThrowIfNegative(tick);
+        if (trafficClass is not (PacketTrafficClass.Background or PacketTrafficClass.Interactive))
+            throw new ArgumentOutOfRangeException(nameof(trafficClass));
+        if (interactiveReservePercent is < 0 or > 90)
+            throw new ArgumentOutOfRangeException(nameof(interactiveReservePercent));
         var snapshot = Snapshot;
         if (from == to ||
             !snapshot.Physical.Nodes.TryGetValue(from, out var node) ||
@@ -734,16 +764,28 @@ public sealed partial class SharedMediumNetwork
 
         lock (_airtimeLock)
         {
+            long backgroundLimit = Math.Max(1,
+                _bytesPerTick * (100 - interactiveReservePercent) / 100);
             if (_airtimeScope == RadioAirtimeScope.ChannelWide)
             {
                 var slot = _airtime.TryGetValue(domain, out var existing)
-                    ? existing : (Tick: -1L, Used: 0L);
+                    ? existing : (Tick: -1L, Used: 0L, Background: 0L);
                 if (slot.Tick > tick) return RadioHopOutcome.OldTick;
                 if (bytes > _bytesPerTick) return RadioHopOutcome.PacketTooLarge;
-                if (slot.Tick == tick && slot.Used + bytes > _bytesPerTick)
-                    return RadioHopOutcome.ChannelBusy;
                 var used = slot.Tick == tick ? slot.Used : 0L;
-                _airtime[domain] = (tick, used + bytes);
+                var background = slot.Tick == tick ? slot.Background : 0L;
+                if (used + bytes > _bytesPerTick)
+                    return RadioHopOutcome.ChannelBusy;
+                if (trafficClass == PacketTrafficClass.Background &&
+                    interactiveReservePercent != 0 &&
+                    background + bytes > backgroundLimit)
+                {
+                    Interlocked.Increment(ref _protectedBackgroundDeferrals);
+                    return RadioHopOutcome.ChannelBusy;
+                }
+                _airtime[domain] = (tick, used + bytes,
+                    background + (trafficClass == PacketTrafficClass.Background ? bytes : 0));
+                CountClassRadioHop(trafficClass, bytes);
                 return RadioHopOutcome.TransmittedRadio;
             }
 
@@ -774,9 +816,17 @@ public sealed partial class SharedMediumNetwork
             for (long y = y0; y <= y1; y++)
             {
                 var cell = new RadioMediumCell(domain, (int)x, (int)y);
-                if (_spatialAirtime.TryGetValue(cell, out var occupied) &&
-                    occupied + bytes > _bytesPerTick)
+                _spatialAirtime.TryGetValue(cell, out var occupied);
+                if (occupied.Used + bytes > _bytesPerTick)
                 {
+                    Interlocked.Increment(ref _spatialBusy);
+                    return RadioHopOutcome.ChannelBusy;
+                }
+                if (trafficClass == PacketTrafficClass.Background &&
+                    interactiveReservePercent != 0 &&
+                    occupied.Background + bytes > backgroundLimit)
+                {
+                    Interlocked.Increment(ref _protectedBackgroundDeferrals);
                     Interlocked.Increment(ref _spatialBusy);
                     return RadioHopOutcome.ChannelBusy;
                 }
@@ -787,13 +837,30 @@ public sealed partial class SharedMediumNetwork
             {
                 var cell = new RadioMediumCell(domain, (int)x, (int)y);
                 _spatialAirtime.TryGetValue(cell, out var occupied);
-                _spatialAirtime[cell] = occupied + bytes;
+                _spatialAirtime[cell] = (occupied.Used + bytes,
+                    occupied.Background +
+                        (trafficClass == PacketTrafficClass.Background ? bytes : 0));
                 reservedCells++;
             }
             Interlocked.Increment(ref _spatialHops);
             Interlocked.Add(ref _spatialBytes, bytes);
             Interlocked.Add(ref _spatialCellReservations, reservedCells);
+            CountClassRadioHop(trafficClass, bytes);
             return RadioHopOutcome.TransmittedRadio;
+        }
+    }
+
+    private void CountClassRadioHop(PacketTrafficClass trafficClass, int bytes)
+    {
+        if (trafficClass == PacketTrafficClass.Interactive)
+        {
+            Interlocked.Increment(ref _interactiveHopTransmissions);
+            Interlocked.Add(ref _interactiveHopBytes, bytes);
+        }
+        else
+        {
+            Interlocked.Increment(ref _backgroundHopTransmissions);
+            Interlocked.Add(ref _backgroundHopBytes, bytes);
         }
     }
 
@@ -876,7 +943,7 @@ public sealed partial class SharedMediumNetwork
             foreach (var (domain, bytes) in needed)
             {
                 var slot = _airtime.TryGetValue(domain, out var existing)
-                    ? existing : (Tick: -1L, Used: 0L);
+                    ? existing : (Tick: -1L, Used: 0L, Background: 0L);
                 if (slot.Tick > tick)
                 {
                     RegisterRejection(payloadBytes, ref _rejectedOldTick);
@@ -898,9 +965,10 @@ public sealed partial class SharedMediumNetwork
             foreach (var (domain, bytes) in needed)
             {
                 var slot = _airtime.TryGetValue(domain, out var existing)
-                    ? existing : (Tick: -1L, Used: 0L);
+                    ? existing : (Tick: -1L, Used: 0L, Background: 0L);
                 var already = slot.Tick == tick ? slot.Used : 0L;
-                _airtime[domain] = (tick, already + bytes);
+                _airtime[domain] = (tick, already + bytes,
+                    (slot.Tick == tick ? slot.Background : 0L) + bytes);
             }
             Interlocked.Increment(ref _accepted);
             Interlocked.Add(ref _acceptedBytes, payloadBytes);
