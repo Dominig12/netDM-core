@@ -1,7 +1,7 @@
 LIBRARY netdm_byond
 EXPORTS
-    netdm_init = _netdm_init
-    netdm_send = _netdm_send
-    netdm_poll = _netdm_poll
-    netdm_status = _netdm_status
-    netdm_shutdown = _netdm_shutdown
+    netdm_init
+    netdm_send
+    netdm_poll
+    netdm_status
+    netdm_shutdown
