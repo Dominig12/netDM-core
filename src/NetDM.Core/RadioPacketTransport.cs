@@ -776,7 +776,15 @@ public sealed class RadioPacketTransport
     /// lease, simply checking queue depth races between concurrent producers.
     /// </summary>
     public PacketAdmissionLease? TryReserveAdmission(
-        PacketTrafficClass trafficClass = PacketTrafficClass.Background)
+        PacketTrafficClass trafficClass = PacketTrafficClass.Background) =>
+        TryReserveAdmission(trafficClass, out _);
+
+    /// <summary>
+    /// Distinguishes physical saturation from congestion policy before any
+    /// expensive route search. Null means rejected, not lost or delivered.
+    /// </summary>
+    public PacketAdmissionLease? TryReserveAdmission(PacketTrafficClass trafficClass,
+        out PacketSubmissionRejection rejection)
     {
         ValidateTrafficClass(trafficClass);
         lock (_gate)
@@ -786,6 +794,7 @@ public sealed class RadioPacketTransport
                 _preRouteRejects++;
                 if (trafficClass == PacketTrafficClass.Interactive) _interactivePreRouteRejects++;
                 else _backgroundPreRouteRejects++;
+                rejection = PacketSubmissionRejection.QueueFull;
                 return null;
             }
             if (trafficClass == PacketTrafficClass.Background && BackgroundCongested())
@@ -793,11 +802,13 @@ public sealed class RadioPacketTransport
                 _preRouteRejects++;
                 _backgroundPreRouteRejects++;
                 _backgroundCongestionRejects++;
+                rejection = PacketSubmissionRejection.BackgroundCongestion;
                 return null;
             }
             _reservedAdmissions++;
             if (trafficClass == PacketTrafficClass.Background) _reservedBackgroundAdmissions++;
             _admissionReservations++;
+            rejection = PacketSubmissionRejection.None;
             return new PacketAdmissionLease(this, trafficClass);
         }
     }
