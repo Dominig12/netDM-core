@@ -965,6 +965,10 @@ static void CheckInteractiveRerouteQos()
         Check(fair.Enqueue(fairRoute, 100, 0, PacketTrafficClass.Interactive));
     }
     Check(fair.Advance(1) == 12);
+    // A weighted lane cannot process a newly requeued packet again in
+    // the same tick: all twelve are still at the intermediate node.
+    Check(fair.Capture().Delivered == 0);
+    Check(fair.Capture().FirstHopSamples == 12);
     fairMedium.Update([offline]);
     fair.NotifyRadioUpdates([offline]);
     Check(fair.Advance(2) == 0);
