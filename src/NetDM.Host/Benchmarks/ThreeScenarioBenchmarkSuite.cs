@@ -34,7 +34,15 @@ public sealed record ThreeScenarioSuiteOptions(
     bool AdaptivePacketVisits = false,
     bool PacketPreRouteBackpressure = false,
     bool EventDrivenPacketWaiting = false,
-    bool EventDrivenRerouteCapacity = false)
+    bool EventDrivenRerouteCapacity = false,
+    string TrafficProfile = "uniform",
+    bool PrioritizeInteractiveTraffic = false,
+    int InteractiveReservedSlots = 0,
+    int InteractiveTrafficPercent = 20,
+    int LocalTrafficPercent = 85,
+    int BurstPeriodSeconds = 20,
+    int BurstDurationSeconds = 2,
+    int BurstMultiplier = 3)
 {
     public void Validate()
     {
@@ -66,7 +74,15 @@ public sealed record ThreeScenarioSuiteOptions(
             AdaptivePacketVisits: AdaptivePacketVisits,
             PacketPreRouteBackpressure: PacketPreRouteBackpressure,
             EventDrivenPacketWaiting: EventDrivenPacketWaiting,
-            EventDrivenRerouteCapacity: EventDrivenRerouteCapacity);
+            EventDrivenRerouteCapacity: EventDrivenRerouteCapacity,
+            TrafficProfile: TrafficProfile,
+            PrioritizeInteractiveTraffic: PrioritizeInteractiveTraffic,
+            InteractiveReservedSlots: InteractiveReservedSlots,
+            InteractiveTrafficPercent: InteractiveTrafficPercent,
+            LocalTrafficPercent: LocalTrafficPercent,
+            BurstPeriodSeconds: BurstPeriodSeconds,
+            BurstDurationSeconds: BurstDurationSeconds,
+            BurstMultiplier: BurstMultiplier);
 }
 
 public sealed record ScenarioResultSummary(
@@ -182,7 +198,12 @@ public sealed class ThreeScenarioBenchmarkSuite(
         $"-{(options.AdaptivePacketVisits ? "adaptive" : "fixed")}" +
         $"-{(options.PacketPreRouteBackpressure ? "reserved" : "openloop")}" +
         $"-{(options.EventDrivenPacketWaiting ? "eventwait" : "fifo")}" +
-        (options.EventDrivenRerouteCapacity ? "-capacitywake" : "");
+        (options.EventDrivenRerouteCapacity ? "-capacitywake" : "") +
+        (options.TrafficProfile == "ss13-mixed"
+            ? $"-ss13-s{options.InteractiveTrafficPercent}-l{options.LocalTrafficPercent}" +
+              $"-burst{options.BurstPeriodSeconds}d{options.BurstDurationSeconds}x{options.BurstMultiplier}" +
+              $"-prio{(options.PrioritizeInteractiveTraffic ? 1 : 0)}-ir{options.InteractiveReservedSlots}"
+            : "");
 
     public (byte[] Data, string Name)? Archive(string? runId)
     {
