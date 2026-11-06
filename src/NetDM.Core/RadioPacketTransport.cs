@@ -15,6 +15,41 @@ public enum RadioHopOutcome
 /// <summary>Service class independent of player/NPC identity.</summary>
 public enum PacketTrafficClass : byte { Background = 0, Interactive = 1 }
 
+/// <summary>
+/// Submission is NOT delivery. PacketId is scoped to the transport's StreamId.
+/// RequestId is an opaque caller tag, not a deduplication or authentication key.
+/// </summary>
+public enum PacketSubmissionRejection : byte
+{
+    None = 0, InvalidRoute = 1, QueueFull = 2, BackgroundCongestion = 3
+}
+public readonly record struct PacketSubmissionResult(
+    bool Accepted, long PacketId, string RequestId, PacketSubmissionRejection Rejection);
+
+public enum PacketCompletionStatus : byte
+{
+    Delivered = 0, Dropped = 1, Expired = 2, Cancelled = 3
+}
+public enum PacketCompletionReason : byte
+{
+    Delivered = 0, LinkFailure = 1, PacketTooLarge = 2,
+    TimeToLive = 3, CancelledByCaller = 4
+}
+
+/// <summary>One terminal event per accepted, tracked packet.</summary>
+public sealed record PacketDeliveryReceipt(
+    long Sequence, long PacketId, string RequestId, PacketTrafficClass TrafficClass,
+    PacketCompletionStatus Status, PacketCompletionReason Reason,
+    long CreatedTick, long CompletedTick, int Bytes, int SuccessfulHops);
+
+/// <summary>
+/// Poll by passing back NextSequence. Gap means the consumer must resynchronize:
+/// at least one event was overwritten or the cursor belongs to a newer stream.
+/// </summary>
+public sealed record PacketReceiptPage(
+    Guid StreamId, long OldestSequence, long LatestSequence, long NextSequence,
+    bool Gap, PacketDeliveryReceipt[] Receipts);
+
 public sealed record PacketTransportOptions(
     int Capacity = 2048,
     int MaxAgeTicks = 900,
@@ -39,7 +74,8 @@ public sealed record PacketTransportOptions(
     int InteractiveAirtimeReservePercent = 25,
     int BackgroundCongestionHighPercent = 0,
     int BackgroundCongestionLowPercent = 60,
-    int InteractiveLatencyObjectiveTicks = 10)
+    int InteractiveLatencyObjectiveTicks = 10,
+    int ReceiptHistoryCapacity = 1024)
 {
     public void Validate()
     {
@@ -95,6 +131,8 @@ public sealed record PacketTransportOptions(
             throw new ArgumentException("Congestion guard requires interactive packet priorities.");
         if (InteractiveLatencyObjectiveTicks is < 1 or > 1_000_000)
             throw new ArgumentOutOfRangeException(nameof(InteractiveLatencyObjectiveTicks));
+        if (ReceiptHistoryCapacity is < 0 or > 65_536)
+            throw new ArgumentOutOfRangeException(nameof(ReceiptHistoryCapacity));
     }
 }
 
@@ -192,6 +230,8 @@ public sealed class RadioPacketTransport
         public int Index;
         public readonly int Bytes = size;
         public readonly long CreatedTick = tick;
+        public string? RequestId;
+        public long ExpiresAtTick;
         public int Reroutes;
         public long NextRetryTick;
         public int SuccessfulHops;
@@ -207,6 +247,9 @@ public sealed class RadioPacketTransport
     private readonly SharedMediumNetwork _network;
     private readonly PacketTransportOptions _settings;
     private readonly object _gate = new();
+    private readonly Guid _receiptStreamId = Guid.NewGuid();
+    private readonly Queue<PacketDeliveryReceipt> _receipts = new();
+    private long _receiptSequence;
     // The legacy FIFO is preserved for controlled G/H comparisons.
     private enum PacketWaitState : byte { None, Ready, Delayed, Rerouting, CapacityBlocked }
     private readonly Queue<PendingPacket> _queue = new();
@@ -281,6 +324,51 @@ public sealed class RadioPacketTransport
     }
 
     public PacketTransportOptions Options => _settings;
+    public Guid ReceiptStreamId => _receiptStreamId;
+
+    /// <summary>
+    /// Bounded, non-destructive receipt polling. Events are a best-effort
+    /// replay window, not an unbounded durable message broker. Consumers MUST
+    /// check both StreamId and Gap. A missing receipt cannot imply success.
+    /// </summary>
+    public PacketReceiptPage CaptureReceipts(long afterSequence = 0, int limit = 128)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(afterSequence);
+        if (limit is < 1 or > 256)
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        lock (_gate)
+        {
+            long oldest = _receipts.Count == 0
+                ? _receiptSequence + 1 : _receipts.Peek().Sequence;
+            bool gap = afterSequence < oldest - 1 || afterSequence > _receiptSequence;
+            long cursor = gap ? oldest - 1 : afterSequence;
+            var events = _receipts.Where(item => item.Sequence > cursor)
+                .Take(limit).ToArray();
+            long next = events.Length > 0 ? events[^1].Sequence : Math.Min(cursor, _receiptSequence);
+            return new PacketReceiptPage(_receiptStreamId, oldest, _receiptSequence,
+                next, gap, events);
+        }
+    }
+
+    private static void ValidateRequestId(string requestId)
+    {
+        if (string.IsNullOrWhiteSpace(requestId) || requestId.Length > 128)
+            throw new ArgumentException("Request ID must be 1..128 non-whitespace characters.",
+                nameof(requestId));
+    }
+
+    private void RecordReceipt(PendingPacket packet, PacketCompletionStatus status,
+        PacketCompletionReason reason, long tick)
+    {
+        if (packet.RequestId is null) return;
+        long sequence = ++_receiptSequence;
+        if (_settings.ReceiptHistoryCapacity == 0) return;
+        if (_receipts.Count == _settings.ReceiptHistoryCapacity) _receipts.Dequeue();
+        _receipts.Enqueue(new PacketDeliveryReceipt(sequence, packet.Id,
+            packet.RequestId, packet.TrafficClass, status, reason,
+            packet.CreatedTick, Math.Max(packet.CreatedTick, tick),
+            packet.Bytes, packet.SuccessfulHops));
+    }
     private int QueuedCount => _settings.EventDrivenPacketWaiting ? _active.Count : _queue.Count;
     private int ReadyQueueCount => _ready.Count + _readyInteractive.Count;
     private int RerouteQueueCount => _rerouteQueue.Count + _rerouteInteractiveQueue.Count;
@@ -548,7 +636,7 @@ public sealed class RadioPacketTransport
             if (!packet.Active) continue;
             if (packet.WaitState is PacketWaitState.Delayed or PacketWaitState.Rerouting or PacketWaitState.CapacityBlocked)
                 _expiredWhileParked++;
-            Expire(packet);
+            Expire(packet, tick);
         }
         while (_delayed.TryPeek(out _, out var due) && due.Tick <= tick)
         {
@@ -570,7 +658,7 @@ public sealed class RadioPacketTransport
         if (_expirations.Count <= Math.Max(4096, _active.Count * 4)) return;
         _expirations.Clear();
         foreach (var packet in _active.Values)
-            _expirations.Enqueue(packet, checked(packet.CreatedTick + _settings.MaxAgeTicks));
+            _expirations.Enqueue(packet, packet.ExpiresAtTick);
     }
 
     public PacketTransportCounters Capture()
@@ -730,7 +818,7 @@ public sealed class RadioPacketTransport
     {
         ValidateEnqueue(route, bytes, tick);
         ValidateTrafficClass(trafficClass);
-        lock (_gate) return EnqueueCore(route, bytes, tick, trafficClass);
+        lock (_gate) return EnqueueCore(route, bytes, tick, trafficClass).Accepted;
     }
 
     /// <summary>Consumes the admission lease, successful route or not.
@@ -747,8 +835,70 @@ public sealed class RadioPacketTransport
             _reservedAdmissions--;
             if (lease.TrafficClass == PacketTrafficClass.Background) _reservedBackgroundAdmissions--;
             // The lease was granted before congestion changed: honor it.
-            return EnqueueCore(route, bytes, tick, lease.TrafficClass, hasLease: true);
+            return EnqueueCore(route, bytes, tick, lease.TrafficClass, hasLease: true).Accepted;
         }
+    }
+
+    /// <summary>
+    /// Enqueue one tracked operation. Acceptance is not completion; poll
+    /// CaptureReceipts for a terminal event using the returned packet ID.
+    /// Rejected submissions receive an immediate reason and emit no receipt.
+    /// </summary>
+    public PacketSubmissionResult Submit(string requestId, RouteResult route, int bytes,
+        long tick, PacketTrafficClass trafficClass = PacketTrafficClass.Background,
+        int? timeoutTicks = null)
+    {
+        ValidateRequestId(requestId);
+        ValidateEnqueue(route, bytes, tick);
+        ValidateTrafficClass(trafficClass);
+        ValidateTimeout(timeoutTicks);
+        lock (_gate)
+            return EnqueueCore(route, bytes, tick, trafficClass,
+                requestId: requestId, timeoutTicks: timeoutTicks);
+    }
+
+    /// <summary>
+    /// Consumption of an already granted lease is guaranteed to bypass
+    /// subsequently activated congestion admission, but not an invalid route.
+    /// </summary>
+    public PacketSubmissionResult SubmitReserved(string requestId, RouteResult route,
+        int bytes, long tick, PacketAdmissionLease lease, int? timeoutTicks = null)
+    {
+        ValidateRequestId(requestId);
+        ValidateEnqueue(route, bytes, tick);
+        ValidateTimeout(timeoutTicks);
+        ArgumentNullException.ThrowIfNull(lease);
+        lock (_gate)
+        {
+            if (!lease.Consume(this))
+                throw new InvalidOperationException("Packet admission lease is already consumed or invalid.");
+            _reservedAdmissions--;
+            if (lease.TrafficClass == PacketTrafficClass.Background) _reservedBackgroundAdmissions--;
+            return EnqueueCore(route, bytes, tick, lease.TrafficClass,
+                hasLease: true, requestId: requestId, timeoutTicks: timeoutTicks);
+        }
+    }
+
+    /// <summary>Explicitly cancel a live tracked or untracked packet.</summary>
+    public bool TryCancel(long packetId)
+    {
+        if (packetId < 1) return false;
+        lock (_gate)
+        {
+            if (!_active.TryGetValue(packetId, out var packet)) return false;
+            RecordReceipt(packet, PacketCompletionStatus.Cancelled,
+                PacketCompletionReason.CancelledByCaller,
+                _lastTick >= 0 ? _lastTick : packet.CreatedTick);
+            Retire(packet);
+            return true;
+        }
+    }
+
+    private void ValidateTimeout(int? timeoutTicks)
+    {
+        if (timeoutTicks.HasValue &&
+            (timeoutTicks.Value < 1 || timeoutTicks.Value > _settings.MaxAgeTicks))
+            throw new ArgumentOutOfRangeException(nameof(timeoutTicks));
     }
 
     private static void ValidateEnqueue(RouteResult route, int bytes, long tick)
@@ -759,30 +909,38 @@ public sealed class RadioPacketTransport
         ArgumentOutOfRangeException.ThrowIfNegative(tick);
     }
 
-    private bool EnqueueCore(RouteResult route, int bytes, long tick,
-        PacketTrafficClass trafficClass, bool hasLease = false)
+    private PacketSubmissionResult EnqueueCore(RouteResult route, int bytes, long tick,
+        PacketTrafficClass trafficClass, bool hasLease = false, string? requestId = null,
+        int? timeoutTicks = null)
     {
         if (!route.Found || route.Path is null || route.Path.Count == 0 ||
             (_lastTick >= 0 && tick < _lastTick))
         {
             _rejected++;
             _invalidRejects++;
-            return false;
+            return new PacketSubmissionResult(false, 0, requestId ?? "",
+                PacketSubmissionRejection.InvalidRoute);
         }
         if (IsAdmissionFull(trafficClass))
         {
             _rejected++;
             _fullRejects++;
-            return false;
+            return new PacketSubmissionResult(false, 0, requestId ?? "",
+                PacketSubmissionRejection.QueueFull);
         }
         if (!hasLease && trafficClass == PacketTrafficClass.Background && BackgroundCongested())
         {
             _rejected++;
             _backgroundCongestionRejects++;
-            return false;
+            return new PacketSubmissionResult(false, 0, requestId ?? "",
+                PacketSubmissionRejection.BackgroundCongestion);
         }
         var detached = route with { Path = route.Path.ToArray() };
-        var packet = new PendingPacket(detached, bytes, tick, ++_nextPacketId, trafficClass);
+        var packet = new PendingPacket(detached, bytes, tick, ++_nextPacketId, trafficClass)
+        {
+            RequestId = requestId,
+            ExpiresAtTick = checked(tick + (timeoutTicks ?? _settings.MaxAgeTicks))
+        };
         if (trafficClass == PacketTrafficClass.Interactive)
         {
             _interactiveEnqueued++;
@@ -792,10 +950,11 @@ public sealed class RadioPacketTransport
         _active.Add(packet.Id, packet);
         Ready(packet);
         if (_settings.EventDrivenPacketWaiting)
-            _expirations.Enqueue(packet, checked(tick + _settings.MaxAgeTicks));
+            _expirations.Enqueue(packet, packet.ExpiresAtTick);
         _enqueued++;
         _peak = Math.Max(_peak, QueuedCount);
-        return true;
+        return new PacketSubmissionResult(true, packet.Id, requestId ?? "",
+            PacketSubmissionRejection.None);
     }
 
     /// <summary>
@@ -927,9 +1086,9 @@ public sealed class RadioPacketTransport
                     packet.WaitState = PacketWaitState.None;
                 }
                 else packet = _queue.Dequeue();
-                if (tick - packet.CreatedTick >= _settings.MaxAgeTicks)
+                if (tick >= packet.ExpiresAtTick)
                 {
-                    Expire(packet);
+                    Expire(packet, tick);
                     continue;
                 }
                 if (packet.Index >= packet.Path.Count - 1)
@@ -1022,7 +1181,7 @@ public sealed class RadioPacketTransport
                         }
                         if (packet.Reroutes >= _settings.MaxReroutes)
                         {
-                            Drop(packet);
+                            Drop(packet, PacketCompletionReason.LinkFailure, tick);
                             _linkFailureDrops++;
                             break;
                         }
@@ -1046,7 +1205,7 @@ public sealed class RadioPacketTransport
 
                     case RadioHopOutcome.PacketTooLarge:
                     default:
-                        Drop(packet);
+                        Drop(packet, PacketCompletionReason.PacketTooLarge, tick);
                         _oversizeDrops++;
                         break;
                 }
@@ -1242,16 +1401,19 @@ public sealed class RadioPacketTransport
                 (int)(_backgroundRerouteWaitSamples++ % SampleWindow)] = age;
     }
 
-    private void Expire(PendingPacket packet)
+    private void Expire(PendingPacket packet, long tick)
     {
+        RecordReceipt(packet, PacketCompletionStatus.Expired,
+            PacketCompletionReason.TimeToLive, tick);
         _expired++;
         if (packet.TrafficClass == PacketTrafficClass.Interactive) _interactiveExpired++;
         else _backgroundExpired++;
         Retire(packet);
     }
 
-    private void Drop(PendingPacket packet)
+    private void Drop(PendingPacket packet, PacketCompletionReason reason, long tick)
     {
+        RecordReceipt(packet, PacketCompletionStatus.Dropped, reason, tick);
         _dropped++;
         if (packet.TrafficClass == PacketTrafficClass.Interactive) _interactiveDropped++;
         else _backgroundDropped++;
@@ -1273,6 +1435,8 @@ public sealed class RadioPacketTransport
 
     private void Delivered(PendingPacket packet, long tick)
     {
+        RecordReceipt(packet, PacketCompletionStatus.Delivered,
+            PacketCompletionReason.Delivered, tick);
         _delivered++;
         _bytesDelivered += packet.Bytes;
         var age = Math.Max(0, tick - packet.CreatedTick);
