@@ -762,6 +762,13 @@ public sealed class RadioPacketTransport
             int visitLimit = _settings.AdaptivePacketVisits
                 ? _currentVisitLimit : _settings.MaxAdvancesPerTick;
             if (_settings.EventDrivenPacketWaiting) WakeTimers(tick);
+            // Only the entries present at tick start are eligible. During
+            // processing a hop/ChannelBusy can Ready() the same packet again;
+            // do not consume those new entries until the NEXT simulation tick.
+            // The weighted two-lane scheduler must never advance one packet
+            // twice while leaving other original entries unvisited.
+            int backgroundReadyAtStart = _settings.EventDrivenPacketWaiting ? _ready.Count : 0;
+            int interactiveReadyAtStart = _settings.EventDrivenPacketWaiting ? _readyInteractive.Count : 0;
             int count = Math.Min(_settings.EventDrivenPacketWaiting ? ReadyQueueCount : _queue.Count, visitLimit);
             int forwarded = 0;
             int visited = 0;
@@ -780,10 +787,13 @@ public sealed class RadioPacketTransport
                     // Weighted 3-to-1 service with guaranteed background
                     // visits as long as both lanes remain ready.
                     bool pickInteractive = _settings.PrioritizeInteractiveTraffic &&
-                        _readyInteractive.Count > 0 &&
-                        (_ready.Count == 0 ||
-                         _priorityCursor++ % (_settings.InteractiveVisitWeight + 1) <
+                        interactiveReadyAtStart > 0 &&
+                        (backgroundReadyAtStart == 0 ||
+                         _priorityCursor % (_settings.InteractiveVisitWeight + 1) <
                              _settings.InteractiveVisitWeight);
+                    if (pickInteractive) interactiveReadyAtStart--;
+                    else backgroundReadyAtStart--;
+                    if (_settings.PrioritizeInteractiveTraffic) _priorityCursor++;
                     var entry = pickInteractive
                         ? _readyInteractive.Dequeue() : _ready.Dequeue();
                     packet = entry.Packet;
