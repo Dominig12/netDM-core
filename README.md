@@ -1040,6 +1040,32 @@ changing the default.
 
 ## M18 — Event-driven packet waiting (opt-in)
 
+### M18.3 — process-wide independent heartbeat and ThreadPool observations
+
+During each benchmark scenario, a low-frequency independent background
+OS thread samples monotonic wake-up lateness every ~100 ms and queues
+at most one ThreadPool dispatch probe every ~200 ms. It records process
+CPU cores used, current ThreadPool worker count and pending item count,
+GC pause duration relative to the scenario start, and bounded recent
+events (up to 64) when heartbeat or ThreadPool dispatch delay is >=250 ms.
+All timestamps are UTC and should be correlated with the packet runner
+lag/skip counters and sample interval gaps. There is no socket, file IO,
+unbounded queue or full-tracing subscription in the hot path.
+
+`metrics.benchmark.processStalls` contains the snapshot including
+`events`. Each history entry includes heartbeat lateness, maxima,
+ThreadPool counts/dispatch delay, sampled CPU cores, GC pause and actual
+sample interval. A maximum heartbeat gap means the monitor OS thread
+did not execute for that interval; it is **not** proof of a GC pause or
+of an entire-process stop. Conversely a stalled ThreadPool probe with
+regular heartbeats is evidence of a worker pool scheduling problem.
+GC totals are process-wide and cannot prove the pause happened inside
+a particular span; corroborate with EventPipe or OS tracing.
+
+H and I transport algorithms are unchanged. Re-run both on the same
+host and report the original ZIP files; no baseline gain is claimed
+from this observability-only revision.
+
 ### M18.2 — stall attribution counters
 
 The packet runner now exports `maxExecutionMilliseconds` (maximum

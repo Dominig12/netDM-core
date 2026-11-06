@@ -284,6 +284,16 @@ for number,key in enumerate(scenarios,1):
     assert bench["tickRunner"] is not None,bench
     assert bench["tickRunner"]["executedTicks"]>0,bench
     assert bench["tickRunner"]["failedTicks"]==0,bench
+    assert bench["processStalls"] is not None,bench
+    process=bench["processStalls"]
+    assert process["heartbeats"]>0,process
+    assert process["maxHeartbeatLatenessMilliseconds"]>=0,process
+    assert process["maxThreadPoolDispatchMilliseconds"]>=0,process
+    assert process["threadPoolProbes"]>=0,process
+    assert process["threadPoolPendingWorkItems"]>=0,process
+    assert len(process["events"])<=64,process
+    assert all("processHeartbeatStalls" in row for row in report["history"]),report
+    assert all(row["observedSampleIntervalMilliseconds"]>0 for row in report["history"]),report
     assert bench["tickRunner"]["skippedIntervals"]>=0,bench
     assert bench["tickRunner"]["executionP95Milliseconds"]>=0,bench
     assert bench["packetTransport"] is not None,bench

@@ -85,7 +85,8 @@ public sealed record BenchmarkState(
     RadioStats? Radio, SharedMediumStatistics? SharedMedium, BenchmarkLoadStats Load,
     PacketTransportCounters? PacketTransport,
     WorkSchedulerCounters? RerouteScheduler,
-    PacketTickRunnerCounters? TickRunner);
+    PacketTickRunnerCounters? TickRunner,
+    ProcessStallCounters? ProcessStalls);
 
 public sealed record BenchmarkSample(
     DateTimeOffset At, double ElapsedSeconds, double ActualRoutesPerSecond,
@@ -130,7 +131,12 @@ public sealed record BenchmarkSample(
     double PacketPreRouteRejectedPerSecond, int PacketReservedAdmissions,
     int PacketVisitLimit, double PacketVisitLimitIncreasesPerSecond,
     double PacketVisitLimitDecreasesPerSecond,
-    double PacketVisitBudgetStopsPerSecond);
+    double PacketVisitBudgetStopsPerSecond,
+    double ProcessHeartbeatLatenessMilliseconds, double ProcessMaxHeartbeatLatenessMilliseconds,
+    long ProcessHeartbeatStalls, double ProcessMaxThreadPoolDispatchMilliseconds,
+    long ProcessThreadPoolStalls, int ProcessThreadPoolThreads,
+    long ProcessThreadPoolPendingWorkItems, double ProcessCpuCoresUsed,
+    double ProcessGcPauseMillisecondsSinceStart, double ObservedSampleIntervalMilliseconds);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -157,6 +163,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     private RadioPacketTransport? _packets;
     private PriorityWorkScheduler? _rerouteScheduler;
     private PacketTickRunner? _tickRunner;
+    private ProcessStallMonitor? _processStallMonitor;
 
     public PacketTransportCounters? PacketStatistics
     {
@@ -175,7 +182,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             return new BenchmarkState(_status, _options, _started, _elapsed, _width, _height, _error,
                 _radioEngine?.Stats(), _sharedMedium?.Stats(), LoadStats(),
                 _packets?.Capture(), _rerouteScheduler?.Capture(),
-                _tickRunner?.Capture());
+                _tickRunner?.Capture(), _processStallMonitor?.Capture());
     }
 
     public BenchmarkSample[] History() => _history.ToArray();
@@ -235,6 +242,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             _packets = null;
             _rerouteScheduler = null;
             _tickRunner = null;
+            _processStallMonitor = null;
             while (_history.TryDequeue(out _)) { }
             _task = Task.Run(() => RunAsync(options, _cts.Token));
             return true;
@@ -256,6 +264,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     private async Task RunAsync(BenchmarkOptions options, CancellationToken ct)
     {
         var clock = new Stopwatch();
+        ProcessStallMonitor? monitor = null;
         try
         {
             runtime.Reset();
@@ -363,6 +372,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 _status = "running";
             }
 
+            monitor = new ProcessStallMonitor();
+            monitor.Start();
+            lock (_gate) _processStallMonitor = monitor;
             clock.Start();
             var workerCount = options.RoutesPerSecond == 0 ? 0 :
                 Math.Min(4, Math.Max(1, Environment.ProcessorCount / 2));
@@ -398,6 +410,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                 var mediumSnapshot = medium?.Stats();
                 var packetSnapshot = packets?.Capture();
                 var tickRunnerSnapshot = tickRunner?.Capture();
+                var processStallSnapshot = monitor.Capture();
                 var rerouteCpuSnapshot = rerouteScheduler?.Capture();
                 var interval = Math.Max(0.001, seconds - previousTime);
                 var schedulerSnapshot = scheduler.Capture();
@@ -508,7 +521,17 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     ((packetSnapshot?.AdaptiveLimitDecreases ?? 0) -
                         (previousPackets?.AdaptiveLimitDecreases ?? 0)) / interval,
                     ((packetSnapshot?.VisitBudgetStops ?? 0) -
-                        (previousPackets?.VisitBudgetStops ?? 0)) / interval);
+                        (previousPackets?.VisitBudgetStops ?? 0)) / interval,
+                    processStallSnapshot.LastHeartbeatLatenessMilliseconds,
+                    processStallSnapshot.MaxHeartbeatLatenessMilliseconds,
+                    processStallSnapshot.HeartbeatDelaysOver250Milliseconds,
+                    processStallSnapshot.MaxThreadPoolDispatchMilliseconds,
+                    processStallSnapshot.ThreadPoolDelaysOver250Milliseconds,
+                    processStallSnapshot.ThreadPoolThreads,
+                    processStallSnapshot.ThreadPoolPendingWorkItems,
+                    processStallSnapshot.ProcessCpuCoresUsed,
+                    processStallSnapshot.GcPauseMillisecondsSinceStart,
+                    interval * 1000.0);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;
@@ -542,6 +565,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
         }
         finally
         {
+            monitor?.Dispose();
             lock (_gate) _elapsed = Math.Max(_elapsed, clock.Elapsed.TotalSeconds);
         }
     }
