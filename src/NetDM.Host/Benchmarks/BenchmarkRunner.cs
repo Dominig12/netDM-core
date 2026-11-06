@@ -31,7 +31,15 @@ public sealed record BenchmarkOptions(
     bool AdaptivePacketVisits = false,
     bool PacketPreRouteBackpressure = false,
     bool EventDrivenPacketWaiting = false,
-    bool EventDrivenRerouteCapacity = false)
+    bool EventDrivenRerouteCapacity = false,
+    string TrafficProfile = "uniform",
+    bool PrioritizeInteractiveTraffic = false,
+    int InteractiveReservedSlots = 0,
+    int InteractiveTrafficPercent = 20,
+    int LocalTrafficPercent = 85,
+    int BurstPeriodSeconds = 20,
+    int BurstDurationSeconds = 2,
+    int BurstMultiplier = 3)
 {
     public void Validate()
     {
@@ -73,11 +81,29 @@ public sealed record BenchmarkOptions(
             throw new ArgumentException("RadioModel must be pairwise or shared.", nameof(RadioModel));
         if (MediumBytesPerTick is < 1 or > 1_000_000)
             throw new ArgumentOutOfRangeException(nameof(MediumBytesPerTick));
+        if (TrafficProfile is not ("uniform" or "ss13-mixed"))
+            throw new ArgumentException("Unknown traffic profile.", nameof(TrafficProfile));
+        if (TrafficProfile == "ss13-mixed" && !PacketTransportEnabled)
+            throw new ArgumentException("SS13 mixed traffic requires packet transport.", nameof(TrafficProfile));
+        if (InteractiveTrafficPercent is < 0 or > 100 ||
+            LocalTrafficPercent is < 0 or > 100)
+            throw new ArgumentOutOfRangeException(nameof(InteractiveTrafficPercent));
+        if (BurstPeriodSeconds is < 2 or > 3600 ||
+            BurstDurationSeconds < 1 || BurstDurationSeconds >= BurstPeriodSeconds ||
+            BurstMultiplier is < 1 or > 20)
+            throw new ArgumentOutOfRangeException(nameof(BurstPeriodSeconds));
+        new PacketTransportOptions(Capacity: PacketQueueCapacity,
+            EventDrivenPacketWaiting: EventDrivenPacketWaiting,
+            PrioritizeInteractiveTraffic: PrioritizeInteractiveTraffic,
+            EventDrivenRerouteCapacity: EventDrivenRerouteCapacity,
+            InteractiveReservedSlots: InteractiveReservedSlots).Validate();
     }
 }
 
 public sealed record BenchmarkLoadStats(long Offered, long Admitted, long Rejected,
-    long TransportBackpressured);
+    long TransportBackpressured, long InteractiveOffered, long BackgroundOffered,
+    long InteractiveAdmitted, long BackgroundAdmitted,
+    long InteractiveRejected, long BackgroundRejected);
 
 public sealed record BenchmarkState(
     string Status, BenchmarkOptions? Options, DateTimeOffset? StartedUtc,
@@ -166,6 +192,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
     private double _elapsed;
     private long _offeredRoutes, _admittedRoutes, _rejectedRoutes;
     private long _transportBackpressured;
+    private long _interactiveOffered, _backgroundOffered;
+    private long _interactiveAdmitted, _backgroundAdmitted;
+    private long _interactiveRejected, _backgroundRejected;
     private DynamicRadioNetwork? _radioEngine;
     private SharedMediumNetwork? _sharedMedium;
     private RadioPacketTransport? _packets;
@@ -199,7 +228,13 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
         Interlocked.Read(ref _offeredRoutes),
         Interlocked.Read(ref _admittedRoutes),
         Interlocked.Read(ref _rejectedRoutes),
-        Interlocked.Read(ref _transportBackpressured));
+        Interlocked.Read(ref _transportBackpressured),
+        Interlocked.Read(ref _interactiveOffered),
+        Interlocked.Read(ref _backgroundOffered),
+        Interlocked.Read(ref _interactiveAdmitted),
+        Interlocked.Read(ref _backgroundAdmitted),
+        Interlocked.Read(ref _interactiveRejected),
+        Interlocked.Read(ref _backgroundRejected));
 
     /// <summary>
     /// Reserve the entire benchmark lifecycle for an automated experiment suite.
@@ -243,6 +278,12 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             Interlocked.Exchange(ref _admittedRoutes, 0);
             Interlocked.Exchange(ref _rejectedRoutes, 0);
             Interlocked.Exchange(ref _transportBackpressured, 0);
+            Interlocked.Exchange(ref _interactiveOffered, 0);
+            Interlocked.Exchange(ref _backgroundOffered, 0);
+            Interlocked.Exchange(ref _interactiveAdmitted, 0);
+            Interlocked.Exchange(ref _backgroundAdmitted, 0);
+            Interlocked.Exchange(ref _interactiveRejected, 0);
+            Interlocked.Exchange(ref _backgroundRejected, 0);
             _error = null;
             _width = _height = 0;
             _radioEngine = null;
@@ -355,7 +396,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     RerouteQueueRetryDelayTicks: options.PacketRerouteQueueRetryDelayTicks,
                     AdaptivePacketVisits: options.AdaptivePacketVisits,
                      EventDrivenPacketWaiting: options.EventDrivenPacketWaiting,
-                     EventDrivenRerouteCapacity: options.EventDrivenRerouteCapacity))
+                     EventDrivenRerouteCapacity: options.EventDrivenRerouteCapacity,
+                     PrioritizeInteractiveTraffic: options.PrioritizeInteractiveTraffic,
+                     InteractiveReservedSlots: options.InteractiveReservedSlots))
                 : null;
             // Reroute computation is never executed while holding the packet
             // queue lock. A separate bounded CPU executor prevents it from
@@ -606,6 +649,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
         var clock = Stopwatch.StartNew();
         var rate = (double)options.RoutesPerSecond / workers;
         long offered = 0;
+        double plannedMixedOffers = 0;
+        double previousScheduleSeconds = 0;
+        int columns = (int)Math.Ceiling(Math.Sqrt(options.Nodes));
         // Keep the lease until even a scheduler-cancelled (never executed)
         // task is observed. Work that ran consumes its lease in its finally.
         var pending = new List<(Task<RouteResult> Task, PacketAdmissionLease? Lease)>(384);
@@ -614,27 +660,65 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
-                var target = (long)Math.Floor(clock.Elapsed.TotalSeconds * rate);
+                double elapsed = clock.Elapsed.TotalSeconds;
+                long target;
+                if (options.TrafficProfile == "ss13-mixed")
+                {
+                    double midpoint = (elapsed + previousScheduleSeconds) / 2;
+                    double factor = midpoint % options.BurstPeriodSeconds <
+                        options.BurstDurationSeconds ? options.BurstMultiplier : 1;
+                    plannedMixedOffers += (elapsed - previousScheduleSeconds) * rate * factor;
+                    previousScheduleSeconds = elapsed;
+                    target = (long)Math.Floor(plannedMixedOffers);
+                }
+                else target = (long)Math.Floor(elapsed * rate);
                 var count = (int)Math.Min(512L, Math.Max(0L, target - offered));
                 for (var i = 0; i < count; i++)
                 {
                     ct.ThrowIfCancellationRequested();
                     offered++;
                     Interlocked.Increment(ref _offeredRoutes);
-                    var a = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
-                    var b = new NodeId((ulong)(rng.Next(options.Nodes) + 1));
-                    var payload = rng.Next(128, 1025);
+                    var trafficClass = options.TrafficProfile == "ss13-mixed" &&
+                        rng.Next(100) < options.InteractiveTrafficPercent
+                            ? PacketTrafficClass.Interactive : PacketTrafficClass.Background;
+                    if (trafficClass == PacketTrafficClass.Interactive)
+                        Interlocked.Increment(ref _interactiveOffered);
+                    else Interlocked.Increment(ref _backgroundOffered);
+                    int sourceIndex = rng.Next(options.Nodes);
+                    int destinationIndex;
+                    if (options.TrafficProfile == "ss13-mixed" &&
+                        rng.Next(100) < options.LocalTrafficPercent)
+                    {
+                        int sourceCol = sourceIndex % columns;
+                        int sourceRow = sourceIndex / columns;
+                        int destCol = Math.Clamp(sourceCol + rng.Next(-3, 4), 0, columns - 1);
+                        int destRow = Math.Clamp(sourceRow + rng.Next(-3, 4), 0,
+                            (options.Nodes - 1) / columns);
+                        destinationIndex = Math.Min(options.Nodes - 1, destRow * columns + destCol);
+                    }
+                    else destinationIndex = rng.Next(options.Nodes);
+                    if (destinationIndex == sourceIndex)
+                        destinationIndex = (sourceIndex + 1) % options.Nodes;
+                    var a = new NodeId((ulong)(sourceIndex + 1));
+                    var b = new NodeId((ulong)(destinationIndex + 1));
+                    var payload = options.TrafficProfile == "ss13-mixed"
+                        ? trafficClass == PacketTrafficClass.Interactive
+                            ? rng.Next(64, 257) : rng.Next(512, 4097)
+                        : rng.Next(128, 1025);
 
                     PacketAdmissionLease? lease = null;
                     if (packets is not null && options.PacketPreRouteBackpressure)
                     {
-                        lease = packets.TryReserveAdmission();
+                        lease = packets.TryReserveAdmission(trafficClass);
                         if (lease is null)
                         {
                             // This is offered load rejected by TRANSPORT, not
                             // a route search that was never admitted.
                             Interlocked.Increment(ref _transportBackpressured);
                             Interlocked.Increment(ref _rejectedRoutes);
+                            if (trafficClass == PacketTrafficClass.Interactive)
+                                Interlocked.Increment(ref _interactiveRejected);
+                            else Interlocked.Increment(ref _backgroundRejected);
                             continue;
                         }
                     }
@@ -655,7 +739,7 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                                         if (lease is not null)
                                             packets.EnqueueReserved(route, payload, tick, lease);
                                         else
-                                            packets.Enqueue(route, payload, tick);
+                                            packets.Enqueue(route, payload, tick, trafficClass);
                                     }
                                     else
                                         medium.TryTransmit(route, payload, tick);
@@ -667,15 +751,23 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                                 // No-route, cancellation, error: free the slot.
                                 lease?.Dispose();
                             }
-                        }, WorkPriority.Background, ct, out Task<RouteResult>? task))
+                        }, trafficClass == PacketTrafficClass.Interactive
+                            ? WorkPriority.Interactive : WorkPriority.Background,
+                            ct, out Task<RouteResult>? task))
                     {
                         Interlocked.Increment(ref _admittedRoutes);
+                        if (trafficClass == PacketTrafficClass.Interactive)
+                            Interlocked.Increment(ref _interactiveAdmitted);
+                        else Interlocked.Increment(ref _backgroundAdmitted);
                         pending.Add((task!, lease));
                     }
                     else
                     {
                         lease?.Dispose();
                         Interlocked.Increment(ref _rejectedRoutes);
+                        if (trafficClass == PacketTrafficClass.Interactive)
+                            Interlocked.Increment(ref _interactiveRejected);
+                        else Interlocked.Increment(ref _backgroundRejected);
                     }
                 }
                 for (var i = pending.Count - 1; i >= 0; i--)
