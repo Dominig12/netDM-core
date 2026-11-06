@@ -23,6 +23,8 @@ builder.Services.AddSingleton(_ => new PriorityWorkScheduler(new WorkSchedulerOp
 builder.Services.AddSingleton<BenchmarkRunner>();
 builder.Services.AddSingleton<ThreeScenarioBenchmarkSuite>();
 builder.Services.AddSingleton<RoutingComparisonRunner>();
+builder.Services.AddSingleton<GameNetworkService>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<GameNetworkService>());
 builder.Services.AddHostedService<PipeHostedService>();
 
 var app = builder.Build();
