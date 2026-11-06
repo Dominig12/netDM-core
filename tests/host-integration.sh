@@ -455,3 +455,38 @@ grep -q 'D · Dense A\*' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 grep -q 'ADAPTIVE · Increase visits while CPU budget permits' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 grep -q 'E · Dense + fixed 1024 visits' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 grep -q 'G · Dense + adaptive 4096 visits + pre-route backpressure' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+grep -q 'J · SS13 mixed load' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+grep -q 'K · SS13 mixed load' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
+
+# One low-rate mixed gameplay simulation: player commands and background jobs
+# must share transport yet appear in separate per-class telemetry.
+curl -fsS -X POST "$base/api/benchmark/start" -H 'Content-Type: application/json' \
+  -d '{"nodes":121,"routesPerSecond":70,"movesPerSecond":20,"linkChangesPerSecond":2,"durationSeconds":4,"seed":1337,"wirelessEnabled":true,"radioModel":"shared","sharedSearch":"astar-dense","packetTransportEnabled":true,"spatialReuseEnabled":true,"dedicatedPacketTicks":true,"packetQueueCapacity":128,"packetMaxAdvancesPerTick":128,"packetPreRouteBackpressure":true,"eventDrivenPacketWaiting":true,"eventDrivenRerouteCapacity":true,"prioritizeInteractiveTraffic":true,"interactiveReservedSlots":12,"trafficProfile":"ss13-mixed","interactiveTrafficPercent":30,"burstPeriodSeconds":10,"burstDurationSeconds":2,"burstMultiplier":2}' >/dev/null
+sleep 3
+curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-gameplay-metrics.json"
+curl -fsS "$base/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-gameplay-history.json"
+python3 - <<'PY'
+import json,os
+root=os.environ.get("RUNNER_TEMP","/tmp")
+with open(os.path.join(root,"netdm-gameplay-metrics.json"),encoding="utf-8") as f:m=json.load(f)
+with open(os.path.join(root,"netdm-gameplay-history.json"),encoding="utf-8") as f:h=json.load(f)
+b=m["benchmark"]
+assert b["options"]["trafficProfile"]=="ss13-mixed",b
+assert b["options"]["prioritizeInteractiveTraffic"] is True,b
+assert b["options"]["interactiveReservedSlots"]==12,b
+load=b["load"]
+assert load["interactiveOffered"]>0 and load["backgroundOffered"]>0,load
+assert load["offered"]==load["interactiveOffered"]+load["backgroundOffered"],load
+assert load["admitted"]==load["interactiveAdmitted"]+load["backgroundAdmitted"],load
+assert load["rejected"]==load["interactiveRejected"]+load["backgroundRejected"],load
+pack=b["packetTransport"]
+assert pack["queued"]==pack["interactiveQueued"]+pack["backgroundQueued"],pack
+assert pack["delivered"]==pack["interactiveDelivered"]+pack["backgroundDelivered"],pack
+assert pack["interactiveDeliveryAgeP95Ticks"]>=0,pack
+assert pack["backgroundDeliveryAgeP95Ticks"]>=0,pack
+assert pack["interactiveEnqueued"]>=pack["interactiveDelivered"],pack
+assert h and all("interactiveDeliveryP95Ticks" in row for row in h),h
+assert all(row["interactivePacketsQueued"]>=0 for row in h),h
+print("Mixed SS13 traffic / weighted priority / per-class telemetry: PASS")
+PY
+curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null

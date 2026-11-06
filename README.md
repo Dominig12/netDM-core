@@ -1038,6 +1038,56 @@ faster read-side searches; measure actual movement rate, original
 route throughput, p95, allocations, GC, and packet delivery before
 changing the default.
 
+## M19 — SS13 mixed traffic benchmark + opt-in interactive packet service
+
+**Experimental branch:** `feature/ss13-mixed-traffic`, stacked on
+M18. Does not change H/I preset defaults or the core workload when
+`trafficProfile="uniform"`.
+
+The prior 12k/1500 routes/s synthetic uniform workload saturates rerouting
+and cannot prove suitability for a gameplay network. The alternative
+`ss13-mixed` profile models **assumed** (not yet replayed from a live SS13
+round) traffic: 85% nearby endpoint pairs, 20% interactive requests with
+64–256B packets, background requests with 512–4096B packets, and cyclical
+bursts 3x baseline for 2 seconds every 20 seconds. All values are configurable
+on the backend. Baseline rate `routesPerSecond` is exclusive of bursts.
+Routes use the same bounded scheduler and shared-medium radio simulation
+as the uniform profile. Each scenario still tests static, moving, and
+moving+outages under the configured game-like load.
+
+With `prioritizeInteractiveTraffic=true` and event-driven waiting enabled:
+- The transport stores interactive and background ready packets in separate
+  bounded logical lanes, visiting 3 interactive per 1 background while
+  **both** are ready. The weight is configurable in `PacketTransportOptions`.
+  The background lane is not strictly FIFO behind all interactive traffic.
+- `interactiveReservedSlots` reserves a subset of the **total packet queue
+  capacity** against background producers, including pending pre-route
+  leases. Interactive requests can consume any free capacity; the reservation
+  is **not a second queue**. There is no packet eviction or unbounded growth.
+- `PacketTrafficClass` travels with the packet and its admission lease,
+  independent of a future player's digital entity or NPC controller. If
+  priorities are disabled, the original single ready queue is used.
+- Per-class offered/admitted/rejected route counters are reported in
+  `metrics.benchmark.load`. The packet transport exposes per-class delivered,
+  currently queued, pre-route rejections, and delivery-age P95. History tracks
+  both lanes' queue depths, delivery rates and P95 delivery ages.
+- This is a **first step** in prioritization: it does not yet prioritise
+  reroute *tickets* or per-hop radio airtime; end-to-end interactive latency
+  improvement is **not guaranteed** and requires real measurements.
+
+The Network Observatory exposes J/K three-scenario A/B presets:
+**J = gameplay traffic with transport priority off; K = identical gameplay
+traffic with transport priority on and 256 slots reserved**. Both use I's
+existing event-driven scheduler, Dense A*, 12k nodes, 120 base offered
+requests/s, 120 movements/s and 3 link changes/s, with optional bursts.
+Names of old G/H/I ZIP exports are unchanged; gameplay exports include a
+`-ss13-...` suffix identifying the tested traffic shape and priority mode.
+
+The random benchmark is a **synthetic game-inspired approximation**, not
+evidence about the actual SS13 round distribution or player SLOs. Next phase:
+realistic trace replay, interactive first-response semantics, P95/P99 objectives
+and per-class saturation/fairness experiments on target server hardware.
+
 ## M18 — Event-driven packet waiting (opt-in)
 
 ### M18.5 — GC snapshots and optional EventPipe trace
