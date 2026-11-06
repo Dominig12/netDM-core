@@ -347,7 +347,13 @@ public sealed partial class SharedMediumNetwork
                 physical, nextDevices, nextCells)
             {
                 HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0),
-                Dense = before.Dense?.WithChanges(physical, nextDevices, nextCells, affected)
+                // The dense ID table is immutable. Add/remove operations
+                // require a full membership rebuild, not WithChanges().
+                Dense = before.Dense is null ? null :
+                    changes.Any(c => c.Operation is TopologyOperation.AddNode or
+                        TopologyOperation.RemoveNode)
+                        ? DenseRadioIndex.Build(physical, nextDevices, nextCells)
+                        : before.Dense.WithChanges(physical, nextDevices, nextCells, affected)
             };
             _cache.Clear();
             Volatile.Write(ref _current, next);
