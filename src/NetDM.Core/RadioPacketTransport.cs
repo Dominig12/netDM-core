@@ -12,6 +12,9 @@ public enum RadioHopOutcome
     OldTick = 5
 }
 
+/// <summary>Service class independent of player/NPC identity.</summary>
+public enum PacketTrafficClass : byte { Background = 0, Interactive = 1 }
+
 public sealed record PacketTransportOptions(
     int Capacity = 2048,
     int MaxAgeTicks = 900,
@@ -25,7 +28,10 @@ public sealed record PacketTransportOptions(
     int RerouteQueueRetryDelayTicks = 8,
     bool AdaptivePacketVisits = false,
     bool EventDrivenPacketWaiting = false,
-    bool EventDrivenRerouteCapacity = false)
+    bool EventDrivenRerouteCapacity = false,
+    bool PrioritizeInteractiveTraffic = false,
+    int InteractiveReservedSlots = 0,
+    int InteractiveVisitWeight = 3)
 {
     public void Validate()
     {
@@ -52,6 +58,12 @@ public sealed record PacketTransportOptions(
             throw new ArgumentOutOfRangeException(nameof(RerouteQueueRetryDelayTicks));
         if (EventDrivenRerouteCapacity && !EventDrivenPacketWaiting)
             throw new ArgumentException("Capacity wakeups require event-driven packet waiting.");
+        if (PrioritizeInteractiveTraffic && !EventDrivenPacketWaiting)
+            throw new ArgumentException("Packet priorities require event-driven waiting.");
+        if (InteractiveReservedSlots < 0 || InteractiveReservedSlots >= Capacity)
+            throw new ArgumentOutOfRangeException(nameof(InteractiveReservedSlots));
+        if (InteractiveVisitWeight is < 1 or > 32)
+            throw new ArgumentOutOfRangeException(nameof(InteractiveVisitWeight));
     }
 }
 
@@ -86,7 +98,11 @@ public sealed record PacketTransportCounters(
     long TimerWakeups, long TopologyWakeups, long ExpiredWhileParked,
     int CapacityBlockedPackets, long CapacityWakeups,
     double MaxAdvanceMilliseconds, double MaxLockWaitMilliseconds,
-    long LockWaitOver100Milliseconds);
+    long LockWaitOver100Milliseconds,
+    long InteractiveEnqueued, long InteractiveDelivered, long BackgroundDelivered,
+    int InteractiveQueued, int BackgroundQueued,
+    long InteractivePreRouteRejections, long BackgroundPreRouteRejections,
+    double InteractiveDeliveryAgeP95Ticks, double BackgroundDeliveryAgeP95Ticks);
 
 /// <summary>
 /// Bounded round-robin store-and-forward. Advance never calculates a route:
@@ -100,12 +116,17 @@ public sealed class PacketAdmissionLease : IDisposable
 {
     private RadioPacketTransport? _owner;
 
-    internal PacketAdmissionLease(RadioPacketTransport owner) => _owner = owner;
+    internal PacketAdmissionLease(RadioPacketTransport owner, PacketTrafficClass trafficClass)
+    {
+        _owner = owner;
+        TrafficClass = trafficClass;
+    }
+    internal PacketTrafficClass TrafficClass { get; }
 
     internal bool Consume(RadioPacketTransport owner) =>
         ReferenceEquals(Interlocked.CompareExchange(ref _owner, null, owner), owner);
 
-    public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ReleaseReservedAdmission();
+    public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ReleaseReservedAdmission(TrafficClass);
 }
 
 public sealed class RadioPacketTransport
@@ -113,9 +134,10 @@ public sealed class RadioPacketTransport
     private const int SampleWindow = 1024;
     private const int MaxRememberedChangedNodes = 65_536;
 
-    private sealed class PendingPacket(RouteResult route, int size, long tick, long id)
+    private sealed class PendingPacket(RouteResult route, int size, long tick, long id, PacketTrafficClass trafficClass)
     {
         public long Id = id;
+        public readonly PacketTrafficClass TrafficClass = trafficClass;
         public IReadOnlyList<NodeId> Path = route.Path;
         public readonly NodeId Destination = route.Path[^1];
         public int Index;
@@ -140,6 +162,8 @@ public sealed class RadioPacketTransport
     private enum PacketWaitState : byte { None, Ready, Delayed, Rerouting, CapacityBlocked }
     private readonly Queue<PendingPacket> _queue = new();
     private readonly Queue<(PendingPacket Packet, int Version)> _ready = new();
+    private readonly Queue<(PendingPacket Packet, int Version)> _readyInteractive = new();
+    private long _priorityCursor;
     private readonly PriorityQueue<(PendingPacket Packet, int Version), (long Tick, long Sequence)> _delayed = new();
     private readonly PriorityQueue<PendingPacket, long> _expirations = new();
     private readonly Dictionary<NodeId, HashSet<long>> _waitingByNode = new();
@@ -156,6 +180,8 @@ public sealed class RadioPacketTransport
     private readonly Dictionary<NodeId, long> _localRevisions = new();
     private long _topologyChangeRevision;
     private readonly long[] _completedAges = new long[SampleWindow];
+    private readonly long[] _interactiveAges = new long[SampleWindow];
+    private readonly long[] _backgroundAges = new long[SampleWindow];
     private readonly long[] _firstHopAges = new long[SampleWindow];
     private readonly long[] _rerouteWaitAges = new long[SampleWindow];
     private readonly long[] _forwardUs = new long[SampleWindow];
@@ -174,6 +200,9 @@ public sealed class RadioPacketTransport
     private long _forwardingVisits, _visitBudgetStops, _adaptiveIncreases, _adaptiveDecreases;
     private long _preRouteRejects, _admissionReservations;
     private int _peak, _reservedAdmissions, _currentVisitLimit;
+    private int _reservedBackgroundAdmissions, _queuedInteractive, _queuedBackground;
+    private long _interactiveEnqueued, _interactiveDelivered, _backgroundDelivered;
+    private long _interactivePreRouteRejects, _backgroundPreRouteRejects;
 
     public RadioPacketTransport(SharedMediumNetwork network, PacketTransportOptions? settings = null)
     {
@@ -187,6 +216,17 @@ public sealed class RadioPacketTransport
 
     public PacketTransportOptions Options => _settings;
     private int QueuedCount => _settings.EventDrivenPacketWaiting ? _active.Count : _queue.Count;
+    private int ReadyQueueCount => _ready.Count + _readyInteractive.Count;
+    private static void ValidateTrafficClass(PacketTrafficClass trafficClass)
+    {
+        if (trafficClass is not (PacketTrafficClass.Background or PacketTrafficClass.Interactive))
+            throw new ArgumentOutOfRangeException(nameof(trafficClass));
+    }
+    private bool IsAdmissionFull(PacketTrafficClass trafficClass) =>
+        QueuedCount + _reservedAdmissions >= _settings.Capacity ||
+        (_settings.PrioritizeInteractiveTraffic && trafficClass == PacketTrafficClass.Background &&
+         _queuedBackground + _reservedBackgroundAdmissions >=
+             _settings.Capacity - _settings.InteractiveReservedSlots);
 
     // All scheduler transitions are protected by _gate.
     private void IndexWaiting(PendingPacket packet, bool add)
@@ -230,20 +270,30 @@ public sealed class RadioPacketTransport
         if (!packet.Active || packet.WaitState == PacketWaitState.Ready) return;
         LeaveWait(packet);
         packet.WaitState = PacketWaitState.Ready;
-        _ready.Enqueue((packet, packet.WaitVersion));
+        if (_settings.PrioritizeInteractiveTraffic &&
+            packet.TrafficClass == PacketTrafficClass.Interactive)
+            _readyInteractive.Enqueue((packet, packet.WaitVersion));
+        else
+            _ready.Enqueue((packet, packet.WaitVersion));
         CompactReadyQueue();
     }
 
     private void CompactReadyQueue()
     {
-        if (_ready.Count <= Math.Max(512, _active.Count * 4)) return;
-        int count = _ready.Count;
+        if (ReadyQueueCount <= Math.Max(512, _active.Count * 4)) return;
+        CompactReadyLane(_ready);
+        CompactReadyLane(_readyInteractive);
+    }
+
+    private static void CompactReadyLane(Queue<(PendingPacket Packet, int Version)> queue)
+    {
+        int count = queue.Count;
         for (int i = 0; i < count; i++)
         {
-            var entry = _ready.Dequeue();
+            var entry = queue.Dequeue();
             if (entry.Packet.Active && entry.Packet.WaitState == PacketWaitState.Ready &&
                 entry.Packet.WaitVersion == entry.Version)
-                _ready.Enqueue(entry);
+                queue.Enqueue(entry);
         }
     }
 
@@ -398,6 +448,14 @@ public sealed class RadioPacketTransport
             static double Percentile(long[] sorted, double factor) =>
                 sorted.Length == 0 ? 0 :
                 sorted[(int)Math.Ceiling((sorted.Length - 1) * factor)];
+            int interactiveLength = (int)Math.Min(_interactiveDelivered, SampleWindow);
+            int backgroundLength = (int)Math.Min(_backgroundDelivered, SampleWindow);
+            var interactiveAges = new long[interactiveLength];
+            var backgroundAges = new long[backgroundLength];
+            Array.Copy(_interactiveAges, interactiveAges, interactiveLength);
+            Array.Copy(_backgroundAges, backgroundAges, backgroundLength);
+            Array.Sort(interactiveAges);
+            Array.Sort(backgroundAges);
             return new PacketTransportCounters(
                 _enqueued, _rejected, _delivered, _dropped, _expired, _reroutes,
                 _busy, _radioHops, _cableHops, _bytesDelivered, QueuedCount,
@@ -421,7 +479,11 @@ public sealed class RadioPacketTransport
                 _delayedCount, _reroutingCount, _timerWakeups, _topologyWakeups,
                 _expiredWhileParked, _capacityBlockedCount, _capacityWakeups,
                 _maxAdvanceUs / 1000.0, _maxLockWaitUs / 1000.0,
-                _lockWaitOver100Ms);
+                _lockWaitOver100Ms,
+                _interactiveEnqueued, _interactiveDelivered, _backgroundDelivered,
+                _queuedInteractive, _queuedBackground,
+                _interactivePreRouteRejects, _backgroundPreRouteRejects,
+                Percentile(interactiveAges, .95), Percentile(backgroundAges, .95));
         }
     }
 
@@ -430,35 +492,44 @@ public sealed class RadioPacketTransport
     /// Includes all pending reservations when checking capacity. Without the
     /// lease, simply checking queue depth races between concurrent producers.
     /// </summary>
-    public PacketAdmissionLease? TryReserveAdmission()
+    public PacketAdmissionLease? TryReserveAdmission(
+        PacketTrafficClass trafficClass = PacketTrafficClass.Background)
     {
+        ValidateTrafficClass(trafficClass);
         lock (_gate)
         {
-            if (QueuedCount + _reservedAdmissions >= _settings.Capacity)
+            if (IsAdmissionFull(trafficClass))
             {
                 _preRouteRejects++;
+                if (trafficClass == PacketTrafficClass.Interactive) _interactivePreRouteRejects++;
+                else _backgroundPreRouteRejects++;
                 return null;
             }
             _reservedAdmissions++;
+            if (trafficClass == PacketTrafficClass.Background) _reservedBackgroundAdmissions++;
             _admissionReservations++;
-            return new PacketAdmissionLease(this);
+            return new PacketAdmissionLease(this, trafficClass);
         }
     }
 
-    internal void ReleaseReservedAdmission()
+    internal void ReleaseReservedAdmission(PacketTrafficClass trafficClass)
     {
         lock (_gate)
         {
-            if (_reservedAdmissions <= 0)
+            if (_reservedAdmissions <= 0 ||
+                (trafficClass == PacketTrafficClass.Background && _reservedBackgroundAdmissions <= 0))
                 throw new InvalidOperationException("Packet admission reservation underflow.");
             _reservedAdmissions--;
+            if (trafficClass == PacketTrafficClass.Background) _reservedBackgroundAdmissions--;
         }
     }
 
-    public bool Enqueue(RouteResult route, int bytes, long tick)
+    public bool Enqueue(RouteResult route, int bytes, long tick,
+        PacketTrafficClass trafficClass = PacketTrafficClass.Background)
     {
         ValidateEnqueue(route, bytes, tick);
-        lock (_gate) return EnqueueCore(route, bytes, tick);
+        ValidateTrafficClass(trafficClass);
+        lock (_gate) return EnqueueCore(route, bytes, tick, trafficClass);
     }
 
     /// <summary>Consumes the admission lease, successful route or not.
@@ -473,7 +544,8 @@ public sealed class RadioPacketTransport
             if (!lease.Consume(this))
                 throw new InvalidOperationException("Packet admission lease is already consumed or invalid.");
             _reservedAdmissions--;
-            return EnqueueCore(route, bytes, tick);
+            if (lease.TrafficClass == PacketTrafficClass.Background) _reservedBackgroundAdmissions--;
+            return EnqueueCore(route, bytes, tick, lease.TrafficClass);
         }
     }
 
@@ -485,7 +557,7 @@ public sealed class RadioPacketTransport
         ArgumentOutOfRangeException.ThrowIfNegative(tick);
     }
 
-    private bool EnqueueCore(RouteResult route, int bytes, long tick)
+    private bool EnqueueCore(RouteResult route, int bytes, long tick, PacketTrafficClass trafficClass)
     {
         if (!route.Found || route.Path is null || route.Path.Count == 0 ||
             (_lastTick >= 0 && tick < _lastTick))
@@ -494,14 +566,20 @@ public sealed class RadioPacketTransport
             _invalidRejects++;
             return false;
         }
-        if (QueuedCount + _reservedAdmissions >= _settings.Capacity)
+        if (IsAdmissionFull(trafficClass))
         {
             _rejected++;
             _fullRejects++;
             return false;
         }
         var detached = route with { Path = route.Path.ToArray() };
-        var packet = new PendingPacket(detached, bytes, tick, ++_nextPacketId);
+        var packet = new PendingPacket(detached, bytes, tick, ++_nextPacketId, trafficClass);
+        if (trafficClass == PacketTrafficClass.Interactive)
+        {
+            _interactiveEnqueued++;
+            _queuedInteractive++;
+        }
+        else _queuedBackground++;
         _active.Add(packet.Id, packet);
         Ready(packet);
         if (_settings.EventDrivenPacketWaiting)
@@ -597,7 +675,7 @@ public sealed class RadioPacketTransport
             int visitLimit = _settings.AdaptivePacketVisits
                 ? _currentVisitLimit : _settings.MaxAdvancesPerTick;
             if (_settings.EventDrivenPacketWaiting) WakeTimers(tick);
-            int count = Math.Min(_settings.EventDrivenPacketWaiting ? _ready.Count : _queue.Count, visitLimit);
+            int count = Math.Min(_settings.EventDrivenPacketWaiting ? ReadyQueueCount : _queue.Count, visitLimit);
             int forwarded = 0;
             int visited = 0;
             for (var i = 0; i < count; i++)
@@ -612,7 +690,15 @@ public sealed class RadioPacketTransport
                 PendingPacket packet;
                 if (_settings.EventDrivenPacketWaiting)
                 {
-                    var entry = _ready.Dequeue();
+                    // Weighted 3-to-1 service with guaranteed background
+                    // visits as long as both lanes remain ready.
+                    bool pickInteractive = _settings.PrioritizeInteractiveTraffic &&
+                        _readyInteractive.Count > 0 &&
+                        (_ready.Count == 0 ||
+                         _priorityCursor++ % (_settings.InteractiveVisitWeight + 1) <
+                             _settings.InteractiveVisitWeight);
+                    var entry = pickInteractive
+                        ? _readyInteractive.Dequeue() : _ready.Dequeue();
                     packet = entry.Packet;
                     if (!packet.Active || packet.WaitState != PacketWaitState.Ready ||
                         packet.WaitVersion != entry.Version) continue;
@@ -734,7 +820,7 @@ public sealed class RadioPacketTransport
             var elapsedUs = (long)((Stopwatch.GetTimestamp() - started) *
                 1_000_000.0 / Stopwatch.Frequency);
             _forwardingVisits += visited;
-            if (visited == visitLimit && (_settings.EventDrivenPacketWaiting ? _ready.Count : _queue.Count) != 0)
+            if (visited == visitLimit && (_settings.EventDrivenPacketWaiting ? ReadyQueueCount : _queue.Count) != 0)
                 _visitBudgetStops++;
             if (_settings.AdaptivePacketVisits && visited > 0)
             {
@@ -752,7 +838,7 @@ public sealed class RadioPacketTransport
                         _adaptiveDecreases++;
                     }
                 }
-                else if (visited == visitLimit && (_settings.EventDrivenPacketWaiting ? _ready.Count : _queue.Count) > 0 &&
+                else if (visited == visitLimit && (_settings.EventDrivenPacketWaiting ? ReadyQueueCount : _queue.Count) > 0 &&
                     elapsedUs <= budgetUs * 6 / 10)
                 {
                     int increased = Math.Min(_settings.MaxAdvancesPerTick,
@@ -891,7 +977,10 @@ public sealed class RadioPacketTransport
 
     private void Retire(PendingPacket packet)
     {
+        if (!packet.Active) return;
         packet.Active = false;
+        if (packet.TrafficClass == PacketTrafficClass.Interactive) _queuedInteractive--;
+        else _queuedBackground--;
         if (_settings.EventDrivenPacketWaiting) LeaveWait(packet);
         _active.Remove(packet.Id);
         if (_settings.EventDrivenPacketWaiting) CompactExpirations();
@@ -904,6 +993,16 @@ public sealed class RadioPacketTransport
         _delivered++;
         _bytesDelivered += packet.Bytes;
         var age = Math.Max(0, tick - packet.CreatedTick);
+        if (packet.TrafficClass == PacketTrafficClass.Interactive)
+        {
+            _interactiveDelivered++;
+            _interactiveAges[(int)((_interactiveDelivered - 1) % SampleWindow)] = age;
+        }
+        else
+        {
+            _backgroundDelivered++;
+            _backgroundAges[(int)((_backgroundDelivered - 1) % SampleWindow)] = age;
+        }
         _completedAges[(int)((_delivered - 1) % SampleWindow)] = age;
         _totalAge += age;
         _totalDeliveredHops += packet.SuccessfulHops;
