@@ -992,7 +992,8 @@ static void CheckCongestionAndLatencyTelemetry()
     Check(finished.Queued == 0 && finished.InteractiveOutstandingBeyondObjective == 0);
 
     bool invalid = false;
-    try { (settings with { BackgroundCongestionHighPercent = 60 }).Validate(); }
+    try { (settings with { BackgroundCongestionHighPercent = 30,
+        BackgroundCongestionLowPercent = 60 }).Validate(); }
     catch (ArgumentOutOfRangeException) { invalid = true; }
     Check(invalid);
     invalid = false;
