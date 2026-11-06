@@ -35,6 +35,8 @@ public sealed record BenchmarkOptions(
     string TrafficProfile = "uniform",
     bool PrioritizeInteractiveTraffic = false,
     int InteractiveReservedSlots = 0,
+    bool PrioritizeInteractiveReroutes = false,
+    int InteractiveRerouteReservedSlots = 0,
     int InteractiveTrafficPercent = 20,
     int LocalTrafficPercent = 85,
     int BurstPeriodSeconds = 20,
@@ -96,7 +98,9 @@ public sealed record BenchmarkOptions(
             EventDrivenPacketWaiting: EventDrivenPacketWaiting,
             PrioritizeInteractiveTraffic: PrioritizeInteractiveTraffic,
             EventDrivenRerouteCapacity: EventDrivenRerouteCapacity,
-            InteractiveReservedSlots: InteractiveReservedSlots).Validate();
+            InteractiveReservedSlots: InteractiveReservedSlots,
+            PrioritizeInteractiveReroutes: PrioritizeInteractiveReroutes,
+            InteractiveRerouteReservedSlots: InteractiveRerouteReservedSlots).Validate();
     }
 }
 
@@ -401,7 +405,9 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                      EventDrivenPacketWaiting: options.EventDrivenPacketWaiting,
                      EventDrivenRerouteCapacity: options.EventDrivenRerouteCapacity,
                      PrioritizeInteractiveTraffic: options.PrioritizeInteractiveTraffic,
-                     InteractiveReservedSlots: options.InteractiveReservedSlots))
+                     InteractiveReservedSlots: options.InteractiveReservedSlots,
+                     PrioritizeInteractiveReroutes: options.PrioritizeInteractiveReroutes,
+                     InteractiveRerouteReservedSlots: options.InteractiveRerouteReservedSlots))
                 : null;
             // Reroute computation is never executed while holding the packet
             // queue lock. A separate bounded CPU executor prevents it from
@@ -857,7 +863,10 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     if (rerouteScheduler.TrySchedule(
                         token => medium.Route(ticket.Source, ticket.Destination,
                             cancellationToken: token),
-                        WorkPriority.Background, ct, out Task<RouteResult>? result))
+                        packets.Options.PrioritizeInteractiveReroutes &&
+                            ticket.TrafficClass == PacketTrafficClass.Interactive
+                            ? WorkPriority.Interactive : WorkPriority.Background,
+                        ct, out Task<RouteResult>? result))
                     {
                         pending.Add(HandleRerouteAsync(ticket, result!));
                     }
