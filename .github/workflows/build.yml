@@ -18,6 +18,12 @@ jobs:
         run: bash tests/host-integration.sh
       - name: Profile script smoke test (Linux)
         run: pwsh -File scripts/run-profiles.ps1 -Sizes '160' -Seeds '7331' -Routes 20 -ViewportQueries 20 -MoveBatches 4 -LaunchHost
+      - name: External monitor smoke test (Linux)
+        shell: pwsh
+        run: |
+          ./scripts/observe-host.ps1 -DurationSeconds 2 -BaseUrl http://127.0.0.1:1 -OutputPath benchmarks/results/watchdog-linux.csv
+          $rows = @(Import-Csv benchmarks/results/watchdog-linux.csv)
+          if ($rows.Count -lt 5) { throw 'External watchdog failed to sample.' }
   windows-build:
     runs-on: windows-latest
     steps:
@@ -32,3 +38,9 @@ jobs:
       - name: Profile script smoke test (Windows)
         shell: pwsh
         run: ./scripts/run-profiles.ps1 -Sizes '160' -Seeds '7331' -Routes 20 -ViewportQueries 20 -MoveBatches 4 -LaunchHost
+      - name: External monitor smoke test (Windows)
+        shell: pwsh
+        run: |
+          ./scripts/observe-host.ps1 -DurationSeconds 2 -BaseUrl http://127.0.0.1:1 -OutputPath benchmarks/results/watchdog-windows.csv
+          $rows = @(Import-Csv benchmarks/results/watchdog-windows.csv)
+          if ($rows.Count -lt 5) { throw 'External watchdog failed to sample.' }

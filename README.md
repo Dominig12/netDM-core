@@ -1040,6 +1040,33 @@ changing the default.
 
 ## M18 — Event-driven packet waiting (opt-in)
 
+### M18.4 — independent external process watchdog
+
+`scripts/observe-host.ps1` runs in **a separate PowerShell 7 process**
+during an H or I three-scenario experiment. It records a monotonic
+100-ms cadence, asynchronous localhost `/api/health` responsiveness
+every second and optionally the host process's liveness and cumulative
+CPU seconds. It outputs a timestamped CSV independently of
+`NetDM.Host` (no shared ThreadPool or GC). Launch one copy before each
+three-scenario suite, e.g.:
+
+```powershell
+pwsh -File scripts/observe-host.ps1 -DurationSeconds 420 -BaseUrl http://127.0.0.1:5087 -OutputPath benchmarks/results/H-external.csv
+```
+
+Choose a distinct output file for I. Run the suite during the 420-second
+observation window, then attach **both the original suite ZIP and
+the external CSV**. An external watchdog gap concurrent with a packet
+runner/history gap suggests a broader host/OS scheduling pause;
+continuous external samples with HTTP failure imply a NetDM process
+problem. If the external clock remains regular and HTTP succeeds while
+the packet runner misses ticks, investigate only the dedicated runner.
+These are **diagnostic indications**, not conclusive proof of causes.
+
+The HTTP request is asynchronous and never blocks the watchdog loop.
+Files are flushed each second; no privileged OS tracing is needed.
+The test suite smoke-checks CSV generation on Linux and Windows.
+
 ### M18.3 — process-wide independent heartbeat and ThreadPool observations
 
 During each benchmark scenario, a low-frequency independent background
