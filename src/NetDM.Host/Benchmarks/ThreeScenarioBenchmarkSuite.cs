@@ -40,6 +40,8 @@ public sealed record ThreeScenarioSuiteOptions(
     int InteractiveReservedSlots = 0,
     bool PrioritizeInteractiveReroutes = false,
     int InteractiveRerouteReservedSlots = 0,
+    bool PrioritizeInteractiveAirtime = false,
+    int InteractiveAirtimeReservePercent = 25,
     int InteractiveTrafficPercent = 20,
     int LocalTrafficPercent = 85,
     int BurstPeriodSeconds = 20,
@@ -82,6 +84,8 @@ public sealed record ThreeScenarioSuiteOptions(
             InteractiveReservedSlots: InteractiveReservedSlots,
             PrioritizeInteractiveReroutes: PrioritizeInteractiveReroutes,
             InteractiveRerouteReservedSlots: InteractiveRerouteReservedSlots,
+            PrioritizeInteractiveAirtime: PrioritizeInteractiveAirtime,
+            InteractiveAirtimeReservePercent: InteractiveAirtimeReservePercent,
             InteractiveTrafficPercent: InteractiveTrafficPercent,
             LocalTrafficPercent: LocalTrafficPercent,
             BurstPeriodSeconds: BurstPeriodSeconds,
@@ -208,7 +212,9 @@ public sealed class ThreeScenarioBenchmarkSuite(
               $"-burst{options.BurstPeriodSeconds}d{options.BurstDurationSeconds}x{options.BurstMultiplier}" +
               $"-prio{(options.PrioritizeInteractiveTraffic ? 1 : 0)}-ir{options.InteractiveReservedSlots}" +
               (options.PrioritizeInteractiveReroutes
-                  ? $"-rqprio1-rqir{options.InteractiveRerouteReservedSlots}" : "")
+                  ? $"-rqprio1-rqir{options.InteractiveRerouteReservedSlots}" : "") +
+              (options.PrioritizeInteractiveAirtime
+                  ? $"-airprio1-ap{options.InteractiveAirtimeReservePercent}" : "")
             : "");
 
     public (byte[] Data, string Name)? Archive(string? runId)
