@@ -31,7 +31,10 @@ public sealed record PacketTransportOptions(
     bool EventDrivenRerouteCapacity = false,
     bool PrioritizeInteractiveTraffic = false,
     int InteractiveReservedSlots = 0,
-    int InteractiveVisitWeight = 3)
+    int InteractiveVisitWeight = 3,
+    bool PrioritizeInteractiveReroutes = false,
+    int InteractiveRerouteReservedSlots = 0,
+    int InteractiveRerouteWeight = 3)
 {
     public void Validate()
     {
@@ -64,11 +67,21 @@ public sealed record PacketTransportOptions(
             throw new ArgumentOutOfRangeException(nameof(InteractiveReservedSlots));
         if (InteractiveVisitWeight is < 1 or > 32)
             throw new ArgumentOutOfRangeException(nameof(InteractiveVisitWeight));
+        if (PrioritizeInteractiveReroutes &&
+            (!PrioritizeInteractiveTraffic || !EventDrivenRerouteCapacity))
+            throw new ArgumentException("Interactive reroute QoS requires packet priorities and capacity events.");
+        if (InteractiveRerouteReservedSlots < 0 ||
+            InteractiveRerouteReservedSlots >= MaxPendingReroutes ||
+            (InteractiveRerouteReservedSlots > 0 && !PrioritizeInteractiveReroutes))
+            throw new ArgumentOutOfRangeException(nameof(InteractiveRerouteReservedSlots));
+        if (InteractiveRerouteWeight is < 1 or > 32)
+            throw new ArgumentOutOfRangeException(nameof(InteractiveRerouteWeight));
     }
 }
 
 public readonly record struct PacketRerouteRequest(
-    long Id, long PacketId, NodeId Source, NodeId Destination, long RequestedTick);
+    long Id, long PacketId, NodeId Source, NodeId Destination, long RequestedTick,
+    PacketTrafficClass TrafficClass = PacketTrafficClass.Background);
 
 public sealed record PacketTransportCounters(
     long Enqueued, long Rejected, long Delivered, long Dropped,
@@ -102,7 +115,12 @@ public sealed record PacketTransportCounters(
     long InteractiveEnqueued, long InteractiveDelivered, long BackgroundDelivered,
     int InteractiveQueued, int BackgroundQueued,
     long InteractivePreRouteRejections, long BackgroundPreRouteRejections,
-    double InteractiveDeliveryAgeP95Ticks, double BackgroundDeliveryAgeP95Ticks);
+    double InteractiveDeliveryAgeP95Ticks, double BackgroundDeliveryAgeP95Ticks,
+    int InteractiveRerouteQueued, int BackgroundRerouteQueued,
+    int InteractiveRerouteInFlight, int BackgroundRerouteInFlight,
+    int InteractiveCapacityBlocked, int BackgroundCapacityBlocked,
+    long InteractiveReroutesStarted, long BackgroundReroutesStarted,
+    long InteractiveCapacityWakeups);
 
 /// <summary>
 /// Bounded round-robin store-and-forward. Advance never calculates a route:
@@ -168,11 +186,18 @@ public sealed class RadioPacketTransport
     private readonly PriorityQueue<PendingPacket, long> _expirations = new();
     private readonly Dictionary<NodeId, HashSet<long>> _waitingByNode = new();
     private readonly Queue<(PendingPacket Packet, int Version)> _capacityBlocked = new();
+    private readonly Queue<(PendingPacket Packet, int Version)> _capacityBlockedInteractive = new();
+    private long _capacityPriorityCursor;
     private long _timerSequence, _timerWakeups, _topologyWakeups, _expiredWhileParked;
     private int _delayedCount, _reroutingCount, _capacityBlockedCount, _retirementsSinceExpiryCompaction;
     private long _capacityWakeups;
     private readonly Dictionary<long, PendingPacket> _active = new();
     private readonly Queue<PacketRerouteRequest> _rerouteQueue = new();
+    private readonly Queue<PacketRerouteRequest> _rerouteInteractiveQueue = new();
+    private long _reroutePriorityCursor;
+    private int _backgroundReroutesInFlight, _capacityBlockedInteractiveCount;
+    private long _interactiveReroutesStarted, _backgroundReroutesStarted;
+    private long _interactiveCapacityWakeups;
     private readonly Dictionary<long, PendingPacket> _inflight = new();
     // Local node-change revisions are bounded by the size of the network.
     // They let an affected waiting packet retry early without waking every
@@ -217,6 +242,13 @@ public sealed class RadioPacketTransport
     public PacketTransportOptions Options => _settings;
     private int QueuedCount => _settings.EventDrivenPacketWaiting ? _active.Count : _queue.Count;
     private int ReadyQueueCount => _ready.Count + _readyInteractive.Count;
+    private int RerouteQueueCount => _rerouteQueue.Count + _rerouteInteractiveQueue.Count;
+    private bool CanQueueReroute(PacketTrafficClass trafficClass) =>
+        RerouteQueueCount + _inflight.Count < _settings.MaxPendingReroutes &&
+        (!_settings.PrioritizeInteractiveReroutes ||
+         trafficClass == PacketTrafficClass.Interactive ||
+         _rerouteQueue.Count + _backgroundReroutesInFlight <
+             _settings.MaxPendingReroutes - _settings.InteractiveRerouteReservedSlots);
     private static void ValidateTrafficClass(PacketTrafficClass trafficClass)
     {
         if (trafficClass is not (PacketTrafficClass.Background or PacketTrafficClass.Interactive))
@@ -258,7 +290,12 @@ public sealed class RadioPacketTransport
             IndexWaiting(packet, false);
             if (packet.WaitState == PacketWaitState.Delayed) _delayedCount--;
             else if (packet.WaitState == PacketWaitState.Rerouting) _reroutingCount--;
-            else _capacityBlockedCount--;
+            else
+            {
+                _capacityBlockedCount--;
+                if (packet.TrafficClass == PacketTrafficClass.Interactive)
+                    _capacityBlockedInteractiveCount--;
+            }
         }
         packet.WaitVersion++;
         packet.WaitState = PacketWaitState.None;
@@ -337,7 +374,13 @@ public sealed class RadioPacketTransport
         packet.WaitState = PacketWaitState.CapacityBlocked;
         _capacityBlockedCount++;
         IndexWaiting(packet, true);
-        _capacityBlocked.Enqueue((packet, packet.WaitVersion));
+        if (packet.TrafficClass == PacketTrafficClass.Interactive)
+            _capacityBlockedInteractiveCount++;
+        if (_settings.PrioritizeInteractiveReroutes &&
+            packet.TrafficClass == PacketTrafficClass.Interactive)
+            _capacityBlockedInteractive.Enqueue((packet, packet.WaitVersion));
+        else
+            _capacityBlocked.Enqueue((packet, packet.WaitVersion));
         // Safety probe: unannounced cable repair can heal without a reroute slot.
         // Capacity-release and topology events can resume the packet earlier.
         long probe = tick + Math.Max(8, _settings.RerouteQueueRetryDelayTicks * 4L);
@@ -349,30 +392,68 @@ public sealed class RadioPacketTransport
 
     private void CompactCapacityQueue()
     {
-        if (_capacityBlocked.Count <= Math.Max(512, _active.Count * 4)) return;
-        int count = _capacityBlocked.Count;
+        if (_capacityBlocked.Count + _capacityBlockedInteractive.Count <=
+            Math.Max(512, _active.Count * 4)) return;
+        CompactCapacityLane(_capacityBlocked);
+        CompactCapacityLane(_capacityBlockedInteractive);
+    }
+
+    private static void CompactCapacityLane(Queue<(PendingPacket Packet, int Version)> queue)
+    {
+        int count = queue.Count;
         for (int i = 0; i < count; i++)
         {
-            var entry = _capacityBlocked.Dequeue();
+            var entry = queue.Dequeue();
             if (entry.Packet.Active && entry.Packet.WaitState == PacketWaitState.CapacityBlocked &&
                 entry.Packet.WaitVersion == entry.Version)
-                _capacityBlocked.Enqueue(entry);
+                queue.Enqueue(entry);
         }
     }
 
     private void WakeAvailableRerouteCapacity()
     {
         if (!_settings.EventDrivenRerouteCapacity) return;
-        int available = _settings.MaxPendingReroutes - _rerouteQueue.Count - _inflight.Count;
-        while (available > 0 && _capacityBlocked.TryDequeue(out var entry))
+        int available = _settings.MaxPendingReroutes - RerouteQueueCount - _inflight.Count;
+        if (!_settings.PrioritizeInteractiveReroutes)
         {
+            // Original H/I/K wake behavior is unchanged unless QoS is enabled.
+            while (available > 0 && _capacityBlocked.TryDequeue(out var oldEntry))
+            {
+                var packet = oldEntry.Packet;
+                if (!packet.Active || packet.WaitState != PacketWaitState.CapacityBlocked ||
+                    packet.WaitVersion != oldEntry.Version) continue;
+                packet.NextRetryTick = Math.Max(0, _lastTick + 1);
+                Ready(packet);
+                _capacityWakeups++;
+                available--;
+            }
+            return;
+        }
+
+        int backgroundAvailable = Math.Max(0,
+            _settings.MaxPendingReroutes - _settings.InteractiveRerouteReservedSlots -
+            _rerouteQueue.Count - _backgroundReroutesInFlight);
+        while (available > 0)
+        {
+            bool hasInteractive = _capacityBlockedInteractive.Count > 0;
+            bool hasBackground = _capacityBlocked.Count > 0 && backgroundAvailable > 0;
+            if (!hasInteractive && !hasBackground) break;
+            bool pickInteractive = hasInteractive &&
+                (!hasBackground || _capacityPriorityCursor %
+                    (_settings.InteractiveRerouteWeight + 1) <
+                    _settings.InteractiveRerouteWeight);
+            var queue = pickInteractive ? _capacityBlockedInteractive : _capacityBlocked;
+            var entry = queue.Dequeue();
             var packet = entry.Packet;
             if (!packet.Active || packet.WaitState != PacketWaitState.CapacityBlocked ||
                 packet.WaitVersion != entry.Version) continue;
             packet.NextRetryTick = Math.Max(0, _lastTick + 1);
             Ready(packet);
             _capacityWakeups++;
+            if (pickInteractive) _interactiveCapacityWakeups++;
+            else backgroundAvailable--;
             available--;
+            _capacityPriorityCursor++;
         }
     }
 
@@ -463,7 +544,7 @@ public sealed class RadioPacketTransport
                 _fullRejects, _invalidRejects, Percentile(ages, .5),
                 Percentile(ages, .95),
                 _delivered == 0 ? 0 : (double)_totalDeliveredHops / _delivered,
-                _totalAge, _rerouteQueue.Count, _inflight.Count,
+                _totalAge, RerouteQueueCount, _inflight.Count,
                 _rerouteCompleted, _rerouteCancelled, _rerouteQueueDeferrals,
                 _rerouteSchedulerRejections, Percentile(rerouteAges, .95),
                 _skippedTicks, _tickAdmissionFailures, Percentile(forwardUs, .95) / 1000.0,
@@ -483,7 +564,13 @@ public sealed class RadioPacketTransport
                 _interactiveEnqueued, _interactiveDelivered, _backgroundDelivered,
                 _queuedInteractive, _queuedBackground,
                 _interactivePreRouteRejects, _backgroundPreRouteRejects,
-                Percentile(interactiveAges, .95), Percentile(backgroundAges, .95));
+                Percentile(interactiveAges, .95), Percentile(backgroundAges, .95),
+                _rerouteInteractiveQueue.Count, _rerouteQueue.Count,
+                _inflight.Count - _backgroundReroutesInFlight, _backgroundReroutesInFlight,
+                _capacityBlockedInteractiveCount,
+                _capacityBlockedCount - _capacityBlockedInteractiveCount,
+                _interactiveReroutesStarted, _backgroundReroutesStarted,
+                _interactiveCapacityWakeups);
         }
     }
 
@@ -795,17 +882,21 @@ public sealed class RadioPacketTransport
                             Retire(packet);
                             break;
                         }
-                        if (_rerouteQueue.Count + _inflight.Count >=
-                            _settings.MaxPendingReroutes)
+                        if (!CanQueueReroute(packet.TrafficClass))
                         {
                             _rerouteQueueDeferrals++;
                             WaitForRerouteCapacity(packet, tick);
                             break;
                         }
                         var ticket = new PacketRerouteRequest(++_nextRequestId,
-                            packet.Id, from, packet.Destination, tick);
+                            packet.Id, from, packet.Destination, tick,
+                            packet.TrafficClass);
                         packet.PendingRerouteId = ticket.Id;
-                        _rerouteQueue.Enqueue(ticket);
+                        if (_settings.PrioritizeInteractiveReroutes &&
+                            ticket.TrafficClass == PacketTrafficClass.Interactive)
+                            _rerouteInteractiveQueue.Enqueue(ticket);
+                        else
+                            _rerouteQueue.Enqueue(ticket);
                         AwaitReroute(packet);
                         break;
 
@@ -869,15 +960,38 @@ public sealed class RadioPacketTransport
                 ticket = default;
                 return false;
             }
-            while (_rerouteQueue.TryDequeue(out ticket))
+            bool removedStale = false;
+            while (RerouteQueueCount > 0)
             {
+                // 3 interactive reroutes per background ticket while both
+                // lanes are ready, preserving bounded background progress.
+                bool interactive = _settings.PrioritizeInteractiveReroutes &&
+                    _rerouteInteractiveQueue.Count > 0 &&
+                    (_rerouteQueue.Count == 0 ||
+                     _reroutePriorityCursor %
+                       (_settings.InteractiveRerouteWeight + 1) <
+                         _settings.InteractiveRerouteWeight);
+                var source = interactive ? _rerouteInteractiveQueue : _rerouteQueue;
+                ticket = source.Dequeue();
                 if (!_active.TryGetValue(ticket.PacketId, out var packet) ||
-                    packet.PendingRerouteId != ticket.Id) continue;
+                    packet.PendingRerouteId != ticket.Id)
+                {
+                    removedStale = true;
+                    continue;
+                }
                 _inflight.Add(ticket.Id, packet);
+                if (ticket.TrafficClass == PacketTrafficClass.Background)
+                {
+                    _backgroundReroutesInFlight++;
+                    _backgroundReroutesStarted++;
+                }
+                else _interactiveReroutesStarted++;
+                _reroutePriorityCursor++;
                 packet.Reroutes++;
                 packet.LastRouteAttemptTick = _lastTick;
                 packet.SeenLocalRevision = LocalRevision(packet);
                 _reroutes++;
+                if (removedStale) WakeAvailableRerouteCapacity();
                 return true;
             }
             WakeAvailableRerouteCapacity(); // Discarding stale tickets can free a slot.
@@ -898,6 +1012,8 @@ public sealed class RadioPacketTransport
         {
             if (!_inflight.Remove(ticket.Id, out var packet))
                 return false;
+            if (packet.TrafficClass == PacketTrafficClass.Background)
+                _backgroundReroutesInFlight--;
             WakeAvailableRerouteCapacity();
             _rerouteCompleted++;
             RecordRerouteWait(ticket);
@@ -951,6 +1067,8 @@ public sealed class RadioPacketTransport
         {
             if (!_inflight.Remove(ticket.Id, out var packet))
                 return false;
+            if (packet.TrafficClass == PacketTrafficClass.Background)
+                _backgroundReroutesInFlight--;
             WakeAvailableRerouteCapacity();
             _rerouteCancelled++;
             if (schedulerRejected) _rerouteSchedulerRejections++;
