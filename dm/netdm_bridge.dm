@@ -39,6 +39,26 @@
 /datum/netdm_bridge/proc/game_add_node(node_id, x, y, z = 0)
     return request(list("op" = "game_add_node", "a" = node_id, "x" = x, "y" = y, "z" = z))
 
+/datum/netdm_bridge/proc/game_remove_node(node_id)
+    return request(list("op" = "game_remove_node", "a" = node_id))
+
+/datum/netdm_bridge/proc/game_move_node(node_id, x, y, z = 0)
+    return request(list("op" = "game_move_node", "a" = node_id, "x" = x,
+        "y" = y, "z" = z))
+
+/datum/netdm_bridge/proc/game_connect(from_id, to_id, cost = 1)
+    return request(list("op" = "game_connect", "a" = from_id, "b" = to_id,
+        "cost" = cost))
+
+/datum/netdm_bridge/proc/game_disconnect(from_id, to_id)
+    return request(list("op" = "game_disconnect", "a" = from_id, "b" = to_id))
+
+/datum/netdm_bridge/proc/game_batch(list/changes)
+    return request(list("op" = "game_batch", "changes" = changes))
+
+/datum/netdm_bridge/proc/game_stats()
+    return request(list("op" = "game_stats"))
+
 /datum/netdm_bridge/proc/game_radio(node_id, range = 14, channel = 1, enabled = TRUE)
     return request(list("op" = "game_radio", "a" = node_id,
         "range" = range, "channel" = channel, "enabled" = !!enabled))
