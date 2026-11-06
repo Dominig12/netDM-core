@@ -1,0 +1,45 @@
+name: SS13 gameplay J/K smoke
+
+# Short automatic pair on shared CI. Manual 12k/120s runs are milestone-only.
+on:
+  pull_request:
+    paths:
+      - 'src/NetDM.Core/**'
+      - 'src/NetDM.Host/Benchmarks/**'
+      - 'src/NetDM.Host/wwwroot/**'
+      - 'scripts/compare-gameplay.py'
+      - '.github/workflows/gameplay-benchmark.yml'
+  workflow_dispatch:
+
+jobs:
+  jk-smoke:
+    name: J/K gameplay smoke (no timing gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build host
+        run: dotnet build src/NetDM.Host/NetDM.Host.csproj -c Release
+      - name: Run both gameplay suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p benchmarks/results/gameplay-ci
+          dotnet run --project src/NetDM.Host/NetDM.Host.csproj -c Release --no-build \
+            > benchmarks/results/gameplay-ci/host.log 2>&1 &
+          host_pid=$!
+          trap 'kill "$host_pid" 2>/dev/null || true' EXIT
+          python3 scripts/compare-gameplay.py --out benchmarks/results/gameplay-ci
+      - name: Attach JSON and ZIP reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ss13-gameplay-jk
+          path: benchmarks/results/gameplay-ci/
+          if-no-files-found: warn
+          retention-days: 14

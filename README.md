@@ -1040,6 +1040,27 @@ changing the default.
 
 ## M19 — SS13 mixed traffic benchmark + opt-in interactive packet service
 
+### Automated short J/K checks
+
+Pull requests changing the transport or game-workload code automatically run
+the separate \`SS13 gameplay J/K smoke\` GitHub Actions workflow. It runs
+J and K on the SAME Linux runner with a **short 512-node, 6-second/scenario**
+profile (seed 1337) and verifies queue bounds, reservations, per-class
+routing counters, delivery accounting and successful scenario completion.
+
+The workflow publishes J/K raw three-scenario ZIPs, summary JSON and
+Markdown, and the Host log as Actions artifacts. The Markdown results are
+also displayed in the GitHub Actions run summary. These quick runs are
+correctness/observability checks: CI does **not** require K to beat J
+in delivery P95 on shared hardware. They do **not** replace long-form
+performance qualification.
+
+The 12,000-node, 120-second manual suites are now **milestone-only**,
+ideally on the target SS13 server. Do not request a full user-run
+benchmark after each transport change.
+
+
+
 **Experimental branch:** `feature/ss13-mixed-traffic`, stacked on
 M18. Does not change H/I preset defaults or the core workload when
 `trafficProfile="uniform"`.
