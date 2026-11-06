@@ -1088,8 +1088,10 @@ static void CheckPacketReceiptContract()
     Check(fromFuture.Gap && fromFuture.Receipts.Length == 2);
 
     var canceled = transport.Submit("cancel", route, 40, 3);
-    Check(canceled.Accepted && transport.TryCancel(canceled.PacketId) &&
-        !transport.TryCancel(canceled.PacketId));
+    Check(canceled.Accepted &&
+        !transport.TryCancel(Guid.NewGuid(), canceled.PacketId) &&
+        transport.TryCancel(canceled.StreamId, canceled.PacketId) &&
+        !transport.TryCancel(canceled.StreamId, canceled.PacketId));
     var cancelEvent = transport.CaptureReceipts(3);
     Check(cancelEvent.Receipts.Length == 1 &&
         cancelEvent.Receipts[0].Status == PacketCompletionStatus.Cancelled &&
@@ -1132,7 +1134,20 @@ static void CheckPacketReceiptContract()
     });
     var oldPacket = fifo.Submit("legacy-cancel", oldRoute, 60, 0);
     Check(oldPacket.Accepted && fifo.Capture().Queued == 1);
-    Check(fifo.TryCancel(oldPacket.PacketId) && fifo.Capture().Queued == 0);
+    Check(oldPacket.StreamId != transport.ReceiptStreamId);
+    using var held = fifo.TryReserveAdmission(PacketTrafficClass.Background,
+        out var reserveOk);
+    Check(held is not null && reserveOk == PacketSubmissionRejection.None);
+    var denied = new RadioPacketTransport(oldMedium,
+        opts with { Capacity = 1, EventDrivenPacketWaiting = false });
+    using var only = denied.TryReserveAdmission(PacketTrafficClass.Background,
+        out var allowed);
+    Check(only is not null && allowed == PacketSubmissionRejection.None);
+    Check(denied.TryReserveAdmission(PacketTrafficClass.Background,
+        out var fullReason) is null &&
+        fullReason == PacketSubmissionRejection.QueueFull);
+    Check(fifo.TryCancel(oldPacket.StreamId, oldPacket.PacketId) &&
+        fifo.Capture().Queued == 0);
     Check(fifo.Advance(1) == 0 && fifo.Capture().Delivered == 0);
     Check(fifo.CaptureReceipts().Receipts.Single().Status ==
         PacketCompletionStatus.Cancelled);
