@@ -1,6 +1,6 @@
-name: SS13 gameplay J/K/L smoke
+name: SS13 gameplay J/K/L/M smoke
 
-# Short automatic trio on shared CI. Manual 12k/120s runs are milestone-only.
+# Short automated comparison on shared CI; long manual tests are milestone-only.
 on:
   pull_request:
     paths:
@@ -12,8 +12,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  jkl-smoke:
-    name: J/K/L gameplay smoke (no timing gate)
+  jklm-smoke:
+    name: J/K/L/M gameplay smoke (no timing gate)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -25,7 +25,7 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Build host
         run: dotnet build src/NetDM.Host/NetDM.Host.csproj -c Release
-      - name: Run J, K and L gameplay suites
+      - name: Run J, K, L and M gameplay suites
         shell: bash
         run: |
           set -euo pipefail
@@ -39,7 +39,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ss13-gameplay-jkl
+          name: ss13-gameplay-jklm
           path: benchmarks/results/gameplay-ci/
           if-no-files-found: warn
           retention-days: 14

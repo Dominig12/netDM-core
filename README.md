@@ -1038,6 +1038,47 @@ faster read-side searches; measure actual movement rate, original
 route throughput, p95, allocations, GC, and packet delivery before
 changing the default.
 
+## M21 — Demand-aware wireless airtime QoS
+
+**Experimental branch** `feature/interactive-airtime-qos`, stacked on M20.
+Old modes G/H/I and gameplay controls J/K/L retain their original settings.
+
+- Optional `PrioritizeInteractiveAirtime` adds per-class wireless bytes to
+  each existing channel-wide or spatial radio-cell airtime ledger. It does
+  **not** create additional bandwidth or use a separate wireless channel.
+- `InteractiveAirtimeReservePercent` (default 25%) protects that fraction
+  of each radio airtime region **only when interactive packets are ready
+  at the beginning of that simulation tick**. During protected ticks,
+  background wireless hops cannot consume more than the unprotected share
+  even if the total physical channel is not full. Interactive hops may
+  use any remaining bandwidth. With no ready interactive packets,
+  background hops may borrow the full physical budget.
+- The per-tick class/reservation decision comes from the packet scheduler
+  and applies to every hop processed during that tick. Wired cable hops
+  bypass airtime entirely. No preemption, packet eviction, or overbooking;
+  overlapping spatial regions still reserve atomically.
+- `SharedMediumStatistics` reports per-class wireless hop counts and bytes,
+  plus protected-background deferrals. Host half-second history includes
+  bytes/sec per class and protected deferrals/sec.
+- Radio QoS requires interactive packet priorities and is off by default.
+  An oversized background packet that exceeds the available per-tick
+  background share may be deferred until an idle/non-protected tick or
+  expire under sustained interactive demand; QoS does **not** guarantee
+  background completion under all traffic mixes. Nor does it prioritize
+  radio hardware by preempting a transmission already admitted.
+- The Network Observatory adds **M**, identical to L except for a
+  25% demand-aware reservation of shared radio airtime. Under the chosen
+  workload the new mode can be compared against J/K/L without changing
+  topology, offered packet mix or scheduled reroute CPU budget.
+- CI smoke tests cover the channel-wide and spatial-cell ledgers, per-tick
+  interactive reservations, idle-time borrowing, exact physical limits
+  and class-accounting. The automatic workflow compares **J/K/L/M**;
+  results are correctness evidence only, not a server latency SLA.
+
+No further manual benchmarks are needed for routine changes. Final QoS
+policy selection and any server SLO should be measured as a milestone
+on target hardware, with representative actual network traffic.
+
 ## M20 — Priority reroutes under bounded mixed gameplay load
 
 **Experimental branch** `feature/interactive-reroute-qos`, stacked on M19.
