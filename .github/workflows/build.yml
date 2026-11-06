@@ -21,9 +21,11 @@ jobs:
       - name: External monitor smoke test (Linux)
         shell: pwsh
         run: |
-          ./scripts/observe-host.ps1 -DurationSeconds 2 -BaseUrl http://127.0.0.1:1 -OutputPath benchmarks/results/watchdog-linux.csv
-          $rows = @(Import-Csv benchmarks/results/watchdog-linux.csv)
-          if ($rows.Count -lt 5) { throw 'External watchdog failed to sample.' }
+          ./scripts/capture-stalls.ps1 -DurationSeconds 2 -Label ci-linux -HostProcessId $PID -BaseUrl http://127.0.0.1:1 -SkipTrace
+          $m = Get-ChildItem benchmarks/results/netdm-ci-linux-*-manifest.json | Select-Object -Last 1
+          $manifest = Get-Content -Raw $m.FullName | ConvertFrom-Json
+          $rows = @(Import-Csv $manifest.externalCsv)
+          if ($rows.Count -lt 5 -or $manifest.targetProcessId -ne $PID) { throw 'External watchdog/manifest failed.' }
   windows-build:
     runs-on: windows-latest
     steps:
@@ -41,6 +43,8 @@ jobs:
       - name: External monitor smoke test (Windows)
         shell: pwsh
         run: |
-          ./scripts/observe-host.ps1 -DurationSeconds 2 -BaseUrl http://127.0.0.1:1 -OutputPath benchmarks/results/watchdog-windows.csv
-          $rows = @(Import-Csv benchmarks/results/watchdog-windows.csv)
-          if ($rows.Count -lt 5) { throw 'External watchdog failed to sample.' }
+          ./scripts/capture-stalls.ps1 -DurationSeconds 2 -Label ci-windows -HostProcessId $PID -BaseUrl http://127.0.0.1:1 -SkipTrace
+          $m = Get-ChildItem benchmarks/results/netdm-ci-windows-*-manifest.json | Select-Object -Last 1
+          $manifest = Get-Content -Raw $m.FullName | ConvertFrom-Json
+          $rows = @(Import-Csv $manifest.externalCsv)
+          if ($rows.Count -lt 5 -or $manifest.targetProcessId -ne $PID) { throw 'External watchdog/manifest failed.' }

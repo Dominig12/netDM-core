@@ -136,7 +136,15 @@ public sealed record BenchmarkSample(
     long ProcessHeartbeatStalls, double ProcessMaxThreadPoolDispatchMilliseconds,
     long ProcessThreadPoolStalls, int ProcessThreadPoolThreads,
     long ProcessThreadPoolPendingWorkItems, double ProcessCpuCoresUsed,
-    double ProcessGcPauseMillisecondsSinceStart, double ObservedSampleIntervalMilliseconds);
+    double ProcessGcPauseMillisecondsSinceStart, double ObservedSampleIntervalMilliseconds,
+    int ProcessGen0Collections, int ProcessGen1Collections, int ProcessGen2Collections,
+    long ProcessGcLastIndex, int ProcessGcLastGeneration,
+    double ProcessGcLastPauseMilliseconds, bool ProcessGcLastCompacted,
+    bool ProcessGcLastConcurrent, long ProcessGcLastFullBlockingIndex,
+    double ProcessGcLastFullBlockingPauseMilliseconds,
+    long ProcessGcHeapSizeBytes, long ProcessGcFragmentedBytes,
+    long ProcessGcCommittedBytes, long ProcessGcMemoryLoadBytes,
+    long ProcessGcAllocatedBytesSinceStart);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -531,7 +539,22 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     processStallSnapshot.ThreadPoolPendingWorkItems,
                     processStallSnapshot.ProcessCpuCoresUsed,
                     processStallSnapshot.GcPauseMillisecondsSinceStart,
-                    interval * 1000.0);
+                    interval * 1000.0,
+                    processStallSnapshot.Gen0CollectionsSinceStart,
+                    processStallSnapshot.Gen1CollectionsSinceStart,
+                    processStallSnapshot.Gen2CollectionsSinceStart,
+                    processStallSnapshot.GcLastIndex,
+                    processStallSnapshot.GcLastGeneration,
+                    processStallSnapshot.GcLastPauseMilliseconds,
+                    processStallSnapshot.GcLastCompacted,
+                    processStallSnapshot.GcLastConcurrent,
+                    processStallSnapshot.GcLastFullBlockingIndex,
+                    processStallSnapshot.GcLastFullBlockingPauseMilliseconds,
+                    processStallSnapshot.GcHeapSizeBytes,
+                    processStallSnapshot.GcFragmentedBytes,
+                    processStallSnapshot.GcCommittedBytes,
+                    processStallSnapshot.GcMemoryLoadBytes,
+                    processStallSnapshot.GcAllocatedBytesSinceStart);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;

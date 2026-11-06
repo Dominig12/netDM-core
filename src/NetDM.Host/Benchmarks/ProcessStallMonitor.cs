@@ -10,7 +10,8 @@ namespace NetDM.Host.Benchmarks;
 public sealed record ProcessStallEvent(
     DateTimeOffset AtUtc, string Kind, double DelayMilliseconds,
     double GcPauseMillisecondsSinceStart, double CpuCoresUsed,
-    int ThreadPoolThreads, long ThreadPoolPendingWorkItems);
+    int ThreadPoolThreads, long ThreadPoolPendingWorkItems,
+    long GcLastIndex, int GcLastGeneration);
 
 public sealed record ProcessStallCounters(
     long Heartbeats, double LastHeartbeatLatenessMilliseconds,
@@ -20,6 +21,12 @@ public sealed record ProcessStallCounters(
     int ThreadPoolThreads, long ThreadPoolPendingWorkItems,
     double ProcessCpuCoresUsed, double ProcessCpuMachinePercent,
     double GcPauseMillisecondsSinceStart, int Gen2CollectionsSinceStart,
+    int Gen0CollectionsSinceStart, int Gen1CollectionsSinceStart,
+    long GcLastIndex, int GcLastGeneration, double GcLastPauseMilliseconds,
+    bool GcLastCompacted, bool GcLastConcurrent,
+    long GcLastFullBlockingIndex, double GcLastFullBlockingPauseMilliseconds,
+    long GcHeapSizeBytes, long GcFragmentedBytes, long GcCommittedBytes,
+    long GcMemoryLoadBytes, long GcAllocatedBytesSinceStart,
     IReadOnlyList<ProcessStallEvent> Events);
 
 public sealed class ProcessStallMonitor : IDisposable
@@ -32,7 +39,10 @@ public sealed class ProcessStallMonitor : IDisposable
     private readonly Process _process = Process.GetCurrentProcess();
     private readonly Queue<ProcessStallEvent> _events = new();
     private readonly double _gcBaseMs = GC.GetTotalPauseDuration().TotalMilliseconds;
+    private readonly int _gen0Base = GC.CollectionCount(0);
+    private readonly int _gen1Base = GC.CollectionCount(1);
     private readonly int _gen2Base = GC.CollectionCount(2);
+    private readonly long _allocatedBase = GC.GetTotalAllocatedBytes(precise: false);
     private Thread? _thread;
     private long _heartbeats, _heartbeatDelays, _poolProbes, _poolDelays;
     private double _lastHeartbeatLateMs, _maxHeartbeatLateMs, _maxPoolDispatchMs;
@@ -54,6 +64,15 @@ public sealed class ProcessStallMonitor : IDisposable
 
     public ProcessStallCounters Capture()
     {
+        // Heap information describes the last completed GC, not the live heap.
+        // Read GC diagnostics outside the heartbeat lock.
+        var gc = GC.GetGCMemoryInfo();
+        var fullGc = GC.GetGCMemoryInfo(GCKind.FullBlocking);
+        var gen0 = Math.Max(0, GC.CollectionCount(0) - _gen0Base);
+        var gen1 = Math.Max(0, GC.CollectionCount(1) - _gen1Base);
+        var gen2 = Math.Max(0, GC.CollectionCount(2) - _gen2Base);
+        var allocated = Math.Max(0,
+            GC.GetTotalAllocatedBytes(precise: false) - _allocatedBase);
         lock (_gate)
             return new ProcessStallCounters(
                 _heartbeats, _lastHeartbeatLateMs, _maxHeartbeatLateMs,
@@ -61,8 +80,22 @@ public sealed class ProcessStallMonitor : IDisposable
                 _poolDelays, Volatile.Read(ref _probeOutstanding) != 0,
                 _threadCount, _pendingWorkItems, _cpuCores,
                 _cpuCores * 100.0 / Math.Max(1, Environment.ProcessorCount),
-                _gcPauseSinceStartMs, Math.Max(0, GC.CollectionCount(2) - _gen2Base),
-                _events.ToArray());
+                Math.Max(_gcPauseSinceStartMs,
+                    GC.GetTotalPauseDuration().TotalMilliseconds - _gcBaseMs),
+                gen2, gen0, gen1,
+                gc.Index, gc.Generation, SumPauseMilliseconds(gc),
+                gc.Compacted, gc.Concurrent, fullGc.Index,
+                SumPauseMilliseconds(fullGc), gc.HeapSizeBytes,
+                gc.FragmentedBytes, gc.TotalCommittedBytes,
+                gc.MemoryLoadBytes, allocated, _events.ToArray());
+    }
+
+    private static double SumPauseMilliseconds(GCMemoryInfo info)
+    {
+        double total = 0;
+        foreach (var pause in info.PauseDurations)
+            total += pause.TotalMilliseconds;
+        return total;
     }
 
     private void Run()
@@ -101,8 +134,10 @@ public sealed class ProcessStallMonitor : IDisposable
                     if (latenessMs >= SignificantDelayMs)
                     {
                         _heartbeatDelays++;
+                        var lastGc = GC.GetGCMemoryInfo();
                         AddEvent(new ProcessStallEvent(DateTimeOffset.UtcNow,
-                            "heartbeat", latenessMs, gcSinceStart, cores, threads, pending));
+                            "heartbeat", latenessMs, gcSinceStart, cores, threads, pending,
+                            lastGc.Index, lastGc.Generation));
                     }
                 }
 
@@ -139,9 +174,11 @@ public sealed class ProcessStallMonitor : IDisposable
                 if (delay >= SignificantDelayMs)
                 {
                     _poolDelays++;
+                    var lastGc = GC.GetGCMemoryInfo();
                     AddEvent(new ProcessStallEvent(DateTimeOffset.UtcNow,
                         "threadpool", delay, _gcPauseSinceStartMs, _cpuCores,
-                        ThreadPool.ThreadCount, ThreadPool.PendingWorkItemCount));
+                        ThreadPool.ThreadCount, ThreadPool.PendingWorkItemCount,
+                        lastGc.Index, lastGc.Generation));
                 }
             }
         }

@@ -192,6 +192,10 @@ app.MapGet("/api/map", (NetworkRuntime runtime, BenchmarkRunner benchmark,
 app.MapGet("/api/scheduler", (PriorityWorkScheduler scheduler) =>
     Results.Ok(scheduler.Capture()));
 
-app.MapGet("/api/health", () => Results.Ok(new { status = "ok", protocol = 1 }));
+// Report PID only over the localhost development observability endpoint.
+app.MapGet("/api/health", () => Results.Ok(new
+{
+    status = "ok", protocol = 1, processId = Environment.ProcessId
+}));
 
 app.Run();

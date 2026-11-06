@@ -1040,6 +1040,44 @@ changing the default.
 
 ## M18 — Event-driven packet waiting (opt-in)
 
+### M18.5 — GC snapshots and optional EventPipe trace
+
+The process monitor now adds last-completed GC generation/index,
+per-GC pause duration, concurrent/compacted flags, heap size,
+fragmentation, committed bytes, and allocation totals. Collection deltas
+and the last full blocking GC are distinguished. The same fields are
+exposed in history and three-scenario ZIPs. Heap details describe the
+last completed GC, not necessarily the current live heap.
+
+For an optional GC event trace, install the diagnostic tool:
+
+~~~powershell
+dotnet tool install --global dotnet-trace
+~~~
+
+Before starting a suite, run one capture per mode:
+
+~~~powershell
+pwsh -File scripts/capture-stalls.ps1 -Label H -DurationSeconds 420
+pwsh -File scripts/capture-stalls.ps1 -Label I -DurationSeconds 420
+~~~
+
+These are **separate** runs; start the corresponding H or I suite
+while that capture is recording. The helper discovers the real NetDM
+PID through localhost /api/health and collects a low-overhead
+gc-collect EventPipe .nettrace while an external PowerShell process
+records heartbeat/HTTP/CPU liveness to CSV. Each run writes a manifest
+with PID and UTC timestamps to correlate the artifacts. Use
+-TraceProfile gc-verbose only if sampled allocation events are needed,
+since that mode may change benchmark performance.
+
+For each mode retain the benchmark suite ZIP, external CSV, trace
+and manifest. Traces may include runtime/application metadata; review
+them before sharing. EventPipe GC collection events provide stronger
+evidence about GC cause and timing than cumulative GC pause totals.
+OS scheduler/context-switch diagnostics would require an additional
+OS trace and are not captured by this script.
+
 ### M18.4 — independent external process watchdog
 
 `scripts/observe-host.ps1` runs in **a separate PowerShell 7 process**
