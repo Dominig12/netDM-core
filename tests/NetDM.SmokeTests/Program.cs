@@ -87,6 +87,7 @@ CheckAdaptivePacketTransport();
 CheckEventDrivenPacketWaiting();
 CheckEventDrivenRerouteCapacity();
 CheckTrafficPriorities();
+CheckCongestionAndLatencyTelemetry();
 CheckInteractiveRerouteQos();
 CheckRerouteAdaptiveBackoff();
 await CheckDedicatedPacketTicksAsync();
@@ -908,6 +909,97 @@ static void CheckTrafficPriorities()
     try { new PacketTransportOptions(PrioritizeInteractiveTraffic: true).Validate(); }
     catch (ArgumentException) { rejected = true; }
     Check(rejected);
+}
+
+static void CheckCongestionAndLatencyTelemetry()
+{
+    var runtime = new NetworkRuntime();
+    runtime.Apply([
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+            Position: new NodePosition(0, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+            Position: new NodePosition(10, 0))
+    ]);
+    var medium = new SharedMediumNetwork(runtime, bytesPerTick: 8192);
+    medium.Update([
+        new RadioNodeUpdate(new NodeId(1), Profile: new RadioProfile(14, 1, 8),
+            ChangeProfile: true),
+        new RadioNodeUpdate(new NodeId(2), Profile: new RadioProfile(14, 1, 8),
+            ChangeProfile: true)
+    ]);
+    var route = medium.Route(new NodeId(1), new NodeId(2));
+    Check(route.Found);
+
+    var settings = new PacketTransportOptions(Capacity: 10,
+        MaxAdvancesPerTick: 1, MaxAgeTicks: 100,
+        EventDrivenPacketWaiting: true, PrioritizeInteractiveTraffic: true,
+        BackgroundCongestionHighPercent: 70,
+        BackgroundCongestionLowPercent: 30,
+        InteractiveLatencyObjectiveTicks: 1);
+    var transport = new RadioPacketTransport(medium, settings);
+    Check(transport.Enqueue(route, 100, 0, PacketTrafficClass.Interactive));
+    for (int i = 0; i < 5; i++)
+        Check(transport.Enqueue(route, 100, 0, PacketTrafficClass.Background));
+    using var lease = transport.TryReserveAdmission(PacketTrafficClass.Background);
+    Check(lease is not null);
+    Check(transport.Capture().ReservedAdmissions == 1);
+    Check(!transport.Enqueue(route, 100, 0, PacketTrafficClass.Background));
+    Check(transport.TryReserveAdmission(PacketTrafficClass.Background) is null);
+    var congestion = transport.Capture();
+    Check(congestion.BackgroundCongestionThrottled);
+    Check(congestion.BackgroundCongestionRejections == 2);
+    Check(congestion.QueueFullRejections == 0);
+    Check(congestion.BackgroundPreRouteRejections == 1);
+    Check(transport.EnqueueReserved(route, 100, 0, lease!));
+    Check(transport.Capture().Queued == 7);
+    // Completion of the interactive work clears the throttle even with
+    // six background packets still waiting above the high watermark.
+    Check(transport.Advance(1) == 1);
+    Check(transport.Capture().InteractiveDelivered == 1);
+    Check(!transport.Capture().BackgroundCongestionThrottled);
+    Check(transport.Enqueue(route, 100, 1, PacketTrafficClass.Background));
+    Check(transport.Capture().Queued == 7);
+
+    // Outcomes and percentiles cover completed work AND unfinished work.
+    // Successful-delivery P95 alone hides packets still queued or expired.
+    var latency = new RadioPacketTransport(medium, settings with {
+        BackgroundCongestionHighPercent = 0, MaxAgeTicks = 4
+    });
+    for (int i = 0; i < 6; i++)
+        Check(latency.Enqueue(route, 100, 0, PacketTrafficClass.Interactive));
+    for (int i = 0; i < 2; i++)
+        Check(latency.Enqueue(route, 100, 0, PacketTrafficClass.Background));
+    Check(latency.Advance(1) == 1);
+    Check(latency.Advance(2) == 1);
+    var pending = latency.Capture();
+    Check(pending.InteractiveDelivered == 2);
+    Check(pending.InteractiveCompletedBeyondObjective == 1);
+    Check(pending.InteractiveOutstandingBeyondObjective == 4);
+    Check(pending.InteractiveOldestOutstandingAgeTicks == 2);
+    Check(pending.BackgroundOldestOutstandingAgeTicks == 2);
+    Check(pending.InteractiveFirstHopSamples == 2);
+    Check(pending.BackgroundFirstHopSamples == 0);
+    Check(pending.InteractiveFirstHopAgeP95Ticks == 2);
+    Check(pending.InteractiveFirstHopAgeP99Ticks == 2);
+    Check(pending.InteractiveDeliveryAgeP99Ticks == 2);
+    Check(latency.Advance(3) == 1);
+    latency.Advance(4);
+    var finished = latency.Capture();
+    Check(finished.InteractiveDelivered == 3);
+    Check(finished.InteractiveExpired == 3 && finished.BackgroundExpired == 2);
+    Check(finished.Expired == finished.InteractiveExpired + finished.BackgroundExpired);
+    Check(finished.Dropped == finished.InteractiveDropped + finished.BackgroundDropped);
+    Check(finished.Queued == 0 && finished.InteractiveOutstandingBeyondObjective == 0);
+
+    bool invalid = false;
+    try { (settings with { BackgroundCongestionHighPercent = 30,
+        BackgroundCongestionLowPercent = 60 }).Validate(); }
+    catch (ArgumentOutOfRangeException) { invalid = true; }
+    Check(invalid);
+    invalid = false;
+    try { (settings with { PrioritizeInteractiveTraffic = false }).Validate(); }
+    catch (ArgumentException) { invalid = true; }
+    Check(invalid);
 }
 
 static void CheckInteractiveRerouteQos()

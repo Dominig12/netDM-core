@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Short J/K/L/M suites through Host API; correctness, not a performance gate."""
+"""Short J/K/L/M/N suites through Host API; correctness, not a performance gate."""
 import argparse
 import json
 import os
@@ -22,12 +22,15 @@ def api(base, endpoint, payload=None):
 
 
 def collect(base, options, mode, out):
-    config = dict(options, prioritizeInteractiveTraffic=mode in ("K", "L", "M"),
-                  interactiveReservedSlots=32 if mode in ("K", "L", "M") else 0,
-                  prioritizeInteractiveReroutes=mode in ("L", "M"),
-                  interactiveRerouteReservedSlots=4 if mode in ("L", "M") else 0,
-                  prioritizeInteractiveAirtime=mode == "M",
-                  interactiveAirtimeReservePercent=25)
+    config = dict(options, prioritizeInteractiveTraffic=mode in ("K", "L", "M", "N"),
+                  interactiveReservedSlots=32 if mode in ("K", "L", "M", "N") else 0,
+                  prioritizeInteractiveReroutes=mode in ("L", "M", "N"),
+                  interactiveRerouteReservedSlots=4 if mode in ("L", "M", "N") else 0,
+                  prioritizeInteractiveAirtime=mode in ("M", "N"),
+                  interactiveAirtimeReservePercent=25,
+                  backgroundCongestionHighPercent=40 if mode == "N" else 0,
+                  backgroundCongestionLowPercent=20 if mode == "N" else 60,
+                  interactiveLatencyObjectiveTicks=10)
     accepted = api(base, "/api/benchmark-suite/start", config)
     assert accepted["status"] in ("running", "complete"), accepted
     run_id = accepted["runId"]
@@ -56,10 +59,13 @@ def collect(base, options, mode, out):
             assert suite["scenario"] == expected, suite
             assert suite["parameters"]["seed"] == options["seed"], suite
             assert suite["parameters"]["trafficProfile"] == "ss13-mixed", suite
-            assert suite["parameters"]["prioritizeInteractiveTraffic"] == (mode in ("K", "L", "M")), suite
-            assert suite["parameters"]["prioritizeInteractiveReroutes"] == (mode in ("L", "M")), suite
-            assert suite["parameters"]["interactiveRerouteReservedSlots"] == (4 if mode in ("L", "M") else 0), suite
-            assert suite["parameters"]["prioritizeInteractiveAirtime"] == (mode == "M"), suite
+            assert suite["parameters"]["prioritizeInteractiveTraffic"] == (mode in ("K", "L", "M", "N")), suite
+            assert suite["parameters"]["prioritizeInteractiveReroutes"] == (mode in ("L", "M", "N")), suite
+            assert suite["parameters"]["interactiveRerouteReservedSlots"] == (4 if mode in ("L", "M", "N") else 0), suite
+            assert suite["parameters"]["prioritizeInteractiveAirtime"] == (mode in ("M", "N")), suite
+            assert suite["parameters"]["backgroundCongestionHighPercent"] == (40 if mode == "N" else 0), suite
+            assert suite["parameters"]["backgroundCongestionLowPercent"] == (20 if mode == "N" else 60), suite
+            assert suite["parameters"]["interactiveLatencyObjectiveTicks"] == 10, suite
             assert suite["parameters"]["interactiveAirtimeReservePercent"] == 25, suite
             b = report["metrics"]["benchmark"]
             assert b["status"] == "complete" and b["tickRunner"]["failedTicks"] == 0, b
@@ -87,6 +93,16 @@ def collect(base, options, mode, out):
             assert p["interactiveRerouteWaitP95Ticks"] >= 0
             assert p["backgroundRerouteWaitP95Ticks"] >= 0
             assert p["interactiveDelivered"] > 0 and p["backgroundDelivered"] > 0
+            assert p["expired"] == p["interactiveExpired"] + p["backgroundExpired"]
+            assert p["dropped"] == p["interactiveDropped"] + p["backgroundDropped"]
+            assert p["interactiveFirstHopSamples"] + p["backgroundFirstHopSamples"] == p["firstHopSamples"]
+            assert p["interactiveDeliveryAgeP99Ticks"] >= p["interactiveDeliveryAgeP95Ticks"]
+            assert p["backgroundDeliveryAgeP99Ticks"] >= p["backgroundDeliveryAgeP95Ticks"]
+            assert p["interactiveFirstHopAgeP99Ticks"] >= p["interactiveFirstHopAgeP95Ticks"]
+            assert p["backgroundFirstHopAgeP99Ticks"] >= p["backgroundFirstHopAgeP95Ticks"]
+            assert 0 <= p["interactiveOutstandingBeyondObjective"] <= p["interactiveQueued"]
+            assert p["interactiveCompletedBeyondObjective"] <= p["interactiveDelivered"]
+            assert p["backgroundCongestionRejections"] >= 0
             assert radio["interactiveHopTransmissions"] >= 0
             assert radio["backgroundHopTransmissions"] >= 0
             assert radio["interactiveHopTransmissions"] + radio["backgroundHopTransmissions"] == p["wirelessHops"]
@@ -95,6 +111,9 @@ def collect(base, options, mode, out):
             assert radio["backgroundHopBytes"] >= radio["backgroundHopTransmissions"]
             assert report["history"]
             assert all("protectedBackgroundAirtimeDeferralsPerSecond" in row
+                       and "interactiveFirstHopP99Ticks" in row
+                       and "interactiveOutstandingBeyondObjective" in row
+                       and "backgroundCongestionRejectionsPerSecond" in row
                        for row in report["history"])
             rows.append(dict(mode=mode, scenario=expected, offered=load["offered"],
                              delivered=p["delivered"], interactiveDelivered=p["interactiveDelivered"],
@@ -111,7 +130,13 @@ def collect(base, options, mode, out):
                              backgroundRerouteWaitP95=p["backgroundRerouteWaitP95Ticks"],
                              protectedAirtimeDeferrals=radio["protectedBackgroundDeferrals"],
                              interactiveRadioBytes=radio["interactiveHopBytes"],
-                             backgroundRadioBytes=radio["backgroundHopBytes"]))
+                             backgroundRadioBytes=radio["backgroundHopBytes"],
+                             interactiveFirstHopP99=p["interactiveFirstHopAgeP99Ticks"],
+                             interactiveDeliveryP99=p["interactiveDeliveryAgeP99Ticks"],
+                             interactiveOutstandingBeyond=p["interactiveOutstandingBeyondObjective"],
+                             interactiveDropped=p["interactiveDropped"],
+                             interactiveExpired=p["interactiveExpired"],
+                             congestionRejected=p["backgroundCongestionRejections"]))
     return rows
 
 
@@ -149,19 +174,20 @@ def main():
         raise RuntimeError("NetDM Host not ready")
 
     rows = []
-    for mode in ("J", "K", "L", "M"):
+    for mode in ("J", "K", "L", "M", "N"):
         rows.extend(collect(args.url, config, mode, out))
         print(f"{mode}: PASS", flush=True)
 
     summary = [
-        "## SS13 J/K/L/M automated smoke",
+        "## SS13 J/K/L/M/N automated smoke",
         "",
         "**6s/scenario on a shared CI runner: correctness only, NOT a latency/throughput gate.**",
         "",
         "| Scenario | Mode | Offered | Delivered | Interactive | Background | "
         "Interactive P95 (ticks) | Background P95 (ticks) | "
-        "Interactive reroutes | Background reroutes | Protected background deferrals | Runner skips |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "Interactive reroutes | Protected airtime | Congestion rejections | "
+        "Interactive P99 (ticks) | Pending beyond objective | Runner skips |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         summary.append(
@@ -169,7 +195,8 @@ def main():
             f"{row['delivered']} | {row['interactiveDelivered']} | "
             f"{row['backgroundDelivered']} | {row['interactiveP95Ticks']} | "
             f"{row['backgroundP95Ticks']} | {row['interactiveReroutes']} | "
-            f"{row['backgroundReroutes']} | {row['protectedAirtimeDeferrals']} | "
+            f"{row['protectedAirtimeDeferrals']} | {row['congestionRejected']} | "
+            f"{row['interactiveDeliveryP99']} | {row['interactiveOutstandingBeyond']} | "
             f"{row['skippedTicks']} |"
         )
     text = "\n".join(summary) + "\n"
@@ -182,7 +209,7 @@ def main():
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
             f.write(text)
     print(text)
-    print("J/K/L/M comparison passed", flush=True)
+    print("J/K/L/M/N comparison passed", flush=True)
 
 
 if __name__ == "__main__":

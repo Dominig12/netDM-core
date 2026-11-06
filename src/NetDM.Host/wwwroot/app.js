@@ -262,14 +262,20 @@ function drawCharts(){
   plot("packet-queue-chart",[
     {values:history.map(x=>x.packetsQueued||0),color:"#82aafc"},
     {values:history.map(x=>x.packetWirelessHopsPerSecond||0),color:"#f2be7a"},
-    {values:history.map(x=>x.spatialSuccessfulHopsPerSecond||0),color:"#5ddbb7"}
+    {values:history.map(x=>x.spatialSuccessfulHopsPerSecond||0),color:"#5ddbb7"},
+    {values:history.map(x=>x.interactiveOutstandingBeyondObjective||0),color:"#ed8d79"}
   ],"#82aafc");
   $("chart-packets").textContent=last?
     format(last.packetsDeliveredPerSecond||0)+" / "+
     format(last.packetsDroppedPerSecond||0)+" · p95 "+
-    format((last.deliveryP95AgeTicks||0)/10)+"s · first-hop p95 "+
-    format((last.packetFirstHopP95Ticks||0)/10)+"s":"—";
-  $("chart-packet-queue").textContent=last?format(last.packetsQueued||0)+" queued":"—";
+    format((last.deliveryP95AgeTicks||0)/10)+"s · interactive first-hop p99 "+
+    format((last.interactiveFirstHopP99Ticks||0)/10)+"s":"—";
+  $("chart-packet-queue").textContent=last
+    ?format(last.packetsQueued||0)+" queued · interactive overdue "+
+      format(last.interactiveOutstandingBeyondObjective||0)+
+      " · oldest "+format((last.interactiveOldestOutstandingTicks||0)/10)+"s"+
+      (last.backgroundCongestionThrottled?" · background admission limited":"")
+    :"—";
   plot("transport-pipeline-chart",[
     {values:history.map(x=>x.admittedRoutesPerSecond||0),color:"#92adfa"},
     {values:history.map(x=>x.packetEnqueuedPerSecond||0),color:"#5dcfcd"},
@@ -488,6 +494,9 @@ $("bench-form").addEventListener("submit",async event=>{
     interactiveRerouteReservedSlots:Number($("bench-reroute-reserve").value),
     prioritizeInteractiveAirtime:$("bench-airtime-priority").value==="on",
     interactiveAirtimeReservePercent:Number($("bench-airtime-reserve").value),
+    backgroundCongestionHighPercent:Number($("bench-congestion-high").value),
+    backgroundCongestionLowPercent:Number($("bench-congestion-low").value),
+    interactiveLatencyObjectiveTicks:Number($("bench-latency-objective").value),
     interactiveTrafficPercent:Number($("bench-interactive-share").value),
     packetPreRouteBackpressure:$("packet-backpressure").value==="on",
     eventDrivenPacketWaiting:$("packet-wait-mode").value==="event",
@@ -765,6 +774,10 @@ async function pollSuite(){
               : "")+
             (opts.prioritizeInteractiveAirtime
               ? "-airprio1-ap"+opts.interactiveAirtimeReservePercent
+              : "")+
+            (opts.backgroundCongestionHighPercent>0
+              ? "-cong"+opts.backgroundCongestionHighPercent+
+                "lo"+opts.backgroundCongestionLowPercent
               : "")
           : "")+
         "-seed"+(opts?.seed||1337)+".zip";
@@ -783,15 +796,19 @@ $("suite-compare-preset").addEventListener("change",()=>{
   $("suite-traffic-profile").value=game?"ss13-mixed":"uniform";
   $("suite-interactive-share").value="20";
   const packetsPriority=["game-priority","game-reroute-priority",
-    "game-airtime-priority"].includes(preset);
+    "game-airtime-priority","game-congestion-guard"].includes(preset);
   const reroutesPriority=["game-reroute-priority",
-    "game-airtime-priority"].includes(preset);
+    "game-airtime-priority","game-congestion-guard"].includes(preset);
   $("suite-priority-mode").value=packetsPriority?"on":"off";
   $("suite-interactive-reserve").value=packetsPriority?"256":"0";
   $("suite-reroute-priority").value=reroutesPriority?"on":"off";
   $("suite-reroute-reserve").value=reroutesPriority?"4":"0";
-  $("suite-airtime-priority").value=preset==="game-airtime-priority"?"on":"off";
+  $("suite-airtime-priority").value=
+    preset==="game-airtime-priority"||preset==="game-congestion-guard"?"on":"off";
   $("suite-airtime-reserve").value="25";
+  $("suite-congestion-high").value=preset==="game-congestion-guard"?"40":"0";
+  $("suite-congestion-low").value=preset==="game-congestion-guard"?"20":"60";
+  $("suite-latency-objective").value="10";
   $("suite-search").value=preset==="baseline"?"astar":
     (preset==="dense"||preset.startsWith("transport-")||game)?"astar-dense":"astar-pooled";
   $("suite-delivery").value="hopwise";
@@ -833,6 +850,9 @@ $("suite-start").addEventListener("click",async()=>{
         interactiveRerouteReservedSlots:Number($("suite-reroute-reserve").value),
         prioritizeInteractiveAirtime:$("suite-airtime-priority").value==="on",
         interactiveAirtimeReservePercent:Number($("suite-airtime-reserve").value),
+        backgroundCongestionHighPercent:Number($("suite-congestion-high").value),
+        backgroundCongestionLowPercent:Number($("suite-congestion-low").value),
+        interactiveLatencyObjectiveTicks:Number($("suite-latency-objective").value),
         sharedSearch:$("suite-search").value,
         packetTransportEnabled:$("suite-delivery").value==="hopwise",
         spatialReuseEnabled:$("suite-airtime").value==="spatial",
