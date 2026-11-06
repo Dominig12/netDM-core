@@ -548,8 +548,7 @@ public sealed class RadioPacketTransport
             if (!packet.Active) continue;
             if (packet.WaitState is PacketWaitState.Delayed or PacketWaitState.Rerouting or PacketWaitState.CapacityBlocked)
                 _expiredWhileParked++;
-            _expired++;
-            Retire(packet);
+            Expire(packet);
         }
         while (_delayed.TryPeek(out _, out var due) && due.Tick <= tick)
         {
@@ -930,8 +929,7 @@ public sealed class RadioPacketTransport
                 else packet = _queue.Dequeue();
                 if (tick - packet.CreatedTick >= _settings.MaxAgeTicks)
                 {
-                    _expired++;
-                    Retire(packet);
+                    Expire(packet);
                     continue;
                 }
                 if (packet.Index >= packet.Path.Count - 1)
@@ -1024,9 +1022,8 @@ public sealed class RadioPacketTransport
                         }
                         if (packet.Reroutes >= _settings.MaxReroutes)
                         {
-                            _dropped++;
+                            Drop(packet);
                             _linkFailureDrops++;
-                            Retire(packet);
                             break;
                         }
                         if (!CanQueueReroute(packet.TrafficClass))
@@ -1049,9 +1046,8 @@ public sealed class RadioPacketTransport
 
                     case RadioHopOutcome.PacketTooLarge:
                     default:
-                        _dropped++;
+                        Drop(packet);
                         _oversizeDrops++;
-                        Retire(packet);
                         break;
                 }
             }
@@ -1244,6 +1240,22 @@ public sealed class RadioPacketTransport
         else
             _backgroundRerouteWaitAges[
                 (int)(_backgroundRerouteWaitSamples++ % SampleWindow)] = age;
+    }
+
+    private void Expire(PendingPacket packet)
+    {
+        _expired++;
+        if (packet.TrafficClass == PacketTrafficClass.Interactive) _interactiveExpired++;
+        else _backgroundExpired++;
+        Retire(packet);
+    }
+
+    private void Drop(PendingPacket packet)
+    {
+        _dropped++;
+        if (packet.TrafficClass == PacketTrafficClass.Interactive) _interactiveDropped++;
+        else _backgroundDropped++;
+        Retire(packet);
     }
 
     private void Retire(PendingPacket packet)
