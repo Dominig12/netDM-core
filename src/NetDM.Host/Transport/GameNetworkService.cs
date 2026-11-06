@@ -40,6 +40,50 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
 
     public long CurrentTick => Stopwatch.GetTimestamp() / _quantumTicks;
     public Guid StreamId => _packets.ReceiptStreamId;
+    public SharedMediumSnapshot Snapshot => _medium.Snapshot;
+
+    // Game topology is independent from the synthetic benchmark graph.
+    public IReadOnlyList<RadioMediumCellView> ViewCells(int left, int top,
+        int right, int bottom, int z, SharedMediumSnapshot snapshot) =>
+        _medium.ViewCells(left, top, right, bottom, z, 1_500, snapshot);
+
+    public object TopologySummary()
+    {
+        var snapshot = Snapshot;
+        var physical = snapshot.Physical;
+        var levels = physical.Nodes.Values.Where(n => n.Position.HasValue)
+            .GroupBy(n => n.Position!.Value.Z).OrderBy(g => g.Key)
+            .Select(g => new
+            {
+                z = g.Key,
+                nodes = g.Count(),
+                minX = g.Min(n => n.Position!.Value.X),
+                minY = g.Min(n => n.Position!.Value.Y),
+                maxX = g.Max(n => n.Position!.Value.X),
+                maxY = g.Max(n => n.Position!.Value.Y)
+            }).ToArray();
+        return new
+        {
+            streamId = StreamId,
+            version = snapshot.Version,
+            connectivityVersion = physical.ConnectivityVersion,
+            nodes = physical.Nodes.Count,
+            links = physical.Nodes.Values.Sum(n => n.Links.Count) / 2,
+            radios = snapshot.Devices.Count,
+            occupiedCells = snapshot.Cells.Count,
+            levels
+        };
+    }
+
+    // One trusted SS13 process owns the Host's gameplay graph.
+    public int ResetTopology()
+    {
+        var ids = Snapshot.Physical.Nodes.Keys.ToArray();
+        if (ids.Length == 0) return 0;
+        var removed = _medium.RemoveNodes(ids);
+        _packets.NotifyRadioUpdates(ids.Select(id => new RadioNodeUpdate(id)).ToArray());
+        return removed;
+    }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {

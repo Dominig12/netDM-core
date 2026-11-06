@@ -147,3 +147,24 @@ and `op`; response echoes `id` with `ok`.
   call_ext ABI is compile/link/run-tested using a genuine 32-bit
   Windows test process, but the final BYOND DM compile/runtime
   and server trust settings still require verification in BYOND.**
+
+
+## Live SS13 topology in Observatory
+
+Open `http://127.0.0.1:5087` after starting NetDM.Host, choose
+**SS13 · LIVE GAME** in *Topology explorer*, and select a BYOND Z-level.
+**FIT** frames game nodes on the selected layer. The viewer refreshes
+as devices are added, removed, moved or connected. Physical cables are
+shown as edges; wireless occupancy as channel-domain cells without
+creating fake pairwise radio edges. Selecting a device shows its ID,
+coordinates, wired link count, radio range and channel.
+
+**BENCHMARK** still reads its independent synthetic graph.
+`GET /api/game/summary` shows graph counts and Z-level bounds;
+`GET /api/game/map` accepts the benchmark map viewport filters but reads
+the actual `GameNetworkService.Snapshot`.
+
+New local pipe commands: `game_reset` atomically clears the previous
+SS13 graph; `game_radio_batch` applies 1..256 profiles. Only one SS13
+process may own the Host game graph at a time: do not attach independent
+game servers to one development Host. HTTP observation is localhost-only.

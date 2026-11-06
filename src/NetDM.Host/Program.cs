@@ -191,6 +191,60 @@ app.MapGet("/api/map", (NetworkRuntime runtime, BenchmarkRunner benchmark,
     });
 });
 
+// BYOND gameplay positions and radio cells are never mixed with benchmarks.
+app.MapGet("/api/game/summary", (GameNetworkService game) =>
+    Results.Ok(game.TopologySummary()));
+
+app.MapGet("/api/game/map", (GameNetworkService game,
+    int? minX, int? minY, int? maxX, int? maxY, int? z, int? limit) =>
+{
+    var snapshot = game.Snapshot;
+    var physical = snapshot.Physical;
+    var left = minX ?? -100;
+    var top = minY ?? -100;
+    var right = maxX ?? 1000;
+    var bottom = maxY ?? 1000;
+    if (left > right || top > bottom)
+        return Results.BadRequest(new { error = "Invalid viewport bounds." });
+    var maxNodes = Math.Clamp(limit ?? 4_000, 1, 8_000);
+    var layer = z ?? 1;
+    var nodes = TopologyStore.QueryViewport(physical,
+        left, top, right, bottom, layer, maxNodes);
+    var ids = nodes.Select(node => node.Id).ToHashSet();
+    var edges = nodes.SelectMany(node => node.Links.Values
+        .Where(edge => node.Id.Value < edge.To.Value && ids.Contains(edge.To))
+        .Select(edge => new { a = node.Id.ToString(), b = edge.To.ToString(), cost = edge.Cost }))
+        .Take(maxNodes * 8).ToArray();
+    return Results.Ok(new
+    {
+        source = "game",
+        streamId = game.StreamId,
+        version = snapshot.Version,
+        connectivityVersion = physical.ConnectivityVersion,
+        domainCells = game.ViewCells(left, top, right, bottom, layer, snapshot),
+        totalNodes = physical.Nodes.Count,
+        displayedNodes = nodes.Count,
+        truncated = nodes.Count >= maxNodes,
+        nodes = nodes.Select(node =>
+        {
+            var hasRadio = snapshot.Devices.TryGetValue(node.Id, out var profile);
+            return new
+            {
+                id = node.Id.ToString(),
+                x = node.Position!.Value.X,
+                y = node.Position!.Value.Y,
+                z = node.Position!.Value.Z,
+                links = node.Links.Count,
+                traffic = 0,
+                radioEnabled = hasRadio,
+                radioRange = hasRadio ? profile.Range : 0,
+                radioChannel = hasRadio ? profile.Channel : 0
+            };
+        }).ToArray(),
+        edges
+    });
+});
+
 app.MapGet("/api/scheduler", (PriorityWorkScheduler scheduler) =>
     Results.Ok(scheduler.Capture()));
 

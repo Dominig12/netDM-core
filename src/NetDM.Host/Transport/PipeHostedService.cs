@@ -126,6 +126,9 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
                     "stats" => Stats(request),
                     "game_stats" => new PipeResponse(request.Id, true, Game: game.Status()),
                     "game_batch" => ApplyGameBatch(request),
+                    "game_reset" => new PipeResponse(request.Id, true,
+                        Applied: game.ResetTopology()),
+                    "game_radio_batch" => UpdateGameRadioBatch(request),
                     "game_radio" => UpdateGameRadio(request),
                     "packet_receipts" => PollPackets(request),
                     "packet_cancel" => CancelPacket(request),
@@ -226,6 +229,22 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
             new RadioProfile(request.Range, request.Channel, request.RadioCost);
         var result = game.UpdateRadio([new RadioNodeUpdate(new NodeId(request.A),
             Profile: profile, ChangeProfile: true)]);
+        return new PipeResponse(request.Id, true, Version: result.Version);
+    }
+
+    private PipeResponse UpdateGameRadioBatch(PipeRequest request)
+    {
+        if (request.Changes is null || request.Changes.Length is < 1 or > 256)
+            throw new ArgumentException("Game radio batch size must be 1..256.");
+        if (request.Changes.Any(change =>
+            change.Op != "game_radio" || change.A == 0))
+            throw new ArgumentException("Radio batch requires valid game_radio entries.");
+        var updates = request.Changes.Select(change =>
+            new RadioNodeUpdate(new NodeId(change.A),
+                Profile: change.Enabled == false ? null :
+                    new RadioProfile(change.Range, change.Channel, change.RadioCost),
+                ChangeProfile: true)).ToArray();
+        var result = game.UpdateRadio(updates);
         return new PipeResponse(request.Id, true, Version: result.Version);
     }
 
