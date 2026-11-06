@@ -484,6 +484,8 @@ $("bench-form").addEventListener("submit",async event=>{
     trafficProfile:$("bench-traffic-profile").value,
     prioritizeInteractiveTraffic:$("bench-priority-mode").value==="on",
     interactiveReservedSlots:Number($("bench-interactive-reserve").value),
+    prioritizeInteractiveReroutes:$("bench-reroute-priority").value==="on",
+    interactiveRerouteReservedSlots:Number($("bench-reroute-reserve").value),
     interactiveTrafficPercent:Number($("bench-interactive-share").value),
     packetPreRouteBackpressure:$("packet-backpressure").value==="on",
     eventDrivenPacketWaiting:$("packet-wait-mode").value==="event",
@@ -755,7 +757,10 @@ async function pollSuite(){
             "-burst"+opts.burstPeriodSeconds+"d"+opts.burstDurationSeconds+
             "x"+opts.burstMultiplier+
             "-prio"+(opts.prioritizeInteractiveTraffic?1:0)+
-            "-ir"+opts.interactiveReservedSlots
+            "-ir"+opts.interactiveReservedSlots+
+            (opts.prioritizeInteractiveReroutes
+              ? "-rqprio1-rqir"+opts.interactiveRerouteReservedSlots
+              : "")
           : "")+
         "-seed"+(opts?.seed||1337)+".zip";
     }
@@ -772,8 +777,12 @@ $("suite-compare-preset").addEventListener("change",()=>{
   $("suite-duration").value="120";
   $("suite-traffic-profile").value=game?"ss13-mixed":"uniform";
   $("suite-interactive-share").value="20";
-  $("suite-priority-mode").value=preset==="game-priority"?"on":"off";
-  $("suite-interactive-reserve").value=preset==="game-priority"?"256":"0";
+  $("suite-priority-mode").value=
+    preset==="game-priority"||preset==="game-reroute-priority"?"on":"off";
+  $("suite-interactive-reserve").value=
+    preset==="game-priority"||preset==="game-reroute-priority"?"256":"0";
+  $("suite-reroute-priority").value=preset==="game-reroute-priority"?"on":"off";
+  $("suite-reroute-reserve").value=preset==="game-reroute-priority"?"4":"0";
   $("suite-search").value=preset==="baseline"?"astar":
     (preset==="dense"||preset.startsWith("transport-")||game)?"astar-dense":"astar-pooled";
   $("suite-delivery").value="hopwise";
@@ -811,6 +820,8 @@ $("suite-start").addEventListener("click",async()=>{
         interactiveTrafficPercent:Number($("suite-interactive-share").value),
         prioritizeInteractiveTraffic:$("suite-priority-mode").value==="on",
         interactiveReservedSlots:Number($("suite-interactive-reserve").value),
+        prioritizeInteractiveReroutes:$("suite-reroute-priority").value==="on",
+        interactiveRerouteReservedSlots:Number($("suite-reroute-reserve").value),
         sharedSearch:$("suite-search").value,
         packetTransportEnabled:$("suite-delivery").value==="hopwise",
         spatialReuseEnabled:$("suite-airtime").value==="spatial",

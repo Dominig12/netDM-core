@@ -87,6 +87,13 @@
             </select>
             <label for="bench-interactive-reserve">Reserved interactive slots</label>
             <input id="bench-interactive-reserve" type="number" min="0" max="65535" value="0">
+            <label for="bench-reroute-priority">Reroute ticket priorities</label>
+            <select id="bench-reroute-priority" class="workload-select">
+              <option value="off">Off · FIFO reroute queue (J/K)</option>
+              <option value="on">On · weighted interactive reroute (L)</option>
+            </select>
+            <label for="bench-reroute-reserve">Reserved interactive reroute slots</label>
+            <input id="bench-reroute-reserve" type="number" min="0" max="63" value="0">
             <label for="packet-backpressure">Pre-route transport admission</label>
             <select id="packet-backpressure" class="workload-select">
               <option value="off">OFF · Compute route before enqueue (control)</option>
@@ -171,9 +178,10 @@
               <option value="transport-eventwait">H · G + event-driven packet waiting</option>
               <option value="transport-capacitywake">I · H + reroute capacity release notifications</option>
               <option value="game-control">J · SS13 mixed load · I scheduler, no packet priority</option>
-              <option value="game-priority">K · SS13 mixed load · I scheduler + weighted priorities</option>
+              <option value="game-priority">K · SS13 mixed load · I scheduler + weighted packet priorities</option>
+              <option value="game-reroute-priority">L · K + prioritized reroute tickets + reserved reroute capacity</option>
             </select>
-            <small>G/H/I retain their original stress workloads. J/K compare the same local, bursty gameplay traffic with and without packet priority. Each preset produces three isolated reports.</small>
+            <small>G/H/I preserve their original stress tests. J/K/L use the same bursty gameplay traffic: K prioritizes packet visits, L also prioritizes reroutes. Each produces three reports.</small>
           </div>
           <div class="suite-choices">
             <label for="suite-nodes">Nodes
@@ -258,6 +266,15 @@
             </label>
             <label for="suite-interactive-reserve">Reserved interactive slots
               <input id="suite-interactive-reserve" type="number" min="0" max="65535" value="0">
+            </label>
+            <label for="suite-reroute-priority">Reroute ticket priority
+              <select id="suite-reroute-priority" class="workload-select">
+                <option value="off">Off · FIFO tickets (J/K)</option>
+                <option value="on">On · 3:1 weighted tickets (L)</option>
+              </select>
+            </label>
+            <label for="suite-reroute-reserve">Reserved interactive reroute slots
+              <input id="suite-reroute-reserve" type="number" min="0" max="63" value="0">
             </label>
             <label for="suite-backpressure">Pre-route admission
               <select id="suite-backpressure" class="workload-select">
