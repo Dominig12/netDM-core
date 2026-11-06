@@ -1355,8 +1355,8 @@ static void CheckInteractiveAirtimeQos()
         }
     }
 
-    // End-to-end packet scheduler selects demand at the tick boundary.
-    // A 350B background packet is deferred only during a 50B player packet.
+    // Airtime is protected while tick-start interactive work remains;
+    // the background can borrow unused capacity after that work drains.
     var shared = MakeMedium(RadioAirtimeScope.SpatialCells);
     var route = shared.Route(new NodeId(1), new NodeId(2));
     Check(route.Found);
@@ -1365,16 +1365,22 @@ static void CheckInteractiveAirtimeQos()
         PrioritizeInteractiveTraffic: true,
         PrioritizeInteractiveAirtime: true, InteractiveAirtimeReservePercent: 25);
     var transport = new RadioPacketTransport(shared, options);
-    Check(transport.Enqueue(route, 50, 0, PacketTrafficClass.Interactive));
-    Check(transport.Enqueue(route, 350, 0, PacketTrafficClass.Background));
-    Check(transport.Advance(1) == 1);
-    Check(transport.Capture().InteractiveDelivered == 1);
+    // Ready lane order: I,I,I,B,I,B. First B (320B) is blocked by
+    // the 300B quota, despite fitting physical 400B total at that point.
+    // After last I, second B borrows the full remaining 320B.
+    for (int i = 0; i < 4; i++)
+        Check(transport.Enqueue(route, 20, 0, PacketTrafficClass.Interactive));
+    for (int i = 0; i < 2; i++)
+        Check(transport.Enqueue(route, 320, 0, PacketTrafficClass.Background));
+    Check(transport.Advance(1) == 5);
+    Check(transport.Capture().InteractiveDelivered == 4);
+    Check(transport.Capture().BackgroundDelivered == 1);
     Check(transport.Capture().BackgroundQueued == 1);
     Check(shared.Stats().ProtectedBackgroundDeferrals == 1);
     Check(transport.Advance(2) == 1);
-    Check(transport.Capture().BackgroundDelivered == 1);
+    Check(transport.Capture().BackgroundDelivered == 2);
     Check(transport.Capture().Queued == 0);
-    Check(shared.Stats().BackgroundHopBytes == 350);
+    Check(shared.Stats().BackgroundHopBytes == 640);
 
     bool invalid = false;
     try { (options with { PrioritizeInteractiveTraffic = false }).Validate(); }

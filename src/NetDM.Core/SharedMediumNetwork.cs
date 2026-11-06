@@ -727,9 +727,12 @@ public sealed partial class SharedMediumNetwork
 
     /// <summary>
     /// Optional demand-aware airtime reservation. When a packet scheduler
-    /// observes interactive demand at the START of the tick, background
-    /// wireless hops may consume only (100 - interactiveReservePercent)%
-    /// of each channel/cell budget. Interactive hops may use any free bytes.
+    /// has unvisited interactive entries from the tick-start ready snapshot,
+    /// background wireless hops may consume only
+    /// (100 - interactiveReservePercent)% of each channel/cell budget.
+    /// The scheduler passes zero after draining that snapshot, allowing
+    /// background to borrow otherwise idle airtime within the same tick.
+    /// Interactive hops may use any free bytes.
     /// This is admission control, not preemption or an additional airtime
     /// pool. With reservePercent=0 the old shared-medium behavior is preserved.
     /// Cable hops never use radio airtime.
