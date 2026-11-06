@@ -28,11 +28,13 @@ BYOND's official `call_ext` documentation for DLL trust rules.
 
 ## Build
 
-Run in PowerShell with Visual Studio 2022 C++ toolchain installed:
+Run in PowerShell with Visual Studio 2022 or 2026 C++ toolchain installed
+(the test script automatically selects the installed Win32 generator):
 
 ```powershell
 dotnet build src/NetDM.Host/NetDM.Host.csproj -c Release
-cmake -S native/byond -B native/byond/build -G "Visual Studio 17 2022" -A Win32
+cmake -S native/byond -B native/byond/build -G "Visual Studio 18 2026" -A Win32
+# Or use -G "Visual Studio 17 2022" on VS 2022 machines.
 cmake --build native/byond/build --config Release
 # Built: native/byond/build/Release/netdm_byond.dll
 ```
