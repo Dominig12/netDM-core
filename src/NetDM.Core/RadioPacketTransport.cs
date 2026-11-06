@@ -892,6 +892,13 @@ public sealed class RadioPacketTransport
     }
 
     /// <summary>Explicitly cancel a live tracked or untracked packet.</summary>
+    /// <summary>
+    /// Epoch-aware cancellation for clients holding a transport-scoped token.
+    /// A packet ID from a restarted transport must never cancel a new packet.
+    /// </summary>
+    public bool TryCancel(Guid streamId, long packetId) =>
+        streamId == _receiptStreamId && TryCancel(packetId);
+
     public bool TryCancel(long packetId)
     {
         if (packetId < 1) return false;
