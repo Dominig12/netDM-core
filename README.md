@@ -1038,6 +1038,35 @@ faster read-side searches; measure actual movement rate, original
 route throughput, p95, allocations, GC, and packet delivery before
 changing the default.
 
+## M23 — Correlated packet operation outcomes (Core API)
+
+The NetDM packet transport now exposes an **opt-in C# completion contract**:
+`Submit`/`SubmitReserved` return a synchronous acceptance result with a
+transport `StreamId`, unique packet ID, opaque caller `RequestId` and a
+typed rejection reason. Accepted packets produce **one terminal outcome**
+(`Delivered`, `Dropped`, `Expired` or `Cancelled`) with a specific
+reason when they finish, not at route calculation or enqueue time.
+`timeoutTicks` allows a per-packet TTL shorter than `MaxAgeTicks`.
+Typed `TryReserveAdmission(..., out rejection)` distinguishes congested
+background admission from a physically full queue.
+
+`CaptureReceipts(afterSequence, limit)` is a bounded and replayable
+receipt stream with monotonically increasing sequence numbers, a stable
+transport-instance UUID and explicit `Gap` reporting for evicted
+events or invalid cursors. `ReceiptHistoryCapacity` bounds retained
+events (default 1024, 0 disables retention); the poll limit is 1–256.
+`TryCancel(StreamId, PacketId)` prevents stale packet IDs from
+cancelling a packet after a restart. Untracked legacy `Enqueue`
+calls remain unchanged and do not allocate receipts.
+
+See [Packet completion contract](docs/packet-receipts.md) for precise
+usage, wire-ready DTO fields, limitations and planned BYOND bridge
+integration. **The current named pipe still exposes only topology and
+route operations**; packet send/receipt poll operations are not yet
+wired to a live gameplay packet engine, and an acknowledged hopwise
+simulated delivery is not an application response from another player.
+No synthetic benchmark result is presented as a player-visible ACK.
+
 ## M22 — Hysteretic overload admission and honest tail-latency telemetry
 
 **Experimental branch:** `feature/congestion-latency-observability`,
