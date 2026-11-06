@@ -1038,6 +1038,52 @@ faster read-side searches; measure actual movement rate, original
 route throughput, p95, allocations, GC, and packet delivery before
 changing the default.
 
+## M22 — Hysteretic overload admission and honest tail-latency telemetry
+
+**Experimental branch:** `feature/congestion-latency-observability`,
+stacked on M21. J/K/L/M and the legacy G/H/I modes remain unchanged
+by default.
+
+Congestion control (`BackgroundCongestionHighPercent=0` by default) is an
+opt-in, **admission-only** guard. While there are interactive packets or
+interactive pre-route leases outstanding, a background request is rejected
+once queue occupancy (including reserved slots) reaches a configurable
+high watermark. Background admission resumes after occupancy falls to
+the lower watermark, or immediately when interactive demand disappears.
+Default demo N uses **40% high / 20% low** on the shared bounded packet
+queue. This does not evict any accepted packet, exceed the queue cap,
+or invalidate an existing `PacketAdmissionLease`. Both route pre-admission
+and direct packet enqueue enforce the guard. Every rejection is
+counted separately from queue-full rejection; this is *not* a
+promise that accepted interactive requests finish faster.
+
+The latency diagnostics separate **successful completions** from
+uncompleted/lost work:
+- Per-class first-hop P95/P99 and completed-delivery P95/P99 (rolling
+  last 1024 samples each). A first hop is recorded only once a packet
+  actually forwards; this is not a first-response/ack guarantee.
+- `InteractiveLatencyObjectiveTicks` is an **observational** objective
+  (default 10 ticks = 1 second at 100ms/tick), not a kill deadline.
+  The monitor counts completed interactive packets that missed it,
+  currently outstanding packets past it, and oldest in-flight age.
+- Per-class expired and dropped counts prevent low delivered-packet
+  latency percentiles from hiding failed traffic.
+- The Host half-second timeline adds class first-hop P95/P99, delivery
+  P99, pending over objective, oldest ages, class losses, completion
+  objective misses, and background congestion rejection rates.
+
+Network Observatory **N** is M plus the configurable overload guard.
+Short CI J/K/L/M/N tests check accounting and invariants automatically;
+no full user-machine rerun is required. N can intentionally reject more
+background route requests to preserve capacity: throughput and loss
+must be evaluated alongside interactive latency on target hardware
+before enabling by default.
+
+This stage does **not** yet implement explicit per-request ACKs, real
+SS13 packet capture/replay, sender retry contracts or admission feedback
+to BYOND. A realistic interactive response SLO will require tracking a
+response back to the originating player and reporting failures.
+
 ## M21 — Demand-aware wireless airtime QoS
 
 **Experimental branch** `feature/interactive-airtime-qos`, stacked on M20.
