@@ -39,6 +39,9 @@ public sealed record BenchmarkOptions(
     int InteractiveRerouteReservedSlots = 0,
     bool PrioritizeInteractiveAirtime = false,
     int InteractiveAirtimeReservePercent = 25,
+    int BackgroundCongestionHighPercent = 0,
+    int BackgroundCongestionLowPercent = 60,
+    int InteractiveLatencyObjectiveTicks = 10,
     int InteractiveTrafficPercent = 20,
     int LocalTrafficPercent = 85,
     int BurstPeriodSeconds = 20,
@@ -104,7 +107,10 @@ public sealed record BenchmarkOptions(
             PrioritizeInteractiveReroutes: PrioritizeInteractiveReroutes,
             InteractiveRerouteReservedSlots: InteractiveRerouteReservedSlots,
             PrioritizeInteractiveAirtime: PrioritizeInteractiveAirtime,
-            InteractiveAirtimeReservePercent: InteractiveAirtimeReservePercent).Validate();
+            InteractiveAirtimeReservePercent: InteractiveAirtimeReservePercent,
+            BackgroundCongestionHighPercent: BackgroundCongestionHighPercent,
+            BackgroundCongestionLowPercent: BackgroundCongestionLowPercent,
+            InteractiveLatencyObjectiveTicks: InteractiveLatencyObjectiveTicks).Validate();
     }
 }
 
@@ -187,7 +193,14 @@ public sealed record BenchmarkSample(
     int InteractiveCapacityBlockedPackets, int BackgroundCapacityBlockedPackets,
     double InteractiveRerouteWaitP95Ticks, double BackgroundRerouteWaitP95Ticks,
     double InteractiveRadioBytesPerSecond, double BackgroundRadioBytesPerSecond,
-    double ProtectedBackgroundAirtimeDeferralsPerSecond);
+    double ProtectedBackgroundAirtimeDeferralsPerSecond,
+    double InteractiveFirstHopP95Ticks, double InteractiveFirstHopP99Ticks,
+    double BackgroundFirstHopP95Ticks, double BackgroundFirstHopP99Ticks,
+    double InteractiveDeliveryP99Ticks, double BackgroundDeliveryP99Ticks,
+    int InteractiveOutstandingBeyondObjective, double InteractiveOldestOutstandingTicks,
+    double BackgroundOldestOutstandingTicks, double BackgroundCongestionRejectionsPerSecond,
+    bool BackgroundCongestionThrottled, double InteractiveDeliveredBeyondObjectivePerSecond,
+    double InteractiveLossesPerSecond, double BackgroundLossesPerSecond);
 
 /// <summary>
 /// Repeatable CPU/graph workload. Route and movement generators are independent;
@@ -419,7 +432,10 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                      PrioritizeInteractiveReroutes: options.PrioritizeInteractiveReroutes,
                      InteractiveRerouteReservedSlots: options.InteractiveRerouteReservedSlots,
                      PrioritizeInteractiveAirtime: options.PrioritizeInteractiveAirtime,
-                     InteractiveAirtimeReservePercent: options.InteractiveAirtimeReservePercent))
+                     InteractiveAirtimeReservePercent: options.InteractiveAirtimeReservePercent,
+                     BackgroundCongestionHighPercent: options.BackgroundCongestionHighPercent,
+                     BackgroundCongestionLowPercent: options.BackgroundCongestionLowPercent,
+                     InteractiveLatencyObjectiveTicks: options.InteractiveLatencyObjectiveTicks))
                 : null;
             // Reroute computation is never executed while holding the packet
             // queue lock. A separate bounded CPU executor prevents it from
@@ -640,7 +656,29 @@ public sealed class BenchmarkRunner(NetworkRuntime runtime,
                     ((mediumSnapshot?.BackgroundHopBytes ?? 0) -
                         (previousMedium?.BackgroundHopBytes ?? 0)) / interval,
                     ((mediumSnapshot?.ProtectedBackgroundDeferrals ?? 0) -
-                        (previousMedium?.ProtectedBackgroundDeferrals ?? 0)) / interval);
+                        (previousMedium?.ProtectedBackgroundDeferrals ?? 0)) / interval,
+                    packetSnapshot?.InteractiveFirstHopAgeP95Ticks ?? 0,
+                    packetSnapshot?.InteractiveFirstHopAgeP99Ticks ?? 0,
+                    packetSnapshot?.BackgroundFirstHopAgeP95Ticks ?? 0,
+                    packetSnapshot?.BackgroundFirstHopAgeP99Ticks ?? 0,
+                    packetSnapshot?.InteractiveDeliveryAgeP99Ticks ?? 0,
+                    packetSnapshot?.BackgroundDeliveryAgeP99Ticks ?? 0,
+                    packetSnapshot?.InteractiveOutstandingBeyondObjective ?? 0,
+                    packetSnapshot?.InteractiveOldestOutstandingAgeTicks ?? 0,
+                    packetSnapshot?.BackgroundOldestOutstandingAgeTicks ?? 0,
+                    ((packetSnapshot?.BackgroundCongestionRejections ?? 0) -
+                        (previousPackets?.BackgroundCongestionRejections ?? 0)) / interval,
+                    packetSnapshot?.BackgroundCongestionThrottled ?? false,
+                    ((packetSnapshot?.InteractiveCompletedBeyondObjective ?? 0) -
+                        (previousPackets?.InteractiveCompletedBeyondObjective ?? 0)) / interval,
+                    ((packetSnapshot?.InteractiveDropped ?? 0) +
+                        (packetSnapshot?.InteractiveExpired ?? 0) -
+                        (previousPackets?.InteractiveDropped ?? 0) -
+                        (previousPackets?.InteractiveExpired ?? 0)) / interval,
+                    ((packetSnapshot?.BackgroundDropped ?? 0) +
+                        (packetSnapshot?.BackgroundExpired ?? 0) -
+                        (previousPackets?.BackgroundDropped ?? 0) -
+                        (previousPackets?.BackgroundExpired ?? 0)) / interval);
                 _history.Enqueue(sample);
                 while (_history.Count > 1200 && _history.TryDequeue(out _)) { }
                 lock (_gate) _elapsed = seconds;
