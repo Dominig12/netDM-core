@@ -262,14 +262,20 @@ function drawCharts(){
   plot("packet-queue-chart",[
     {values:history.map(x=>x.packetsQueued||0),color:"#82aafc"},
     {values:history.map(x=>x.packetWirelessHopsPerSecond||0),color:"#f2be7a"},
-    {values:history.map(x=>x.spatialSuccessfulHopsPerSecond||0),color:"#5ddbb7"}
+    {values:history.map(x=>x.spatialSuccessfulHopsPerSecond||0),color:"#5ddbb7"},
+    {values:history.map(x=>x.interactiveOutstandingBeyondObjective||0),color:"#ed8d79"}
   ],"#82aafc");
   $("chart-packets").textContent=last?
     format(last.packetsDeliveredPerSecond||0)+" / "+
     format(last.packetsDroppedPerSecond||0)+" · p95 "+
-    format((last.deliveryP95AgeTicks||0)/10)+"s · first-hop p95 "+
-    format((last.packetFirstHopP95Ticks||0)/10)+"s":"—";
-  $("chart-packet-queue").textContent=last?format(last.packetsQueued||0)+" queued":"—";
+    format((last.deliveryP95AgeTicks||0)/10)+"s · interactive first-hop p99 "+
+    format((last.interactiveFirstHopP99Ticks||0)/10)+"s":"—";
+  $("chart-packet-queue").textContent=last
+    ?format(last.packetsQueued||0)+" queued · interactive overdue "+
+      format(last.interactiveOutstandingBeyondObjective||0)+
+      " · oldest "+format((last.interactiveOldestOutstandingTicks||0)/10)+"s"+
+      (last.backgroundCongestionThrottled?" · background admission limited":"")
+    :"—";
   plot("transport-pipeline-chart",[
     {values:history.map(x=>x.admittedRoutesPerSecond||0),color:"#92adfa"},
     {values:history.map(x=>x.packetEnqueuedPerSecond||0),color:"#5dcfcd"},
