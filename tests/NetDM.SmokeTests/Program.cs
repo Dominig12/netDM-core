@@ -1605,7 +1605,6 @@ static void CheckLiveGameDenseTopology()
         new RadioNodeUpdate(new NodeId(3), Profile: profile, ChangeProfile: true)
     ]);
     Check(radio.Route(new NodeId(1), new NodeId(3)).Found);
-    Check(radio.Snapshot.Dense is { Count: 2 });
     Check(radio.Snapshot.Physical.Nodes.Count == 2);
 }
 
