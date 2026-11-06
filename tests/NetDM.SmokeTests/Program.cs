@@ -1152,6 +1152,34 @@ static void CheckPacketReceiptContract()
     Check(fifo.CaptureReceipts().Receipts.Single().Status ==
         PacketCompletionStatus.Cancelled);
 
+    // A missing radio hop is not a successful route or a TTL expiry.
+    var (cutMedium, cutRoute) = MakeRadio();
+    var cut = new RadioPacketTransport(cutMedium, opts with { MaxReroutes = 0 });
+    var cutSubmit = cut.Submit("cut-link", cutRoute, 50, 0);
+    Check(cutSubmit.Accepted);
+    var offline = new RadioNodeUpdate(new NodeId(2), Profile: null, ChangeProfile: true);
+    cutMedium.Update([offline]);
+    cut.NotifyRadioUpdates([offline]);
+    cut.Advance(1);
+    Check(cut.CaptureReceipts().Receipts.Single().Status == PacketCompletionStatus.Dropped);
+    Check(cut.CaptureReceipts().Receipts.Single().Reason == PacketCompletionReason.LinkFailure);
+
+    // Web JSON defaults use camelCase names and numerical enum codes.
+    // This is the schema that a future BYOND bridge must match explicitly.
+    var payload = System.Text.Json.JsonSerializer.Serialize(
+        cancelEvent, new System.Text.Json.JsonSerializerOptions(
+            System.Text.Json.JsonSerializerDefaults.Web));
+    using (var document = System.Text.Json.JsonDocument.Parse(payload))
+    {
+        var root = document.RootElement;
+        Check(root.GetProperty("streamId").GetGuid() == transport.ReceiptStreamId);
+        Check(root.GetProperty("receipts")[0].GetProperty("requestId")
+            .GetString() == "cancel");
+        Check(root.GetProperty("receipts")[0].GetProperty("status").GetInt32() ==
+            (int)PacketCompletionStatus.Cancelled);
+        Check(root.GetProperty("nextSequence").GetInt64() == 4);
+    }
+
     // Running transport with receipt capture disabled must still operate.
     var (noMedium, noRoute) = MakeRadio();
     var noReceipts = new RadioPacketTransport(noMedium, opts with {
