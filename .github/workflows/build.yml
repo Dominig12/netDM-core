@@ -37,6 +37,19 @@ jobs:
         run: dotnet build src/NetDM.Host/NetDM.Host.csproj --configuration Release
       - name: Core correctness on Windows
         run: dotnet run --project tests/NetDM.SmokeTests --configuration Release
+      - name: Win32 BYOND ABI bridge -> x64 Host integration
+        shell: pwsh
+        run: ./scripts/test-byond-bridge.ps1
+      - name: Publish ready-to-install BYOND Win32 bridge
+        uses: actions/upload-artifact@v4
+        with:
+          name: netdm-byond-win32
+          path: |
+            native/byond/build/Release/netdm_byond.dll
+            dm/netdm_bridge.dm
+            docs/byond-bridge.md
+          if-no-files-found: error
+          retention-days: 14
       - name: Profile script smoke test (Windows)
         shell: pwsh
         run: ./scripts/run-profiles.ps1 -Sizes '160' -Seeds '7331' -Routes 20 -ViewportQueries 20 -MoveBatches 4 -LaunchHost

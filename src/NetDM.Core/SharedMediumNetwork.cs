@@ -313,6 +313,54 @@ public sealed partial class SharedMediumNetwork
         }
     }
 
+    /// <summary>
+    /// Apply BYOND-originated add/remove/move/cable batches while preserving
+    /// SharedMedium ownership of the physical snapshot. Rebuild radio membership
+    /// from retained profiles, dropping removed nodes atomically.
+    /// This intentionally uses a conservative full membership rebuild; game
+    /// batches are bounded and routing readers always see one coherent snapshot.
+    /// </summary>
+    public BatchResult ApplyExternalTopology(IReadOnlyList<TopologyChange> changes)
+    {
+        ArgumentNullException.ThrowIfNull(changes);
+        if (changes.Count is < 1 or > 4096)
+            throw new ArgumentOutOfRangeException(nameof(changes));
+        lock (_writer)
+        {
+            var before = Snapshot;
+            VerifyOwnership(before);
+            var result = _runtime.Apply(changes);
+            if (result.Applied == 0) return result;
+            var physical = _runtime.Topology.Snapshot;
+            var devices = before.Devices.ToBuilder();
+            foreach (var id in before.Devices.Keys)
+                if (!physical.Nodes.ContainsKey(id)) devices.Remove(id);
+            var cells = ImmutableDictionary.CreateBuilder<RadioMediumCell, ImmutableHashSet<NodeId>>();
+            foreach (var device in devices)
+                if (physical.Nodes[device.Key].Position is { } position)
+                    AddToCell(cells, device.Key, CellOf(device.Value, position));
+            var nextDevices = devices.ToImmutable();
+            var nextCells = cells.ToImmutable();
+            var affected = changes.SelectMany(c => new[] { c.A, c.B })
+                .Where(id => id.Value != 0).Distinct().ToArray();
+            var next = new SharedMediumSnapshot(checked(before.Version + 1),
+                physical, nextDevices, nextCells)
+            {
+                HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0),
+                // The dense ID table is immutable. Add/remove operations
+                // require a full membership rebuild, not WithChanges().
+                Dense = before.Dense is null ? null :
+                    changes.Any(c => c.Operation is TopologyOperation.AddNode or
+                        TopologyOperation.RemoveNode)
+                        ? DenseRadioIndex.Build(physical, nextDevices, nextCells)
+                        : before.Dense.WithChanges(physical, nextDevices, nextCells, affected)
+            };
+            _cache.Clear();
+            Volatile.Write(ref _current, next);
+            return result;
+        }
+    }
+
     /// <summary>Update a permanent cable link; overlapping radio remains available.</summary>
     public bool SetCable(NodeId a, NodeId b, uint? cost)
     {

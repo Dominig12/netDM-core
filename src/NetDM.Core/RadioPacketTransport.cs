@@ -21,7 +21,8 @@ public enum PacketTrafficClass : byte { Background = 0, Interactive = 1 }
 /// </summary>
 public enum PacketSubmissionRejection : byte
 {
-    None = 0, InvalidRoute = 1, QueueFull = 2, BackgroundCongestion = 3
+    None = 0, InvalidRoute = 1, QueueFull = 2, BackgroundCongestion = 3,
+    RouteSchedulerBusy = 4
 }
 public readonly record struct PacketSubmissionResult(
     bool Accepted, Guid StreamId, long PacketId, string RequestId,

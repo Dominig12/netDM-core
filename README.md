@@ -1038,6 +1038,52 @@ faster read-side searches; measure actual movement rate, original
 route throughput, p95, allocations, GC, and packet delivery before
 changing the default.
 
+## M24 — Native Win32 bridge for BYOND DreamDaemon
+
+**Experimental branch:** `feature/byond-native-bridge`, stacked on PR #24.
+The bridge is **not** a managed .NET DLL loaded inside DreamDaemon:
+`native/byond/netdm_byond.dll` compiles for **Windows x86 / Win32** and
+exports the classic BYOND `call_ext()` string ABI (`__cdecl`,
+`char* function(unsigned argc, char* argv[])`). Its five exports are:
+`netdm_init`, `netdm_send`, `netdm_poll`, `netdm_status` and
+`netdm_shutdown`. The native shim owns a bounded worker/thread and
+queues, not the game/network simulation; it only connects to local
+`\\.\pipe\netdm-core`. DreamDaemon **never waits for named-pipe
+reads or expensive A*** in its main loop. It can enqueue a JSON command
+and drain a bounded count of responses per tick.
+
+The actual network simulation runs in a dedicated 64-bit NetDM.Host
+`GameNetworkService` (not in the benchmark): an isolated graph,
+`SharedMediumNetwork`, `RadioPacketTransport` with per-request receipt
+history and 100-ms `PacketTickRunner`, and bounded reroute CPU work
+through the global scheduler. Named-pipe JSON-line operations:
+- `game_add_node`, `game_remove_node`, `game_move_node`,
+  `game_connect`, `game_disconnect`, `game_batch`, `game_radio`
+- `packet_send` (asynchronous route calculation, packet-slot lease,
+  explicit acceptance), `packet_receipts` (cursor/gap), `packet_cancel`
+  (stream-scoped), `game_stats`
+
+The previous `route`, `stats`, `batch` and legacy topology commands
+are unchanged and operate on the separate original observational
+runtime; gameplay commands must use `game_*`.
+
+**BYOND inclusion:** `#include "dm/netdm_bridge.dm"`. Instantiate
+`/datum/netdm_bridge`, call `initialize()`, then `request()`,
+`game_add_node()`, `game_radio()`, `packet_send()` and
+`request_receipts()`; drain via `pump()` from a normal SS13 subsystem
+tick. The instance has callbacks for submission, delivery, disconnect
+and resynchronization; it does **not** silently retry potentially
+non-idempotent requests after a dropped connection. See
+[Native bridge usage and protocol](docs/byond-bridge.md).
+
+**Verification:** Windows GitHub Actions cross-builds the Win32 DLL and
+runs a **real 32-bit test executable** using the exact exported ABI,
+against a separately running 64-bit NetDM.Host: two live radio nodes,
+packet submission, response correlation and final delivery receipt.
+Linux and Windows managed tests remain required. This is stronger than
+just compiling a DLL, but DreamDaemon compilation/runtime must still
+be verified on the target server with BYOND installed.
+
 ## M23 — Correlated packet operation outcomes (Core API)
 
 The NetDM packet transport now exposes an **opt-in C# completion contract**:

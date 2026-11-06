@@ -94,6 +94,7 @@ CheckRerouteAdaptiveBackoff();
 await CheckDedicatedPacketTicksAsync();
 CheckSpatialRadioAirtime();
 CheckInteractiveAirtimeQos();
+CheckLiveGameDenseTopology();
 CheckRadioSafety();
 CheckWirelessTopology();
 CheckRadioOracle();
@@ -1570,6 +1571,41 @@ static void CheckSpatialRadioAirtime()
     Check(global.TryTransmitHop(new NodeId(3),new NodeId(4),400,100)
         ==RadioHopOutcome.ChannelBusy);
     Check(global.Stats().SpatialSuccessfulHops==0);
+}
+
+static void CheckLiveGameDenseTopology()
+{
+    var runtime = new NetworkRuntime();
+    var radio = new SharedMediumNetwork(runtime, searchMode: SharedRadioSearchMode.AStarDense);
+    var initial = radio.ApplyExternalTopology([
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+            Position: new NodePosition(0, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+            Position: new NodePosition(10, 0))
+    ]);
+    Check(initial.Applied == 2);
+    var profile = new RadioProfile(14, 1, 8);
+    radio.Update([
+        new RadioNodeUpdate(new NodeId(1), Profile: profile, ChangeProfile: true),
+        new RadioNodeUpdate(new NodeId(2), Profile: profile, ChangeProfile: true)
+    ]);
+    Check(radio.Route(new NodeId(1), new NodeId(2)).Found);
+    radio.ApplyExternalTopology([
+        new TopologyChange(TopologyOperation.MoveNode, new NodeId(2),
+            Position: new NodePosition(200, 0))
+    ]);
+    Check(!radio.Route(new NodeId(1), new NodeId(2)).Found);
+    radio.ApplyExternalTopology([
+        new TopologyChange(TopologyOperation.RemoveNode, new NodeId(2)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(3),
+            Position: new NodePosition(10, 0))
+    ]);
+    Check(!radio.Snapshot.Devices.ContainsKey(new NodeId(2)));
+    radio.Update([
+        new RadioNodeUpdate(new NodeId(3), Profile: profile, ChangeProfile: true)
+    ]);
+    Check(radio.Route(new NodeId(1), new NodeId(3)).Found);
+    Check(radio.Snapshot.Physical.Nodes.Count == 2);
 }
 
 static void CheckInteractiveAirtimeQos()
