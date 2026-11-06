@@ -866,7 +866,8 @@ static void CheckTrafficPriorities()
     Check(capacity.BackgroundPreRouteRejections == 1);
     Check(capacity.InteractivePreRouteRejections == 1);
     Check(capacity.InteractiveQueued == 2 && capacity.BackgroundQueued == 6);
-    reserved.Advance(1);
+    // Same shared medium was already advanced to tick 20 by the first test.
+    reserved.Advance(21);
     Check(reserved.Capture().Queued < 8);
     using (var abandoned = reserved.TryReserveAdmission(PacketTrafficClass.Interactive))
         Check(abandoned is not null);
