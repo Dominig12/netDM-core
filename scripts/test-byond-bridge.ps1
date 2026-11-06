@@ -37,6 +37,10 @@ try {
     $bin = Join-Path $BuildPath "Release"
     & (Join-Path $bin "netdm_bridge_test.exe")
     if ($LASTEXITCODE -ne 0) { throw "BYOND Win32 native bridge test failed" }
+} catch {
+    Write-Host "==== NetDM.Host stdout ===="
+    if (Test-Path $hostLog) { Get-Content $hostLog -Tail 160 }
+    throw
 } finally {
     if (-not $runner.HasExited) { Stop-Process -Id $runner.Id -Force }
 }

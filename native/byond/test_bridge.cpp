@@ -50,7 +50,8 @@ std::string waitReply(Api& api, const std::string& id, int seconds = 10) {
     while (std::chrono::steady_clock::now() < until) {
         auto result = api.invoke(api.poll);
         if (result.find("\"bridge\":\"disconnected\"") != std::string::npos)
-            throw std::runtime_error("Unexpected host pipe disconnect");
+            throw std::runtime_error("Unexpected host pipe disconnect while waiting for " +
+                id + ": " + result);
         if (result.find(key) != std::string::npos)
             return result;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
