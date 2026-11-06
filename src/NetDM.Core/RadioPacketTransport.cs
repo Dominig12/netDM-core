@@ -120,7 +120,8 @@ public sealed record PacketTransportCounters(
     int InteractiveRerouteInFlight, int BackgroundRerouteInFlight,
     int InteractiveCapacityBlocked, int BackgroundCapacityBlocked,
     long InteractiveReroutesStarted, long BackgroundReroutesStarted,
-    long InteractiveCapacityWakeups);
+    long InteractiveCapacityWakeups,
+    double InteractiveRerouteWaitP95Ticks, double BackgroundRerouteWaitP95Ticks);
 
 /// <summary>
 /// Bounded round-robin store-and-forward. Advance never calculates a route:
@@ -209,6 +210,9 @@ public sealed class RadioPacketTransport
     private readonly long[] _backgroundAges = new long[SampleWindow];
     private readonly long[] _firstHopAges = new long[SampleWindow];
     private readonly long[] _rerouteWaitAges = new long[SampleWindow];
+    private readonly long[] _interactiveRerouteWaitAges = new long[SampleWindow];
+    private readonly long[] _backgroundRerouteWaitAges = new long[SampleWindow];
+    private long _interactiveRerouteWaitSamples, _backgroundRerouteWaitSamples;
     private readonly long[] _forwardUs = new long[SampleWindow];
     private long _maxAdvanceUs, _maxLockWaitUs, _lockWaitOver100Ms;
     private long _enqueued, _rejected, _delivered, _dropped, _expired;
@@ -522,6 +526,12 @@ public sealed class RadioPacketTransport
             var rerouteAges = new long[rerouteLength];
             Array.Copy(_rerouteWaitAges, rerouteAges, rerouteLength);
             Array.Sort(rerouteAges);
+            var interactiveRerouteAges = new long[(int)Math.Min(_interactiveRerouteWaitSamples, SampleWindow)];
+            var backgroundRerouteAges = new long[(int)Math.Min(_backgroundRerouteWaitSamples, SampleWindow)];
+            Array.Copy(_interactiveRerouteWaitAges, interactiveRerouteAges, interactiveRerouteAges.Length);
+            Array.Copy(_backgroundRerouteWaitAges, backgroundRerouteAges, backgroundRerouteAges.Length);
+            Array.Sort(interactiveRerouteAges);
+            Array.Sort(backgroundRerouteAges);
             int forwardLength = (int)Math.Min(_forwardSampleCount, SampleWindow);
             var forwardUs = new long[forwardLength];
             Array.Copy(_forwardUs, forwardUs, forwardLength);
@@ -570,7 +580,9 @@ public sealed class RadioPacketTransport
                 _capacityBlockedInteractiveCount,
                 _capacityBlockedCount - _capacityBlockedInteractiveCount,
                 _interactiveReroutesStarted, _backgroundReroutesStarted,
-                _interactiveCapacityWakeups);
+                _interactiveCapacityWakeups,
+                Percentile(interactiveRerouteAges, .95),
+                Percentile(backgroundRerouteAges, .95));
         }
     }
 
@@ -1101,6 +1113,12 @@ public sealed class RadioPacketTransport
     {
         var age = Math.Max(0, _lastTick - ticket.RequestedTick);
         _rerouteWaitAges[(int)(_rerouteSampleCount++ % SampleWindow)] = age;
+        if (ticket.TrafficClass == PacketTrafficClass.Interactive)
+            _interactiveRerouteWaitAges[
+                (int)(_interactiveRerouteWaitSamples++ % SampleWindow)] = age;
+        else
+            _backgroundRerouteWaitAges[
+                (int)(_backgroundRerouteWaitSamples++ % SampleWindow)] = age;
     }
 
     private void Retire(PendingPacket packet)
