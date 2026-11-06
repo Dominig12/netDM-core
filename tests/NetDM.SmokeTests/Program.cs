@@ -88,6 +88,7 @@ CheckEventDrivenPacketWaiting();
 CheckEventDrivenRerouteCapacity();
 CheckTrafficPriorities();
 CheckCongestionAndLatencyTelemetry();
+CheckPacketReceiptContract();
 CheckInteractiveRerouteQos();
 CheckRerouteAdaptiveBackoff();
 await CheckDedicatedPacketTicksAsync();
@@ -1000,6 +1001,150 @@ static void CheckCongestionAndLatencyTelemetry()
     try { (settings with { PrioritizeInteractiveTraffic = false }).Validate(); }
     catch (ArgumentException) { invalid = true; }
     Check(invalid);
+}
+
+static void CheckPacketReceiptContract()
+{
+    static (SharedMediumNetwork Medium, RouteResult Route) MakeRadio()
+    {
+        var runtime = new NetworkRuntime();
+        runtime.Apply([
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+                Position: new NodePosition(0, 0)),
+            new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+                Position: new NodePosition(10, 0))
+        ]);
+        var medium = new SharedMediumNetwork(runtime, bytesPerTick: 200);
+        medium.Update([
+            new RadioNodeUpdate(new NodeId(1), Profile: new RadioProfile(14, 1, 8),
+                ChangeProfile: true),
+            new RadioNodeUpdate(new NodeId(2), Profile: new RadioProfile(14, 1, 8),
+                ChangeProfile: true)
+        ]);
+        var route = medium.Route(new NodeId(1), new NodeId(2));
+        Check(route.Found);
+        return (medium, route);
+    }
+
+    var (medium, route) = MakeRadio();
+    var opts = new PacketTransportOptions(
+        Capacity: 8, MaxAgeTicks: 10, MaxAdvancesPerTick: 8,
+        EventDrivenPacketWaiting: true, ReceiptHistoryCapacity: 2);
+    var transport = new RadioPacketTransport(medium, opts);
+    var empty = transport.CaptureReceipts();
+    Check(empty.StreamId == transport.ReceiptStreamId &&
+        empty.Receipts.Length == 0 && empty.LatestSequence == 0 && !empty.Gap);
+    var accepted = transport.Submit("dm-interaction-001", route, 60, 0,
+        PacketTrafficClass.Interactive);
+    Check(accepted.Accepted && accepted.PacketId > 0 &&
+        accepted.Rejection == PacketSubmissionRejection.None);
+    Check(accepted.StreamId == empty.StreamId && accepted.RequestId == "dm-interaction-001");
+    Check(transport.CaptureReceipts().Receipts.Length == 0); // Accepted != delivered.
+    Check(transport.Advance(1) == 1);
+    var first = transport.CaptureReceipts();
+    Check(first.Receipts.Length == 1 && first.Receipts[0].Sequence == 1);
+    Check(first.Receipts[0].RequestId == accepted.RequestId &&
+        first.Receipts[0].PacketId == accepted.PacketId &&
+        first.Receipts[0].Status == PacketCompletionStatus.Delivered &&
+        first.Receipts[0].Reason == PacketCompletionReason.Delivered &&
+        first.Receipts[0].CompletedTick == 1 &&
+        first.Receipts[0].SuccessfulHops == 1);
+    Check(transport.CaptureReceipts().Receipts[0] == first.Receipts[0]); // Retry-safe polling.
+    Check(transport.CaptureReceipts(first.NextSequence).Receipts.Length == 0);
+    Check(!transport.TryCancel(accepted.PacketId)); // Exactly one terminal event.
+
+    var invalid = transport.Submit("bad-route", RouteResult.Missing(route.Version),
+        60, 1);
+    Check(!invalid.Accepted && invalid.PacketId == 0 &&
+        invalid.Rejection == PacketSubmissionRejection.InvalidRoute &&
+        invalid.StreamId == accepted.StreamId);
+    Check(transport.CaptureReceipts().LatestSequence == 1); // No phantom receipt.
+
+    var oversized = transport.Submit("oversized", route, 300, 1,
+        PacketTrafficClass.Background);
+    Check(oversized.Accepted);
+    transport.Advance(2);
+    var timed = transport.Submit("short-ttl", route, 60, 2,
+        PacketTrafficClass.Interactive, timeoutTicks: 1);
+    Check(timed.Accepted);
+    transport.Advance(3);
+    var gap = transport.CaptureReceipts(0);
+    Check(gap.Gap && gap.OldestSequence == 2 && gap.LatestSequence == 3 &&
+        gap.Receipts.Length == 2);
+    Check(gap.Receipts[0].RequestId == "oversized" &&
+        gap.Receipts[0].Status == PacketCompletionStatus.Dropped &&
+        gap.Receipts[0].Reason == PacketCompletionReason.PacketTooLarge);
+    Check(gap.Receipts[1].RequestId == "short-ttl" &&
+        gap.Receipts[1].Status == PacketCompletionStatus.Expired &&
+        gap.Receipts[1].Reason == PacketCompletionReason.TimeToLive &&
+        gap.Receipts[1].CompletedTick == 3);
+    var chunk = transport.CaptureReceipts(1, 1);
+    Check(!chunk.Gap && chunk.Receipts.Length == 1 &&
+        chunk.Receipts[0].Sequence == 2 && chunk.NextSequence == 2);
+    var tail = transport.CaptureReceipts(chunk.NextSequence, 1);
+    Check(tail.Receipts.Length == 1 && tail.NextSequence == 3);
+    Check(!tail.Gap);
+    var fromFuture = transport.CaptureReceipts(100);
+    Check(fromFuture.Gap && fromFuture.Receipts.Length == 2);
+
+    var canceled = transport.Submit("cancel", route, 40, 3);
+    Check(canceled.Accepted && transport.TryCancel(canceled.PacketId) &&
+        !transport.TryCancel(canceled.PacketId));
+    var cancelEvent = transport.CaptureReceipts(3);
+    Check(cancelEvent.Receipts.Length == 1 &&
+        cancelEvent.Receipts[0].Status == PacketCompletionStatus.Cancelled &&
+        cancelEvent.Receipts[0].Reason == PacketCompletionReason.CancelledByCaller);
+    transport.Advance(4);
+    Check(transport.CaptureReceipts(3).Receipts.Length == 1);
+    Check(transport.Capture().Queued == 0);
+    Check(transport.Capture().Expired == 1 && transport.Capture().Dropped == 1);
+
+    // A new instance has a different epoch even though its packet IDs
+    // restart at 1; the bridge must not mix receipt cursors across sessions.
+    var (newMedium, newRoute) = MakeRadio();
+    var other = new RadioPacketTransport(newMedium, opts);
+    Check(other.ReceiptStreamId != transport.ReceiptStreamId);
+    using var lease = other.TryReserveAdmission(PacketTrafficClass.Interactive);
+    Check(lease is not null);
+    var leased = other.SubmitReserved("leased", newRoute, 50, 0, lease!);
+    Check(leased.Accepted && leased.PacketId == 1 &&
+        leased.StreamId == other.ReceiptStreamId);
+    Check(other.Capture().ReservedAdmissions == 0);
+    Check(other.Advance(1) == 1 && other.CaptureReceipts().Receipts.Length == 1);
+    bool threw = false;
+    try { other.SubmitReserved("duplicate", newRoute, 50, 1, lease!); }
+    catch (InvalidOperationException) { threw = true; }
+    Check(threw);
+    threw = false;
+    try { other.Submit("invalid-id".PadRight(129, 'x'), newRoute, 50, 1); }
+    catch (ArgumentException) { threw = true; }
+    Check(threw);
+    threw = false;
+    try { other.Submit("bad-ttl", newRoute, 50, 1, timeoutTicks: 11); }
+    catch (ArgumentOutOfRangeException) { threw = true; }
+    Check(threw);
+
+    // In legacy FIFO mode cancellation must remove the physical queue
+    // entry immediately, otherwise an already-retired packet could forward.
+    var (oldMedium, oldRoute) = MakeRadio();
+    var fifo = new RadioPacketTransport(oldMedium, opts with {
+        EventDrivenPacketWaiting = false
+    });
+    var oldPacket = fifo.Submit("legacy-cancel", oldRoute, 60, 0);
+    Check(oldPacket.Accepted && fifo.Capture().Queued == 1);
+    Check(fifo.TryCancel(oldPacket.PacketId) && fifo.Capture().Queued == 0);
+    Check(fifo.Advance(1) == 0 && fifo.Capture().Delivered == 0);
+    Check(fifo.CaptureReceipts().Receipts.Single().Status ==
+        PacketCompletionStatus.Cancelled);
+
+    // Running transport with receipt capture disabled must still operate.
+    var (noMedium, noRoute) = MakeRadio();
+    var noReceipts = new RadioPacketTransport(noMedium, opts with {
+        ReceiptHistoryCapacity = 0
+    });
+    Check(noReceipts.Submit("no-retention", noRoute, 50, 0).Accepted);
+    noReceipts.Advance(1);
+    Check(noReceipts.CaptureReceipts().Receipts.Length == 0);
 }
 
 static void CheckInteractiveRerouteQos()
