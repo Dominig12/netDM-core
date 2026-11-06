@@ -12,6 +12,7 @@
     var/receipt_cursor = 0
     var/receipt_pending = FALSE
     var/receipt_request_id = null
+    var/last_lost_responses = 0
 
 /datum/netdm_bridge/proc/initialize()
     ready = (call_ext(NETDM_DLL, "netdm_init")() == "1")
@@ -75,6 +76,10 @@
     var/list/results = list()
     if(!ready)
         return results
+    var/list/status = json_decode(call_ext(NETDM_DLL, "netdm_status")())
+    if(islist(status) && status["lostResponses"] > last_lost_responses)
+        on_resync_required("native_mailbox_overflow")
+        last_lost_responses = status["lostResponses"]
     for(var/i = 1, i <= min(max(max_messages, 1), 256), i++)
         var/raw = call_ext(NETDM_DLL, "netdm_poll")()
         if(!length(raw))
