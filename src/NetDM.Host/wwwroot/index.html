@@ -73,6 +73,20 @@
             <input id="packet-max-visits" type="number" min="1" max="65536" value="1024">
             <label for="packet-queue-capacity">Packet queue capacity</label>
             <input id="packet-queue-capacity" type="number" min="1" max="65536" value="2048">
+            <label for="bench-traffic-profile">Workload traffic model</label>
+            <select id="bench-traffic-profile" class="workload-select">
+              <option value="uniform">Uniform (G/H/I control)</option>
+              <option value="ss13-mixed">SS13 mixed · local interactive + background + bursts</option>
+            </select>
+            <label for="bench-interactive-share">Interactive requests, %</label>
+            <input id="bench-interactive-share" type="number" min="0" max="100" value="20">
+            <label for="bench-priority-mode">Packet lane priorities</label>
+            <select id="bench-priority-mode" class="workload-select">
+              <option value="off">Off · original FIFO (control)</option>
+              <option value="on">On · weighted 3:1 interactive/background</option>
+            </select>
+            <label for="bench-interactive-reserve">Reserved interactive slots</label>
+            <input id="bench-interactive-reserve" type="number" min="0" max="65535" value="0">
             <label for="packet-backpressure">Pre-route transport admission</label>
             <select id="packet-backpressure" class="workload-select">
               <option value="off">OFF · Compute route before enqueue (control)</option>
@@ -156,10 +170,27 @@
               <option value="transport-backpressure">G · Dense + adaptive 4096 visits + pre-route backpressure</option>
               <option value="transport-eventwait">H · G + event-driven packet waiting</option>
               <option value="transport-capacitywake">I · H + reroute capacity release notifications</option>
+              <option value="game-control">J · SS13 mixed load · I scheduler, no packet priority</option>
+              <option value="game-priority">K · SS13 mixed load · I scheduler + weighted priorities</option>
             </select>
-            <small>Compare G/H/I on the same workload. H parks waiting packets; I wakes reroute-capacity waiters when a slot is freed. Each generates three reports.</small>
+            <small>G/H/I retain their original stress workloads. J/K compare the same local, bursty gameplay traffic with and without packet priority. Each preset produces three isolated reports.</small>
           </div>
           <div class="suite-choices">
+            <label for="suite-nodes">Nodes
+              <input id="suite-nodes" type="number" min="9" max="30000" value="12000">
+            </label>
+            <label for="suite-routes">Base requests / second
+              <input id="suite-routes" type="number" min="1" max="20000" value="1500">
+            </label>
+            <label for="suite-moves">Movements / second
+              <input id="suite-moves" type="number" min="0" max="10000" value="1000">
+            </label>
+            <label for="suite-links">Outages / second
+              <input id="suite-links" type="number" min="0" max="1000" value="30">
+            </label>
+            <label for="suite-duration">Seconds / scenario
+              <input id="suite-duration" type="number" min="2" max="1800" value="120">
+            </label>
             <label for="suite-search">Routing
               <select id="suite-search" class="workload-select">
                 <option value="dijkstra">Dijkstra baseline</option>
@@ -209,6 +240,24 @@
             </label>
             <label for="suite-queue-capacity">Packet queue capacity
               <input id="suite-queue-capacity" type="number" min="1" max="65536" value="2048">
+            </label>
+            <label for="suite-traffic-profile">Workload traffic model
+              <select id="suite-traffic-profile" class="workload-select">
+                <option value="uniform">Uniform (G/H/I)</option>
+                <option value="ss13-mixed">SS13 mixed, locality and periodic bursts</option>
+              </select>
+            </label>
+            <label for="suite-interactive-share">Interactive request share, %
+              <input id="suite-interactive-share" type="number" min="0" max="100" value="20">
+            </label>
+            <label for="suite-priority-mode">Packet service priority
+              <select id="suite-priority-mode" class="workload-select">
+                <option value="off">Off · single FIFO</option>
+                <option value="on">On · interactive/background 3:1</option>
+              </select>
+            </label>
+            <label for="suite-interactive-reserve">Reserved interactive slots
+              <input id="suite-interactive-reserve" type="number" min="0" max="65535" value="0">
             </label>
             <label for="suite-backpressure">Pre-route admission
               <select id="suite-backpressure" class="workload-select">

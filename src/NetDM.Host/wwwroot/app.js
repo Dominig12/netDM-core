@@ -481,6 +481,10 @@ $("bench-form").addEventListener("submit",async event=>{
     adaptivePacketVisits:$("packet-visit-mode").value==="adaptive",
     packetMaxAdvancesPerTick:Number($("packet-max-visits").value),
     packetQueueCapacity:Number($("packet-queue-capacity").value),
+    trafficProfile:$("bench-traffic-profile").value,
+    prioritizeInteractiveTraffic:$("bench-priority-mode").value==="on",
+    interactiveReservedSlots:Number($("bench-interactive-reserve").value),
+    interactiveTrafficPercent:Number($("bench-interactive-share").value),
     packetPreRouteBackpressure:$("packet-backpressure").value==="on",
     eventDrivenPacketWaiting:$("packet-wait-mode").value==="event",
     eventDrivenRerouteCapacity:$("packet-capacity-wake").value==="on",
@@ -745,6 +749,14 @@ async function pollSuite(){
         (opts?.packetPreRouteBackpressure?"reserved":"openloop")+"-"+
         (opts?.eventDrivenPacketWaiting?"eventwait":"fifo")+
         (opts?.eventDrivenRerouteCapacity?"-capacitywake":"")+
+        (opts?.trafficProfile==="ss13-mixed"
+          ? "-ss13-s"+opts.interactiveTrafficPercent+
+            "-l"+opts.localTrafficPercent+
+            "-burst"+opts.burstPeriodSeconds+"d"+opts.burstDurationSeconds+
+            "x"+opts.burstMultiplier+
+            "-prio"+(opts.prioritizeInteractiveTraffic?1:0)+
+            "-ir"+opts.interactiveReservedSlots
+          : "")+
         "-seed"+(opts?.seed||1337)+".zip";
     }
   }catch(error){console.warn("Suite telemetry unavailable",error);}
@@ -752,8 +764,18 @@ async function pollSuite(){
 $("suite-compare-preset").addEventListener("change",()=>{
   const preset=$("suite-compare-preset").value;
   if(!preset)return;
+  const game=preset.startsWith("game-");
+  $("suite-nodes").value="12000";
+  $("suite-routes").value=game?"120":"1500";
+  $("suite-moves").value=game?"120":"1000";
+  $("suite-links").value=game?"3":"30";
+  $("suite-duration").value="120";
+  $("suite-traffic-profile").value=game?"ss13-mixed":"uniform";
+  $("suite-interactive-share").value="20";
+  $("suite-priority-mode").value=preset==="game-priority"?"on":"off";
+  $("suite-interactive-reserve").value=preset==="game-priority"?"256":"0";
   $("suite-search").value=preset==="baseline"?"astar":
-    (preset==="dense"||preset.startsWith("transport-"))?"astar-dense":"astar-pooled";
+    (preset==="dense"||preset.startsWith("transport-")||game)?"astar-dense":"astar-pooled";
   $("suite-delivery").value="hopwise";
   $("suite-airtime").value="spatial";
   $("suite-ttl").value="900";
@@ -763,23 +785,32 @@ $("suite-compare-preset").addEventListener("change",()=>{
   $("suite-tick-budget").value="25";
   $("suite-backoff-cap").value=preset==="short-wait"?"24":"96";
   $("suite-reroute-cooldown").value="8";
-  const advanced=preset.startsWith("transport-");
+  const advanced=preset.startsWith("transport-")||game;
   $("suite-visit-mode").value=preset==="transport-adaptive"||
     preset==="transport-backpressure"||preset==="transport-eventwait"||
-    preset==="transport-capacitywake"?"adaptive":"fixed";
+    preset==="transport-capacitywake"||game?"adaptive":"fixed";
   $("suite-max-visits").value=advanced&&preset!=="transport-control"?"4096":"1024";
   $("suite-queue-capacity").value=advanced&&preset!=="transport-control"?"4096":"2048";
   $("suite-backpressure").value=preset==="transport-backpressure"||
-    preset==="transport-eventwait"||preset==="transport-capacitywake"?"on":"off";
+    preset==="transport-eventwait"||preset==="transport-capacitywake"||game?"on":"off";
   $("suite-wait-mode").value=preset==="transport-eventwait"||
-    preset==="transport-capacitywake"?"event":"fifo";
-  $("suite-capacity-wake").value=preset==="transport-capacitywake"?"on":"off";
+    preset==="transport-capacitywake"||game?"event":"fifo";
+  $("suite-capacity-wake").value=preset==="transport-capacitywake"||game?"on":"off";
 });
 $("suite-start").addEventListener("click",async()=>{
   try{
     const response=await fetch("/api/benchmark-suite/start",{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({
+        nodes:Number($("suite-nodes").value),
+        routesPerSecond:Number($("suite-routes").value),
+        movesPerSecond:Number($("suite-moves").value),
+        linkChangesPerSecond:Number($("suite-links").value),
+        durationSeconds:Number($("suite-duration").value),
+        trafficProfile:$("suite-traffic-profile").value,
+        interactiveTrafficPercent:Number($("suite-interactive-share").value),
+        prioritizeInteractiveTraffic:$("suite-priority-mode").value==="on",
+        interactiveReservedSlots:Number($("suite-interactive-reserve").value),
         sharedSearch:$("suite-search").value,
         packetTransportEnabled:$("suite-delivery").value==="hopwise",
         spatialReuseEnabled:$("suite-airtime").value==="spatial",
