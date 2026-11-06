@@ -24,7 +24,8 @@ public enum PacketSubmissionRejection : byte
     None = 0, InvalidRoute = 1, QueueFull = 2, BackgroundCongestion = 3
 }
 public readonly record struct PacketSubmissionResult(
-    bool Accepted, long PacketId, string RequestId, PacketSubmissionRejection Rejection);
+    bool Accepted, Guid StreamId, long PacketId, string RequestId,
+    PacketSubmissionRejection Rejection);
 
 public enum PacketCompletionStatus : byte
 {
@@ -886,6 +887,17 @@ public sealed class RadioPacketTransport
         lock (_gate)
         {
             if (!_active.TryGetValue(packetId, out var packet)) return false;
+            if (!_settings.EventDrivenPacketWaiting)
+            {
+                // Legacy FIFO uses queue size as occupied capacity. Remove
+                // the cancelled entry now, not lazily at the next tick.
+                int count = _queue.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    var queued = _queue.Dequeue();
+                    if (!ReferenceEquals(queued, packet)) _queue.Enqueue(queued);
+                }
+            }
             RecordReceipt(packet, PacketCompletionStatus.Cancelled,
                 PacketCompletionReason.CancelledByCaller,
                 _lastTick >= 0 ? _lastTick : packet.CreatedTick);
@@ -918,21 +930,21 @@ public sealed class RadioPacketTransport
         {
             _rejected++;
             _invalidRejects++;
-            return new PacketSubmissionResult(false, 0, requestId ?? "",
+            return new PacketSubmissionResult(false, _receiptStreamId, 0, requestId ?? "",
                 PacketSubmissionRejection.InvalidRoute);
         }
         if (IsAdmissionFull(trafficClass))
         {
             _rejected++;
             _fullRejects++;
-            return new PacketSubmissionResult(false, 0, requestId ?? "",
+            return new PacketSubmissionResult(false, _receiptStreamId, 0, requestId ?? "",
                 PacketSubmissionRejection.QueueFull);
         }
         if (!hasLease && trafficClass == PacketTrafficClass.Background && BackgroundCongested())
         {
             _rejected++;
             _backgroundCongestionRejects++;
-            return new PacketSubmissionResult(false, 0, requestId ?? "",
+            return new PacketSubmissionResult(false, _receiptStreamId, 0, requestId ?? "",
                 PacketSubmissionRejection.BackgroundCongestion);
         }
         var detached = route with { Path = route.Path.ToArray() };
@@ -953,7 +965,7 @@ public sealed class RadioPacketTransport
             _expirations.Enqueue(packet, packet.ExpiresAtTick);
         _enqueued++;
         _peak = Math.Max(_peak, QueuedCount);
-        return new PacketSubmissionResult(true, packet.Id, requestId ?? "",
+        return new PacketSubmissionResult(true, _receiptStreamId, packet.Id, requestId ?? "",
             PacketSubmissionRejection.None);
     }
 
