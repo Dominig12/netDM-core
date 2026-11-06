@@ -873,6 +873,36 @@ static void CheckTrafficPriorities()
         Check(abandoned is not null);
     Check(reserved.Capture().ReservedAdmissions == 0);
 
+    // Weighted lanes must never forward any packet twice in one tick:
+    // 6 interactive and 6 background packets share a two-hop route.
+    var chain = new NetworkRuntime();
+    chain.Apply([
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(1),
+            Position: new NodePosition(0, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(2),
+            Position: new NodePosition(10, 0)),
+        new TopologyChange(TopologyOperation.AddNode, new NodeId(3),
+            Position: new NodePosition(20, 0))
+    ]);
+    var chainMedium = new SharedMediumNetwork(chain, bytesPerTick: 8192);
+    chainMedium.Update(Enumerable.Range(1, 3).Select(x => new RadioNodeUpdate(
+        new NodeId((ulong)x), Profile: new RadioProfile(14, 1, 8),
+        ChangeProfile: true)).ToArray());
+    var chainRoute = chainMedium.Route(new NodeId(1), new NodeId(3));
+    Check(chainRoute.Found && chainRoute.Path.Count == 3);
+    var twoHop = new RadioPacketTransport(chainMedium,
+        options with { Capacity = 32, MaxAdvancesPerTick = 32 });
+    for (int i = 0; i < 6; i++)
+    {
+        Check(twoHop.Enqueue(chainRoute, 100, 0, PacketTrafficClass.Interactive));
+        Check(twoHop.Enqueue(chainRoute, 100, 0, PacketTrafficClass.Background));
+    }
+    Check(twoHop.Advance(1) == 12);
+    Check(twoHop.Capture().Delivered == 0);
+    Check(twoHop.Capture().FirstHopSamples == 12);
+    Check(twoHop.Advance(2) == 12);
+    Check(twoHop.Capture().Delivered == 12);
+
     bool rejected = false;
     try { new PacketTransportOptions(PrioritizeInteractiveTraffic: true).Validate(); }
     catch (ArgumentException) { rejected = true; }
