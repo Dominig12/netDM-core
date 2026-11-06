@@ -101,6 +101,12 @@
             </select>
             <label for="bench-airtime-reserve">Protected radio airtime, %</label>
             <input id="bench-airtime-reserve" type="number" min="1" max="90" value="25">
+            <label for="bench-congestion-high">Background congestion high watermark, % (0 = off)</label>
+            <input id="bench-congestion-high" type="number" min="0" max="100" value="0">
+            <label for="bench-congestion-low">Background congestion release watermark, %</label>
+            <input id="bench-congestion-low" type="number" min="0" max="99" value="60">
+            <label for="bench-latency-objective">Interactive delivery objective (ticks, observational)</label>
+            <input id="bench-latency-objective" type="number" min="1" max="1000000" value="10">
             <label for="packet-backpressure">Pre-route transport admission</label>
             <select id="packet-backpressure" class="workload-select">
               <option value="off">OFF · Compute route before enqueue (control)</option>
@@ -188,8 +194,9 @@
               <option value="game-priority">K · SS13 mixed load · I scheduler + weighted packet priorities</option>
               <option value="game-reroute-priority">L · K + prioritized reroute tickets + reserved reroute capacity</option>
               <option value="game-airtime-priority">M · L + protected interactive radio airtime (25% when needed)</option>
+              <option value="game-congestion-guard">N · M + background congestion admission guard and latency objectives</option>
             </select>
-            <small>G/H/I retain their original stress workload. J/K/L/M share the game-like workload: K prioritizes packet visits, L also prioritizes reroutes, M protects wireless airtime on demand. Three reports per preset.</small>
+            <small>G/H/I retain their stress workload. J/K/L/M/N share the same gameplay traffic: K prioritizes packets, L reroutes, M wireless airtime, N adds opt-in congestion admission. Three reports per preset.</small>
           </div>
           <div class="suite-choices">
             <label for="suite-nodes">Nodes
@@ -292,6 +299,15 @@
             </label>
             <label for="suite-airtime-reserve">Protected radio airtime, %
               <input id="suite-airtime-reserve" type="number" min="1" max="90" value="25">
+            </label>
+            <label for="suite-congestion-high">Background congestion high watermark, % (0 = off)
+              <input id="suite-congestion-high" type="number" min="0" max="100" value="0">
+            </label>
+            <label for="suite-congestion-low">Background congestion release watermark, %
+              <input id="suite-congestion-low" type="number" min="0" max="99" value="60">
+            </label>
+            <label for="suite-latency-objective">Interactive delivery objective, ticks (observational)
+              <input id="suite-latency-objective" type="number" min="1" max="1000000" value="10">
             </label>
             <label for="suite-backpressure">Pre-route admission
               <select id="suite-backpressure" class="workload-select">
