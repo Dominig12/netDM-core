@@ -18,6 +18,14 @@ jobs:
         run: bash tests/host-integration.sh
       - name: Profile script smoke test (Linux)
         run: pwsh -File scripts/run-profiles.ps1 -Sizes '160' -Seeds '7331' -Routes 20 -ViewportQueries 20 -MoveBatches 4 -LaunchHost
+      - name: External monitor smoke test (Linux)
+        shell: pwsh
+        run: |
+          ./scripts/capture-stalls.ps1 -DurationSeconds 2 -Label ci-linux -HostProcessId $PID -BaseUrl http://127.0.0.1:1 -SkipTrace
+          $m = Get-ChildItem benchmarks/results/netdm-ci-linux-*-manifest.json | Select-Object -Last 1
+          $manifest = Get-Content -Raw $m.FullName | ConvertFrom-Json
+          $rows = @(Import-Csv $manifest.externalCsv)
+          if ($rows.Count -lt 5 -or $manifest.targetProcessId -ne $PID) { throw 'External watchdog/manifest failed.' }
   windows-build:
     runs-on: windows-latest
     steps:
@@ -32,3 +40,11 @@ jobs:
       - name: Profile script smoke test (Windows)
         shell: pwsh
         run: ./scripts/run-profiles.ps1 -Sizes '160' -Seeds '7331' -Routes 20 -ViewportQueries 20 -MoveBatches 4 -LaunchHost
+      - name: External monitor smoke test (Windows)
+        shell: pwsh
+        run: |
+          ./scripts/capture-stalls.ps1 -DurationSeconds 2 -Label ci-windows -HostProcessId $PID -BaseUrl http://127.0.0.1:1 -SkipTrace
+          $m = Get-ChildItem benchmarks/results/netdm-ci-windows-*-manifest.json | Select-Object -Last 1
+          $manifest = Get-Content -Raw $m.FullName | ConvertFrom-Json
+          $rows = @(Import-Csv $manifest.externalCsv)
+          if ($rows.Count -lt 5 -or $manifest.targetProcessId -ne $PID) { throw 'External watchdog/manifest failed.' }

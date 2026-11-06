@@ -1038,6 +1038,167 @@ faster read-side searches; measure actual movement rate, original
 route throughput, p95, allocations, GC, and packet delivery before
 changing the default.
 
+## M18 — Event-driven packet waiting (opt-in)
+
+### M18.5 — GC snapshots and optional EventPipe trace
+
+The process monitor now adds last-completed GC generation/index,
+per-GC pause duration, concurrent/compacted flags, heap size,
+fragmentation, committed bytes, and allocation totals. Collection deltas
+and the last full blocking GC are distinguished. The same fields are
+exposed in history and three-scenario ZIPs. Heap details describe the
+last completed GC, not necessarily the current live heap.
+
+For an optional GC event trace, install the diagnostic tool:
+
+~~~powershell
+dotnet tool install --global dotnet-trace
+~~~
+
+Before starting a suite, run one capture per mode:
+
+~~~powershell
+pwsh -File scripts/capture-stalls.ps1 -Label H -DurationSeconds 420
+pwsh -File scripts/capture-stalls.ps1 -Label I -DurationSeconds 420
+~~~
+
+These are **separate** runs; start the corresponding H or I suite
+while that capture is recording. The helper discovers the real NetDM
+PID through localhost /api/health and collects a low-overhead
+gc-collect EventPipe .nettrace while an external PowerShell process
+records heartbeat/HTTP/CPU liveness to CSV. Each run writes a manifest
+with PID and UTC timestamps to correlate the artifacts. Use
+-TraceProfile gc-verbose only if sampled allocation events are needed,
+since that mode may change benchmark performance.
+
+For each mode retain the benchmark suite ZIP, external CSV, trace
+and manifest. Traces may include runtime/application metadata; review
+them before sharing. EventPipe GC collection events provide stronger
+evidence about GC cause and timing than cumulative GC pause totals.
+OS scheduler/context-switch diagnostics would require an additional
+OS trace and are not captured by this script.
+
+### M18.4 — independent external process watchdog
+
+`scripts/observe-host.ps1` runs in **a separate PowerShell 7 process**
+during an H or I three-scenario experiment. It records a monotonic
+100-ms cadence, asynchronous localhost `/api/health` responsiveness
+every second and optionally the host process's liveness and cumulative
+CPU seconds. It outputs a timestamped CSV independently of
+`NetDM.Host` (no shared ThreadPool or GC). Launch one copy before each
+three-scenario suite, e.g.:
+
+```powershell
+pwsh -File scripts/observe-host.ps1 -DurationSeconds 420 -BaseUrl http://127.0.0.1:5087 -OutputPath benchmarks/results/H-external.csv
+```
+
+Choose a distinct output file for I. Run the suite during the 420-second
+observation window, then attach **both the original suite ZIP and
+the external CSV**. An external watchdog gap concurrent with a packet
+runner/history gap suggests a broader host/OS scheduling pause;
+continuous external samples with HTTP failure imply a NetDM process
+problem. If the external clock remains regular and HTTP succeeds while
+the packet runner misses ticks, investigate only the dedicated runner.
+These are **diagnostic indications**, not conclusive proof of causes.
+
+The HTTP request is asynchronous and never blocks the watchdog loop.
+Files are flushed each second; no privileged OS tracing is needed.
+The test suite smoke-checks CSV generation on Linux and Windows.
+
+### M18.3 — process-wide independent heartbeat and ThreadPool observations
+
+During each benchmark scenario, a low-frequency independent background
+OS thread samples monotonic wake-up lateness every ~100 ms and queues
+at most one ThreadPool dispatch probe every ~200 ms. It records process
+CPU cores used, current ThreadPool worker count and pending item count,
+GC pause duration relative to the scenario start, and bounded recent
+events (up to 64) when heartbeat or ThreadPool dispatch delay is >=250 ms.
+All timestamps are UTC and should be correlated with the packet runner
+lag/skip counters and sample interval gaps. There is no socket, file IO,
+unbounded queue or full-tracing subscription in the hot path.
+
+`metrics.benchmark.processStalls` contains the snapshot including
+`events`. Each history entry includes heartbeat lateness, maxima,
+ThreadPool counts/dispatch delay, sampled CPU cores, GC pause and actual
+sample interval. A maximum heartbeat gap means the monitor OS thread
+did not execute for that interval; it is **not** proof of a GC pause or
+of an entire-process stop. Conversely a stalled ThreadPool probe with
+regular heartbeats is evidence of a worker pool scheduling problem.
+GC totals are process-wide and cannot prove the pause happened inside
+a particular span; corroborate with EventPipe or OS tracing.
+
+H and I transport algorithms are unchanged. Re-run both on the same
+host and report the original ZIP files; no baseline gain is claimed
+from this observability-only revision.
+
+### M18.2 — stall attribution counters
+
+The packet runner now exports `maxExecutionMilliseconds` (maximum
+wall time in any individual `Advance` call) and
+`overPeriodExecutionTicks` (calls exceeding the scheduled tick period).
+Packet transport adds `maxAdvanceMilliseconds`,
+`maxLockWaitMilliseconds`, and `lockWaitOver100Milliseconds`.
+All maxima cover the entire isolated benchmark, not a rolling window.
+These counters are included in the existing three-scenario JSON export.
+
+The counters distinguish slow forwarding or monitor contention from
+delayed packet-thread scheduling. They cannot identify the underlying
+OS cause by themselves. The H/I results at seed 1337 showed several
+5–6 second telemetry gaps with tick skipping; controlled repeats with
+these diagnostics are required before assigning cause to I.
+
+### M18.1 — event-driven reroute capacity (experimental profile I)
+
+`eventDrivenRerouteCapacity` extends H with a capacity-blocked state.
+When a reroute finishes/cancels, the transport wakes only as many
+waiting packets as there are free reroute slots, rather than polling
+the saturated queue every eight ticks. H remains the timer-only control.
+
+Blocked packets remain indexed for local topology changes and receive
+a bounded fallback probe (default 32 ticks) to recover unannounced
+physical cable repairs. Versioned FIFO entries ignore obsolete wakeups;
+admission limits, TTL and one-hop-per-tick guarantees are unchanged.
+Counters: `capacityBlockedPackets`, `capacityWakeups`.
+
+TTL expiry heap compaction is now amortized to at most one rebuild per
+512 packet retirements, preventing repeated full-heap rebuilds while
+holding the forwarding lock. Tick runner maximum start lag now
+correctly includes overdue and skipped intervals.
+
+**I** = H + `eventDrivenRerouteCapacity=true`. The new three-scenario
+profile has filenames ending `-eventwait-capacitywake` for safe
+comparison against G and H. This remains opt-in until measured.
+
+
+
+The `eventDrivenPacketWaiting` option is disabled by default to preserve
+the original FIFO as a reproducible control. When enabled, ready packets
+run through a round-robin FIFO while packets delayed by negative-route
+backoff and reroute-queue saturation are parked in a min-heap.
+Packets awaiting reroute are also parked; a safety probe every eight
+ticks detects unreported cable recovery. An index from failed-hop
+endpoints to waiting packet IDs wakes only affected packets when
+`NotifyRadioUpdates` reports a local change.
+
+An independent expiry heap enforces TTL while packets sleep. Parked
+packets and in-flight admission leases still consume the same bounded
+capacity. Generation checks reject stale heap/ready entries and heap
+compaction bounds retained references after frequent changes.
+An admitted packet can make at most one hop per simulation tick.
+Radio airtime and channel capacity are unchanged.
+
+**H** is identical to **G** (Dense A*, 4096-capacity queue, adaptive
+4096 visits/tick, pre-route backpressure, two reroute workers,
+96-tick backoff cap, TTL 900, 12k nodes, 1500 offered/s, seed 1337)
+except for `eventDrivenPacketWaiting=true`.
+ZIP names contain `-eventwait` or `-fifo` to avoid overwriting controls.
+
+New packet counters report ready, delayed and awaiting-reroute
+packets, timer/topology wakeups and expiry during parking.
+Compare G and H over all three 120-second scenarios and evaluate
+delivery, TTL, visit efficiency, reroute pressure and tick execution
+before changing the default. No throughput improvement is presumed.
+
 ## M17 — Adaptive packet forwarding and pre-route backpressure
 
 The Dense A* 12k-node test found that a static network can calculate

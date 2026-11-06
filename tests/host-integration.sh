@@ -63,6 +63,7 @@ curl -fsS -X POST "$base/api/benchmark/start" \
 sleep 4
 
 curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-metrics.json"
+curl -fsS "$base/api/health" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["processId"]>0,d'
 curl -fsS "$base/api/map?minX=-10&minY=-10&maxX=150&maxY=150&limit=1000" > "${RUNNER_TEMP:-/tmp}/netdm-map.json"
 curl -fsS "$base/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-history.json"
 
@@ -284,6 +285,26 @@ for number,key in enumerate(scenarios,1):
     assert bench["tickRunner"] is not None,bench
     assert bench["tickRunner"]["executedTicks"]>0,bench
     assert bench["tickRunner"]["failedTicks"]==0,bench
+    assert bench["processStalls"] is not None,bench
+    process=bench["processStalls"]
+    assert process["heartbeats"]>0,process
+    assert process["maxHeartbeatLatenessMilliseconds"]>=0,process
+    assert process["gcLastIndex"]>=0,process
+    assert process["gcLastPauseMilliseconds"]>=0,process
+    assert process["gcHeapSizeBytes"]>=0,process
+    assert process["gcFragmentedBytes"]>=0,process
+    assert process["gcCommittedBytes"]>=0,process
+    assert process["gcLastFullBlockingIndex"]>=0,process
+    assert process["gcLastFullBlockingPauseMilliseconds"]>=0,process
+    assert process["gcAllocatedBytesSinceStart"]>=0,process
+    assert process["maxThreadPoolDispatchMilliseconds"]>=0,process
+    assert process["threadPoolProbes"]>=0,process
+    assert process["threadPoolPendingWorkItems"]>=0,process
+    assert len(process["events"])<=64,process
+    assert all("processHeartbeatStalls" in row for row in report["history"]),report
+    assert all(row["observedSampleIntervalMilliseconds"]>0 for row in report["history"]),report
+    assert all(row["processGcLastIndex"]>=0 for row in report["history"]),report
+    assert all(row["processGcAllocatedBytesSinceStart"]>=0 for row in report["history"]),report
     assert bench["tickRunner"]["skippedIntervals"]>=0,bench
     assert bench["tickRunner"]["executionP95Milliseconds"]>=0,bench
     assert bench["packetTransport"] is not None,bench
