@@ -16,11 +16,15 @@ docker compose -f deploy/bluemoon/compose.yaml --env-file /path/to/bluemoon.env 
 
 MariaDB создаёт базовую схему, BlueMoon, whitelist и mentor таблицы только в пустом volume. `db-init` проверяет ревизию 4.7 до запуска мира. Постоянные volumes `database`, `game-config` и `game-data` сохраняются при `docker compose stop`. На каждом старте launcher генерирует `game-config/entries/dbconfig.txt` из секрета. Host при отказе packet worker завершается с кодом 70, и Compose перезапускает его по `restart: on-failure`. Для независимой проверки запускайте `Test-Compose.ps1` с новым именем проекта и отдельными секретами. С параметром `-ManifestPath` после успешной приёмки он записывает release manifest с ID проверенных образов, закреплёнными базовыми образами, версией DreamDaemon, источником игры и признаком незакоммиченного дерева ядра.
 
+Приёмка Compose требует, чтобы пересозданный Host воспроизвёл журнал того же раунда из тома `research`. Для штатной остановки она проверяет код завершения контейнера DreamDaemon и отметку о закрытии текущего раунда в MariaDB.
+
 ## Windows x64
 
 Распакуйте комплект в отдельный закрытый для других пользователей каталог и запустите `Start-BlueMoon.ps1` в Windows PowerShell. Для другого экземпляра задайте уникальные `-GamePort`, `-HostPort` и `-DatabasePort`. Лаунчер запускает portable MariaDB, self-contained Host и вложенный DreamDaemon. Путь к Host и PID процессов появляются в `state/run.json`, когда готова сетевая сессия мира. Журнал исследований раунда лежит в `state/research`. Если в него нельзя писать, лаунчер предупреждает и продолжает раунд: исследования закрыты до восстановления, остальная сеть работает.
 
 Для остановки создайте `state/stop.request` либо остановите launcher с клавиатуры. Локальный marker завершает игровой мир и закрывает MariaDB. При падении Host launcher запускает новый Host на том же pipe и ждёт публикации нового snapshot. Больше пяти падений за десять минут останавливают экземпляр с ошибкой. База остаётся в `state/database`, игровые файлы в `game/data`. `state/db-*.ini` и `game/config/entries/dbconfig.txt` содержат локальные учётные данные. Храните каталог экземпляра под контролем оператора.
+
+При остановке через `state/stop.request` лаунчер возвращает ошибку, если DreamDaemon не завершился в отведённое время или вернул ненулевой код. Приёмка комплекта также проверяет, что после перезапуска Host открыт тот же журнал из `state/research`.
 
 Чтобы собрать архив заново, выполните штатный `tools/build/build.bat build --warnings-as-errors` в отдельном checkout игры, соберите Win32 bridge (без Visual Studio: `scripts/build-bridge-mingw.ps1`) и выполните `dotnet publish src/NetDM.Host -c Release -r win-x64 --self-contained`. Передайте собранные каталоги, чистый экспорт исходников и `bin` BYOND 516.1688 в `Build-WindowsBundle.ps1`. MariaDB ZIP автоматически скачивается с архива вендора и проверяется по SHA-256. Подайте разрешённые VC++ redistributable DLL нужной архитектуры через `-VcRuntimeBin` и `-VcRuntime64Bin`. `Test-WindowsBundle.ps1` проверяет свежую распаковку с системным PATH, собственными портами, пустой базой, recovery и остановкой мира.
 

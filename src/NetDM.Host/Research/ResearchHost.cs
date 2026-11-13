@@ -398,7 +398,8 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
     /// <summary>Answers the commands that reached research servers; the ledger decides, the network carries the answer.</summary>
     public int AnswerCommands()
     {
-        var services = game.Services;
+        var session = game.CaptureSession();
+        var services = session.Services;
         var commands = services.TakeHostCommands(64);
         if (commands.Length == 0)
             return 0;
@@ -409,7 +410,8 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
             var result = command.ServiceType switch
             {
                 Diagnostics.DiagnosticsHost.ServiceType => Diagnostics.DiagnosticsHost.Answer(game, command),
-                Diagnostics.QueryHost.ServiceType => Diagnostics.QueryHost.Answer(game, command),
+                Diagnostics.QueryHost.ServiceType => Diagnostics.QueryHost.Answer(session, command),
+                Diagnostics.ShellHost.ServiceType => Diagnostics.ShellHost.Answer(game, session, command),
                 _ => Answer(command)
             };
             var (status, _) = services.Acknowledge(command.DeliveryId, true, null, result);

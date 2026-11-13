@@ -1,9 +1,10 @@
 using System.Buffers;
 using System.Text.Json;
+using NetDM.Services.Shell;
 
 namespace NetDM.Services;
 
-public enum SchemaFieldType : byte { Integer, Number, Text, Enum, Boolean }
+public enum SchemaFieldType : byte { Integer, Number, Text, Enum, Boolean, MultilineText }
 
 /// <summary>
 /// One declared payload field. Values outside the declared range, type or length
@@ -333,7 +334,7 @@ public sealed class SchemaRegistry
         ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["type", "limit", "cursor"] }, MaxPayloadBytes: 512));
         registry.Register(new SchemaDefinition("query.page", 1, 0,
         [
-            new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "partial", "empty", "snapshot_expired", "invalid_cursor"]),
+            new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "partial", "empty", "snapshot_expired", "invalid_cursor", "budget_exhausted"]),
             new SchemaField("revision", SchemaFieldType.Integer, true, 0),
             new SchemaField("count", SchemaFieldType.Integer, true, 0, 16),
             new SchemaField("items", SchemaFieldType.Text, true, MaxLength: 2400),
@@ -341,6 +342,31 @@ public sealed class SchemaRegistry
         ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "revision", "count", "items", "cursor"] },
             MaxPayloadBytes: 4096));
         registry.RegisterCommand("network.query", "services", "query.services_request", 1, "query.page", 1);
+        registry.Register(new SchemaDefinition("query.instance_request", 1, 0,
+            [new SchemaField("instance", SchemaFieldType.Text, true, MaxLength: 64)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["instance"] }, MaxPayloadBytes: 128));
+        registry.Register(new SchemaDefinition("query.schema", 1, 0,
+        [
+            new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "empty", "invalid_request"]),
+            new SchemaField("instance", SchemaFieldType.Text, false, MaxLength: 64),
+            new SchemaField("serviceType", SchemaFieldType.Text, false, MaxLength: 64),
+            new SchemaField("schema", SchemaFieldType.Text, false, MaxLength: 64),
+            new SchemaField("major", SchemaFieldType.Integer, false, 1, 1000),
+            new SchemaField("minor", SchemaFieldType.Integer, false, 0, 1000),
+            new SchemaField("commands", SchemaFieldType.Text, false, MaxLength: 256)
+        ], new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["full"] = ["status", "instance", "serviceType", "schema", "major", "minor", "commands"]
+        }, MaxPayloadBytes: 640));
+        registry.Register(new SchemaDefinition("query.state", 1, 0,
+        [
+            new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "empty", "invalid_request"]),
+            new SchemaField("instance", SchemaFieldType.Text, false, MaxLength: 64),
+            new SchemaField("publication", SchemaFieldType.Enum, false, Values: ["idle", "published"]),
+            new SchemaField("sequence", SchemaFieldType.Text, false, MaxLength: 19)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "instance", "publication", "sequence"] }, MaxPayloadBytes: 256));
+        registry.RegisterCommand("network.query", "schema", "query.instance_request", 1, "query.schema", 1);
+        registry.RegisterCommand("network.query", "state", "query.instance_request", 1, "query.state", 1);
         // WatchQuery: the published state of a network.query instance. It changes when the set of services
         // the device reaches changes; a watcher then asks "services" again.
         registry.Register(new SchemaDefinition("query.directory", 1, 0,
@@ -349,6 +375,29 @@ public sealed class SchemaRegistry
             new SchemaField("digest", SchemaFieldType.Text, true, MaxLength: 16),
             new SchemaField("partial", SchemaFieldType.Boolean, true)
         ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["services", "digest", "partial"] }, MaxPayloadBytes: 128));
+
+        // network.shell (§14.6, P11): a device runs one line of the network shell for whoever reached it.
+        // "rows" holds the records as "name=value,name=value;…". A line that did not run answers its status,
+        // the reason and the position in the line.
+        registry.Register(new SchemaDefinition("shell.run_request", 1, 0,
+            [new SchemaField("line", SchemaFieldType.Text, true, MaxLength: 1024)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["line"] }, MaxPayloadBytes: 2048));
+        registry.Register(new SchemaDefinition("shell.script_request", 1, 0,
+            [new SchemaField("source", SchemaFieldType.MultilineText, true, MaxLength: NetShell.MaxScriptLength)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["source"] }, MaxPayloadBytes: AbsoluteMaxPayloadBytes));
+        registry.Register(new SchemaDefinition("shell.output", 1, 0,
+        [
+            new SchemaField("status", SchemaFieldType.Enum, true, Values:
+                ["ok", "parse_error", "unknown_command", "invalid_argument", "fuel_exhausted", "limit_exceeded", "source_failed"]),
+            new SchemaField("count", SchemaFieldType.Integer, true, 0, 4096),
+            new SchemaField("fuel", SchemaFieldType.Integer, true, 0, 1_000_000),
+            new SchemaField("rows", SchemaFieldType.Text, true, MaxLength: 4096),
+            new SchemaField("error", SchemaFieldType.Text, false, MaxLength: 200),
+            new SchemaField("position", SchemaFieldType.Integer, false, 0, 4096)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "count", "fuel", "rows", "error", "position"] },
+            MaxPayloadBytes: 8192));
+        registry.RegisterCommand("network.shell", "run", "shell.run_request", 1, "shell.output", 1);
+        registry.RegisterCommand("network.shell", "run_script", "shell.script_request", 1, "shell.output", 1);
 
         // Discovery is a network round trip answered by the provider's descriptor.
         registry.Register(new SchemaDefinition("directory.probe", 1, 0,
@@ -403,7 +452,7 @@ public sealed class SchemaRegistry
         {
             if (!ServiceNames.IsValid(field.Name) || !names.Add(field.Name) || field.SinceMinor > schema.Minor ||
                 (field.Required && field.SinceMinor > 0) || field.Min > field.Max ||
-                (field.Type == SchemaFieldType.Text && field.MaxLength is < 1 or > MaxTextLength) ||
+                (field.Type is SchemaFieldType.Text or SchemaFieldType.MultilineText && field.MaxLength is < 1 or > MaxTextLength) ||
                 (field.Type == SchemaFieldType.Enum && field.Values is not { Count: > 0 }))
                 throw new ArgumentException($"Invalid field '{field.Name}' in schema '{schema.Id}'.", nameof(schema));
         }
@@ -484,6 +533,8 @@ public sealed class SchemaRegistry
             double.IsFinite(number) && number >= field.Min && number <= field.Max,
         SchemaFieldType.Text => value.ValueKind == JsonValueKind.String && value.GetString() is { } text &&
             text.Length <= field.MaxLength && !text.Any(char.IsControl),
+        SchemaFieldType.MultilineText => value.ValueKind == JsonValueKind.String && value.GetString() is { } text &&
+            text.Length <= field.MaxLength && !text.Any(c => char.IsControl(c) && c is not ('\n' or '\r' or '\t')),
         SchemaFieldType.Enum => value.ValueKind == JsonValueKind.String && field.Values!.Contains(value.GetString()!),
         SchemaFieldType.Boolean => value.ValueKind is JsonValueKind.True or JsonValueKind.False ||
             (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var flag) && flag is 0 or 1),

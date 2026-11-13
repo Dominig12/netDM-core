@@ -118,6 +118,25 @@
     var/list/stats = reply?["game"]
     return stats?["nodes"]
 
+/datum/netdm_world_smoke/proc/check_research_income(replay)
+    var/storage_id = "smoke-storage"
+    var/point_type = "General Research"
+    if(!replay)
+        var/list/node = list("id" = "base", "prereqs" = list(), "designs" = list(), "costs" = list("[point_type]" = 0), "starting" = TRUE)
+        if(!ok(bridge.research("research_catalog", list("catalog" = "smoke-catalog", "chunk" = 0, "chunks" = 1, "pointTypes" = list(point_type), "nodes" = list(node)))))
+            return "catalog"
+        if(!ok(bridge.research("research_storage", list("storage" = storage_id, "generation" = "1", "domain" = "station", "action" = "register"))))
+            return "storage registration"
+    var/list/grant = list("storage" = storage_id, "generation" = "1", "points" = list("[point_type]" = "7000"))
+    var/list/income = response(bridge.research("research_income", list("interval" = "1", "grants" = list(grant))))
+    var/list/statuses = income?["result"]?["statuses"]
+    if(!income?["ok"] || length(statuses) != 1 || statuses[1] != (replay ? "duplicate" : "ok"))
+        return "income deduplication: [json_encode(income)]"
+    var/list/state = response(bridge.research("research_state", list("storage" = storage_id)))
+    if(!state?["ok"] || state["result"]?["availableMilli"]?[point_type] != "7000")
+        return "wallet balance: [json_encode(state)]"
+    return null
+
 /datum/netdm_world_smoke/proc/synchronize(snapshot_id)
     var/old_stream = bridge.stream_id
     if(!ok(bridge.snapshot_begin(snapshot_id, 2, 4, "0")))
@@ -166,8 +185,9 @@
         list("op" = "add_node", "a" = a, "x" = 100, "y" = 100, "z" = 1),
         list("op" = "add_node", "a" = b, "x" = 200, "y" = 200, "z" = 1),
         list("op" = "add_node", "a" = c, "x" = 300, "y" = 300, "z" = 1),
-        list("op" = "add_node", "a" = diagonal, "x" = 301, "y" = 300, "z" = 1),
-        list("op" = "add_node", "a" = other_level, "x" = 301, "y" = 300, "z" = 2),
+        // Keep the diagonal APC outside bridge range so this tests wired adjacency.
+        list("op" = "add_node", "a" = diagonal, "x" = 400, "y" = 300, "z" = 1),
+        list("op" = "add_node", "a" = other_level, "x" = 400, "y" = 300, "z" = 2),
         list("op" = "area_span", "area" = "1", "x" = 1, "endX" = 4, "y" = 1, "z" = 1),
         list("op" = "area_span", "area" = "2", "x" = 5, "endX" = 8, "y" = 1, "z" = 1),
         list("op" = "area_span", "area" = "3", "x" = 7, "endX" = 9, "y" = 2, "z" = 1),
@@ -533,6 +553,9 @@
         return "initial [problem]"
     if(!deliver("initial-packet"))
         return "initial delivery"
+    problem = check_research_income(FALSE)
+    if(problem)
+        return "initial research [problem]"
     world.log << "NETDM_WORLD_INITIAL_READY"
 
     var/old_stream = bridge.stream_id
@@ -565,6 +588,10 @@
         return "reconnected [problem]"
     if(!deliver("reconnected-packet"))
         return "delivery after resnapshot"
+    problem = check_research_income(TRUE)
+    if(problem)
+        return "recovered research [problem]"
+    world.log << "NETDM_WORLD_RESEARCH_RECOVERED"
     world.log << "NETDM_WORLD_RESTORED"
 #ifdef NETDM_CRASH_SMOKE
     text2file("ready", "/out/after.ready")

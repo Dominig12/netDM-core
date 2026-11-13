@@ -67,10 +67,17 @@ public sealed record ServiceRuntimeOptions(
 /// from the Host instead of a DM inbox. The request still travelled the simulated route to that node.
 /// </summary>
 public sealed record HostCommand(long DeliveryId, string Instance, string ServiceType, string Command,
-    string IdempotencyKey, string Initiator, string Provider, byte[] Arguments);
+    string IdempotencyKey, string Initiator, string Provider, byte[] Arguments)
+{
+    public EndpointKey InitiatorKey { get; init; }
+    public EndpointKey ProviderKey { get; init; }
+    public NodeId ProviderNode { get; init; }
+}
 
 /// <summary>One service of the directory as a query sees it: its name, type and where its provider stands.</summary>
 public readonly record struct DirectoryEntry(string Instance, string ServiceType, NodeId Node);
+
+public sealed record ServiceDescriptor(string Instance, string ServiceType, string Schema, int Major, int Minor, string Commands);
 
 /// <summary>
 /// A bounded slice of the directory in instance order. <c>Revision</c> changes whenever a service appears
@@ -207,6 +214,7 @@ public sealed class ServiceRuntime
     private readonly Dictionary<string, ulong> _endpointGenerations = new(StringComparer.Ordinal);
     private readonly Dictionary<NodeId, HashSet<string>> _nodeEndpoints = new();
     private readonly Dictionary<string, ServiceRecord> _services = new(StringComparer.Ordinal);
+    private readonly Dictionary<(AccessScope Scope, string Principal, string? Type), SortedSet<string>> _directory = new();
     private readonly Dictionary<long, SubscriptionRecord> _subscriptions = new();
     private readonly Dictionary<long, DeliveryRecord> _deliveries = new();
     private readonly Dictionary<long, OperationRecord> _operations = new();
@@ -259,7 +267,8 @@ public sealed class ServiceRuntime
                 }
                 var operation = _operations[delivery.OperationId];
                 taken.Add(new HostCommand(delivery.Id, operation.Instance, operation.ServiceType, operation.Definition.Name,
-                    operation.IdempotencyKey, operation.Initiator.Id, operation.Provider.Id, delivery.Payload ?? []));
+                    operation.IdempotencyKey, operation.Initiator.Id, operation.Provider.Id, delivery.Payload ?? [])
+                    { InitiatorKey = operation.Initiator, ProviderKey = operation.Provider, ProviderNode = _endpoints[operation.Provider.Id].Node });
             }
             return taken.ToArray();
         }
@@ -292,27 +301,98 @@ public sealed class ServiceRuntime
     public DirectorySlice? QueryDirectory(string requester, string? serviceType, string? after, int max)
     {
         lock (_gate)
+            return _endpoints.TryGetValue(requester, out var record) && max > 0
+                ? ReadDirectory(record, serviceType, after, max) : null;
+    }
+
+    public DirectorySlice? QueryDirectory(EndpointKey requester, string? serviceType, string? after, int max)
+    {
+        lock (_gate)
+            return Require(requester, out var record) == ServiceStatus.Ok && max > 0
+                ? ReadDirectory(record!, serviceType, after, max) : null;
+    }
+
+    public (NodeId Origin, DirectorySlice Slice)? QueryDirectory(long deliveryId, string? serviceType, string? after, int max)
+    {
+        lock (_gate)
         {
-            if (!_endpoints.TryGetValue(requester, out var record) || max < 1)
+            if (!_hostPending.Contains(deliveryId) || !_deliveries.TryGetValue(deliveryId, out var delivery) || delivery.Terminal ||
+                Require(delivery.Producer, out var requester) != ServiceStatus.Ok ||
+                Require(delivery.Recipient, out var origin) != ServiceStatus.Ok || AccessFailure(delivery, origin!) is not null || max < 1)
                 return null;
-            var entries = new List<DirectoryEntry>(Math.Min(max, 64));
-            var more = false;
-            foreach (var instance in _services.Keys
-                         .Where(name => after is null || string.CompareOrdinal(name, after) > 0)
-                         .Order(StringComparer.Ordinal))
+            return (origin!.Node, ReadDirectory(requester!, serviceType, after, max));
+        }
+    }
+
+    private DirectorySlice ReadDirectory(EndpointRecord requester, string? type, string? after, int max)
+    {
+        var lower = after is null ? "" : after + '\0';
+        using var open = DirectoryRange(AccessScope.Open, "", type, lower);
+        using var domain = DirectoryRange(AccessScope.Domain, requester.Domain, type, lower);
+        using var owned = DirectoryRange(AccessScope.None, requester.Key.Id, type, lower);
+        IEnumerator<string>?[] ranges = [open, domain, owned];
+        for (var i = 0; i < ranges.Length; i++)
+            if (ranges[i]?.MoveNext() != true)
+                ranges[i] = null;
+        var entries = new List<DirectoryEntry>(Math.Min(max, 64));
+        while (true)
+        {
+            var next = -1;
+            for (var i = 0; i < ranges.Length; i++)
+                if (ranges[i] is { } range && (next < 0 || string.CompareOrdinal(range.Current, ranges[next]!.Current) < 0))
+                    next = i;
+            if (next < 0 || entries.Count == max)
+                return new DirectorySlice(_directoryRevision, entries, next >= 0);
+            var service = _services[ranges[next]!.Current];
+            entries.Add(new DirectoryEntry(service.Instance, service.ServiceType, _endpoints[service.Owner.Id].Node));
+            if (!ranges[next]!.MoveNext())
+                ranges[next] = null;
+        }
+    }
+
+    private IEnumerator<string>? DirectoryRange(AccessScope scope, string principal, string? type, string lower) =>
+        _directory.TryGetValue((scope, principal, type), out var names) && string.CompareOrdinal(lower, "\uffff") <= 0
+            ? names.GetViewBetween(lower, "\uffff").GetEnumerator() : null;
+
+    private void IndexService(ServiceRecord service, EndpointRecord owner, bool add)
+    {
+        var scope = service.Policy.Discover;
+        var principal = scope switch { AccessScope.Open => "", AccessScope.Domain => owner.Domain, _ => owner.Key.Id };
+        Update(null);
+        Update(service.ServiceType);
+
+        void Update(string? type)
+        {
+            var key = (scope, principal, type);
+            if (add)
             {
-                var service = _services[instance];
-                if ((serviceType is not null && service.ServiceType != serviceType) || !Visible(service, record) ||
-                    !_endpoints.TryGetValue(service.Owner.Id, out var owner) || owner.Key != service.Owner)
-                    continue;
-                if (entries.Count >= max)
-                {
-                    more = true;
-                    break;
-                }
-                entries.Add(new DirectoryEntry(instance, service.ServiceType, owner.Node));
+                if (!_directory.TryGetValue(key, out var names))
+                    _directory.Add(key, names = new SortedSet<string>(StringComparer.Ordinal));
+                names.Add(service.Instance);
             }
-            return new DirectorySlice(_directoryRevision, entries, more);
+            else if (_directory.TryGetValue(key, out var names))
+            {
+                names.Remove(service.Instance);
+                if (names.Count == 0)
+                    _directory.Remove(key);
+            }
+        }
+    }
+
+    /// <summary>Reads a single service as the original, generation-fenced initiator of a Host command.</summary>
+    public (NodeId Origin, NodeId Target, ServiceDescriptor Descriptor, long Sequence)? QueryService(
+        long deliveryId, string instance, bool publicationState)
+    {
+        lock (_gate)
+        {
+            if (!_hostPending.Contains(deliveryId) || !_deliveries.TryGetValue(deliveryId, out var delivery) || delivery.Terminal ||
+                Require(delivery.Producer, out var requester) != ServiceStatus.Ok ||
+                Require(delivery.Recipient, out var origin) != ServiceStatus.Ok || AccessFailure(delivery, origin!) is not null ||
+                !_services.TryGetValue(instance, out var target) || Require(target.Owner, out var owner) != ServiceStatus.Ok ||
+                !Allows(target.Policy.Discover, requester!, owner!) ||
+                (publicationState && !Allows(target.Policy.Subscribe, requester!, owner!)))
+                return null;
+            return (origin!.Node, owner!.Node, Descriptor(target), target.LastSequence);
         }
     }
 
@@ -339,8 +419,17 @@ public sealed class ServiceRuntime
                         return ServiceStatus.Duplicate;
                     // Same receiver, new attachment or domain. Policies are rechecked before presentation.
                     UnindexNode(existing);
+                    var changedDomain = existing.Domain != domain;
+                    if (changedDomain)
+                        foreach (var instance in existing.Services)
+                            IndexService(_services[instance], existing, false);
+                    if (changedDomain || existing.Services.Count > 0)
+                        _directoryRevision++;
                     existing.Node = node;
                     existing.Domain = domain;
+                    if (changedDomain)
+                        foreach (var instance in existing.Services)
+                            IndexService(_services[instance], existing, true);
                     IndexNode(existing);
                     return ServiceStatus.Ok;
                 }
@@ -428,7 +517,9 @@ public sealed class ServiceRuntime
             }
             if (record!.Services.Count >= _options.MaxServicesPerEndpoint || _services.Count >= _options.MaxServices)
                 return ServiceStatus.LimitExceeded;
-            _services.Add(instance, new ServiceRecord(instance, serviceType, owner, schema, minor, policy));
+            var service = new ServiceRecord(instance, serviceType, owner, schema, minor, policy);
+            _services.Add(instance, service);
+            IndexService(service, record, true);
             _directoryRevision++;
             record.Services.Add(instance);
             return ServiceStatus.Ok;
@@ -1047,15 +1138,13 @@ public sealed class ServiceRuntime
     {
         if (!_services.TryGetValue(operation.Instance, out var service) || service.Owner != operation.Provider)
             return null;
-        var commands = string.Join(',', _schemas.CommandNames(service.ServiceType));
-        using var document = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(new
-        {
-            instance = service.Instance, serviceType = service.ServiceType, schema = service.Schema.Id,
-            major = service.Schema.Major, minor = service.Minor, commands
-        }));
-        return _schemas.Validate(operation.Definition.Result, 0, document.RootElement, out var canonical) == ServiceStatus.Ok
+        var descriptor = JsonSerializer.SerializeToElement(Descriptor(service), JsonSerializerOptions.Web);
+        return _schemas.Validate(operation.Definition.Result, 0, descriptor, out var canonical) == ServiceStatus.Ok
             ? SchemaRegistry.Project(canonical!, "full") : null;
     }
+
+    private ServiceDescriptor Descriptor(ServiceRecord service) => new(service.Instance, service.ServiceType,
+        service.Schema.Id, service.Schema.Major, service.Minor, string.Join(',', _schemas.CommandNames(service.ServiceType)));
 
     private void RemoveEndpoint(EndpointRecord record, string reason)
     {
@@ -1072,6 +1161,7 @@ public sealed class ServiceRuntime
                 RemoveSubscription(_endpoints[subscription.Subscriber.Id], subscription, "provider_gone");
             }
             _services.Remove(instance);
+            IndexService(service, record, false);
             _directoryRevision++;
         }
         foreach (var subscriptionId in record.Subscriptions.Values.ToArray())

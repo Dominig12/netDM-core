@@ -1,6 +1,6 @@
 param([Parameter(Mandatory)] [string] $Bundle)
 $ErrorActionPreference = 'Stop'
-$root = (Resolve-Path -LiteralPath $Bundle).Path
+$root = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $Bundle).Path)
 $state = Join-Path $root 'state'
 if (Test-Path -LiteralPath $state) { throw 'Use a fresh bundle extraction for acceptance.' }
 $listeners = @()
@@ -30,6 +30,8 @@ $launcherOut = $launcher.StandardOutput.ReadToEndAsync()
 $launcherErr = $launcher.StandardError.ReadToEndAsync()
 $base = "http://127.0.0.1:$($ports[1])"
 $statusPath = Join-Path $state 'run.json'
+# The launcher can spend 90 seconds on DreamDaemon and then shut down MariaDB.
+$stopTimeoutMs = 130000
 
 function Wait-Ready([string] $PreviousStream) {
     $deadline = [DateTime]::UtcNow.AddSeconds(520)
@@ -57,10 +59,18 @@ function Read-RoundCount {
 try {
     $initial = Wait-Ready
     $daemon = Get-CimInstance Win32_Process -Filter "ProcessId=$($initial.daemonPid)"
-    if ($daemon.ExecutablePath -ne (Join-Path $root 'runtime/byond/bin/dd.exe')) { throw 'DreamDaemon is outside the bundle.' }
+    $expectedDaemon = [IO.Path]::GetFullPath((Join-Path $root 'runtime/byond/bin/dd.exe'))
+    if (!$daemon.ExecutablePath -or [IO.Path]::GetFullPath($daemon.ExecutablePath) -ne $expectedDaemon) {
+        throw 'DreamDaemon is outside the bundle.'
+    }
     $summary = Invoke-RestMethod "$base/api/game/summary"
+    $journal = Invoke-RestMethod "$base/api/research/status"
     $rounds = Read-RoundCount
     if ($summary.nodes -lt 1 -or $initial.schema -ne '4.7' -or $rounds -lt 1) { throw 'Missing APCs or database round.' }
+    if ($journal.storage -ne 'ready' -or !$journal.round -or !$journal.totals.balanced -or
+        [IO.Path]::GetDirectoryName($journal.journal) -ne (Join-Path $state 'research')) {
+        throw 'The round did not open a ready, balanced journal in the bundle state.'
+    }
     $developerRoute = Invoke-WebRequest "$base/api/benchmark-suite" -SkipHttpErrorCheck
     if ($developerRoute.StatusCode -ne 404) { throw 'Deployment profile exposes benchmark endpoints.' }
 
@@ -71,8 +81,17 @@ try {
         $recovered.hostPid -eq $initial.hostPid -or $newSummary.nodes -lt 1 -or (Read-RoundCount) -ne $rounds) {
         throw 'Host recovery did not preserve the game and database round.'
     }
+    $replayed = Invoke-RestMethod "$base/api/research/status"
+    if ($replayed.storage -ne 'ready' -or $replayed.round -ne $journal.round -or $replayed.journal -ne $journal.journal -or
+        $replayed.journalFormat -ne $journal.journalFormat -or $replayed.recoveredEntries -lt 2 -or
+        $replayed.truncatedBytes -ne 0 -or !$replayed.totals.balanced) {
+        throw 'The restarted Host did not replay the round journal from the bundle state.'
+    }
     [IO.File]::WriteAllText((Join-Path $state 'stop.request'), 'stop')
-    if (!$launcher.WaitForExit(50000) -or $launcher.ExitCode -ne 0) { throw 'Bundle did not stop cleanly.' }
+    if (!$launcher.WaitForExit($stopTimeoutMs) -or $launcher.ExitCode -ne 0) {
+        if ($launcher.HasExited) { Write-Host $launcherErr.GetAwaiter().GetResult() }
+        throw 'Bundle did not stop cleanly.'
+    }
     Write-Host $launcherOut.GetAwaiter().GetResult()
     $gameLogs = @(Join-Path $state 'game.out.log'; Join-Path $state 'game.err.log')
     $gameLogs += Get-ChildItem -LiteralPath (Join-Path $root 'game/data/logs') -Filter '*.log' -Recurse |
@@ -80,12 +99,12 @@ try {
     if (!(Select-String -LiteralPath $gameLogs -SimpleMatch 'Shutdown complete' -Quiet)) {
         throw 'DreamDaemon did not run the game shutdown path.'
     }
-    Write-Host "BLUEMOON_WINDOWS_PASS nodes=$($summary.nodes) restored=$($newSummary.nodes) rounds=$rounds"
+    Write-Host "BLUEMOON_WINDOWS_PASS nodes=$($summary.nodes) restored=$($newSummary.nodes) rounds=$rounds journalRecords=$($replayed.recoveredEntries)"
 }
 finally {
     if (!$launcher.HasExited -and (Test-Path -LiteralPath $state)) {
         [IO.File]::WriteAllText((Join-Path $state 'stop.request'), 'stop')
-        if (!$launcher.WaitForExit(50000)) { $launcher.Kill($true); $launcher.WaitForExit() }
+        if (!$launcher.WaitForExit($stopTimeoutMs)) { $launcher.Kill($true); $launcher.WaitForExit() }
     }
     $launcher.Dispose()
 }

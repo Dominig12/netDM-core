@@ -26,6 +26,7 @@ function Start-Child([string] $Executable, [string[]] $Arguments, [string] $Dire
     $info.Environment['NETDM_IPC_MODE'] = 'v1'
     $info.Environment['NETDM_PIPE_NAME'] = $pipe
     $info.Environment['NetDM__HttpPort'] = '0'
+    $info.Environment['NetDM__ResearchDirectory'] = Join-Path $work 'research'
     foreach ($argument in $Arguments) { $info.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::Start($info)
     return @{
@@ -56,10 +57,10 @@ try {
 
     $netdmHost = Start-Child (Get-Command dotnet -ErrorAction Stop).Source @($hostPath) $root
     $daemon = Start-Child (Join-Path $ByondBin 'dd.exe') @('smoke.dmb', '0', '-trusted', '-invisible', '-close') $work
-    if (-not $daemon.Process.WaitForExit(30000)) { throw 'DreamDaemon timed out.' }
+    if (-not $daemon.Process.WaitForExit(90000)) { throw 'DreamDaemon timed out.' }
     $log = Get-Content -Raw -LiteralPath (Join-Path $work 'smoke.log')
     Write-Host $log
-    if ($daemon.Process.ExitCode -ne 0 -or $log -notmatch 'NETDM_WORLD_PASS') {
+    if ($daemon.Process.ExitCode -ne 0 -or $log -notmatch '(?m)^NETDM_WORLD_PASS\r?$' -or $log -match 'NETDM_WORLD_FAIL|runtime error') {
         Write-Host $daemon.Stdout.GetAwaiter().GetResult()
         Write-Host $daemon.Stderr.GetAwaiter().GetResult()
         throw "Real DreamDaemon V1 smoke failed, exit code $($daemon.Process.ExitCode)."

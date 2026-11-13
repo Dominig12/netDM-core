@@ -22,6 +22,7 @@ $gameStopPath = $null
 $null = [IO.Directory]::CreateDirectory($state)
 $lease = [IO.File]::Open((Join-Path $state 'instance.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
 $netdm = $daemon = $database = $null
+$requestedStop = $false
 
 function New-Password {
     $bytes = New-Object byte[] 32
@@ -212,15 +213,20 @@ try {
     }
     if ($daemon.HasExited -and $daemon.ExitCode -ne 0) { throw "DreamDaemon exited with $($daemon.ExitCode)." }
     if ($database.HasExited) { throw 'MariaDB exited while BlueMoon was running.' }
+    $requestedStop = Test-Path -LiteralPath $stopRequest
 }
 finally {
+    $shutdownFailure = $null
     [IO.File]::Delete($runStatus)
     [IO.File]::Delete($stopRequest)
     [IO.File]::Delete($bootstrap)
     if ($daemon -and !$daemon.HasExited -and $gameStopPath) {
         $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($gameStopPath))
         [IO.File]::WriteAllText($gameStopPath, 'stop')
-        if (!$daemon.WaitForExit(25000)) { Write-Warning 'DreamDaemon shutdown timed out.' }
+        if (!$daemon.WaitForExit(90000)) { $shutdownFailure = 'DreamDaemon shutdown timed out.' }
+    }
+    if ($daemon -and $daemon.HasExited -and $daemon.ExitCode -ne 0) {
+        $shutdownFailure = "DreamDaemon exited with $($daemon.ExitCode) during shutdown."
     }
     Stop-OwnedProcess $daemon
     if ($gameStopPath) { [IO.File]::Delete($gameStopPath) }
@@ -230,4 +236,8 @@ finally {
     }
     Stop-OwnedProcess $database
     $lease.Dispose()
+    if ($shutdownFailure) {
+        if ($requestedStop) { throw $shutdownFailure }
+        Write-Warning $shutdownFailure
+    }
 }

@@ -80,7 +80,7 @@ services:
     volumes: [ipc:/run/netdm, game-config:/game/config, game-data:/game/data]
     networks: [backend, edge]
     ports: ['${BLUEMOON_BIND_ADDRESS:-127.0.0.1}:${BLUEMOON_PORT:-1337}:1337']
-    stop_grace_period: 30s
+    stop_grace_period: 90s
     healthcheck:
       test: [CMD, curl, -fsS, http://netdm:5088/api/readiness/game]
       interval: 3s

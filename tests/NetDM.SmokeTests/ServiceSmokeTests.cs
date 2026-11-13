@@ -431,6 +431,29 @@ static class ServiceSmokeTests
         services.DetachEndpoint(pump);
         var gone = services.QueryDirectory("console-1", null, null, 8)!;
         Check(gone.Entries.Count == 0 && gone.Revision == all.Revision + 4, "services that left move the revision");
+
+        // Hidden and wrong-type entries cannot consume the scan budget or create an empty continuation.
+        for (var i = 0; i < 80; i++)
+        {
+            var endpoint = new EndpointKey($"bulk-{i:D2}", 1);
+            services.AttachEndpoint(endpoint, new NodeId(3), "syndicate");
+            services.RegisterService(endpoint, $"hidden-{i:D2}", "machine.control", "machine.power_state", 1, 0);
+            services.RegisterService(endpoint, $"open-{i:D2}", "machine.door", "machine.door_state", 1, 0,
+                new ServicePolicy(Discover: AccessScope.Open));
+        }
+        services.RegisterService(console, "own-pump", "machine.control", "machine.power_state", 1, 0,
+            new ServicePolicy(Discover: AccessScope.None));
+        var only = services.QueryDirectory(console, "machine.control", null, 1)!;
+        Check(only.Entries.Single().Instance == "own-pump" && !only.More, "the budget covers only discoverable entries of the requested type");
+        var visible = services.QueryDirectory(console, "machine.door", null, 64)!;
+        var next = services.QueryDirectory(console, "machine.door", visible.Entries[^1].Instance, 64)!;
+        Check(visible.Entries.Count == 64 && visible.More && next.Entries.Count == 16 && !next.More &&
+            next.Entries[0].Instance == "open-64", "the bounded range advances without gaps or duplicates");
+        var moved = new EndpointKey("bulk-00", 1);
+        services.AttachEndpoint(moved, new NodeId(2), "station");
+        var changed = services.QueryDirectory(console, "machine.control", null, 8)!;
+        Check(changed.Revision > only.Revision && changed.Entries.Select(entry => entry.Instance).SequenceEqual(["hidden-00", "own-pump"]) &&
+            changed.Entries[0].Node == new NodeId(2), "a same-generation domain change reindexes its services and moves the revision");
     }
 
     private static void CheckPoliciesAndDiscovery()

@@ -90,6 +90,8 @@ static class DeviceAttachmentSmokeTests
         ]);
         var targets = new HashSet<NodeId> { new(4), new(5), new(7) };
         var reached = SharedMediumNetwork.ReachAll(medium.Snapshot, [new NodeId(1)], targets);
+        var limited = SharedMediumNetwork.ReachAll(medium.Snapshot, new NodeId(1), targets, 1, out var exhausted);
+        Check(exhausted && !limited.ContainsKey(new NodeId(4)), "a reachability budget cannot claim an unexamined target");
         Check(reached.Count == 2 && reached[new NodeId(4)] is { Hops: 3, RadioHops: 0, LastHop.Value: 3 } && !reached.ContainsKey(new NodeId(5)),
             "a broadcast reaches listeners through forwarding nodes only");
         var both = SharedMediumNetwork.ReachAll(medium.Snapshot, [new NodeId(1), new NodeId(8)], targets);

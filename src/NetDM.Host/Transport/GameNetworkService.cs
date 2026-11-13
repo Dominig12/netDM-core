@@ -22,7 +22,7 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
     /// operations at once instead of 8.
     /// </summary>
     private static readonly ServiceRuntimeOptions ServiceOptions = new(HostProvidedTypes: ["research.server", NetDM.Host.Diagnostics.DiagnosticsHost.ServiceType,
-        NetDM.Host.Diagnostics.QueryHost.ServiceType],
+        NetDM.Host.Diagnostics.QueryHost.ServiceType, NetDM.Host.Diagnostics.ShellHost.ServiceType],
         MaxActiveOperationsPerEndpoint: 32);
     private const int MaxDeliverySubmissions = 256;
     private int _deliverySubmissions;
@@ -73,6 +73,7 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
     }
 
     public long CurrentTick => Now();
+    internal Session CaptureSession() => Current;
     public Guid StreamId => Current.Packets.ReceiptStreamId;
     public SharedMediumSnapshot Snapshot => Current.Medium.Snapshot;
     internal bool WorkersReady => Volatile.Read(ref _tickTask) is { IsCompleted: false } &&

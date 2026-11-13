@@ -17,8 +17,16 @@ function Read-Summary {
     return Compose exec -T netdm curl -fsS http://127.0.0.1:5087/api/game/summary | ConvertFrom-Json
 }
 
+function Read-Research {
+    return Compose exec -T netdm curl -fsS http://127.0.0.1:5087/api/research/status | ConvertFrom-Json
+}
+
 function Read-RoundCount {
     return [int](Compose exec -T db sh -ec 'export MYSQL_PWD="$(cat /run/secrets/db_password)"; mariadb -ubluemoon -Dbluemoon -Nse "SELECT COUNT(*) FROM round"')
+}
+
+function Read-LatestRound {
+    return Compose exec -T db sh -ec 'export MYSQL_PWD="$(cat /run/secrets/db_password)"; mariadb -ubluemoon -Dbluemoon -Nse "SELECT id, shutdown_datetime IS NOT NULL FROM round ORDER BY id DESC LIMIT 1"'
 }
 
 if (Compose ps -aq) { throw 'Use a fresh Compose project for acceptance.' }
@@ -26,11 +34,19 @@ try {
     Compose up -d --no-build --wait --wait-timeout 900
     $initial = Read-Summary
     if ($initial.nodes -lt 1) { throw 'Observe did not publish any APCs.' }
+    $journal = Read-Research
+    if ($journal.storage -ne 'ready' -or !$journal.round -or !$journal.totals.balanced -or
+        $journal.journal -notlike '/var/lib/netdm/research/research-*.journal') {
+        throw 'The round did not open a ready, balanced journal on the research volume.'
+    }
     $game = Compose ps -q game
     $db = Compose ps -q db
     $hostId = Compose ps -q netdm
     $rounds = Read-RoundCount
     if ($rounds -lt 1) { throw 'BlueMoon did not initialize a database round.' }
+    $round = Read-LatestRound
+    if ($round -notmatch '^(\d+)\t0$') { throw 'BlueMoon has no open database round.' }
+    $roundId = $Matches[1]
     $byondVersion = (Compose exec -T game DreamDaemon -version 2>&1 | Out-String).Trim()
     Write-Host $byondVersion
     if ($byondVersion -notmatch '516\.1688') { throw 'Expected DreamDaemon 516.1688 in the game image.' }
@@ -47,6 +63,7 @@ try {
     if ($killed -notmatch '^137 ' -and [int]($killed -split ' ')[1] -le $restarts) { throw "Expected Host SIGKILL, got '$killed'." }
     Compose exec -T game test -S /run/netdm/session/core.sock
     Compose up -d --no-build --no-deps --force-recreate netdm
+    if ((Compose ps -q netdm) -eq $hostId) { throw 'Compose did not recreate the Host container.' }
     $recovered = $null
     $deadline = [DateTime]::UtcNow.AddSeconds(45)
     while ([DateTime]::UtcNow -lt $deadline) {
@@ -63,11 +80,18 @@ try {
     if (!$recovered -or (Compose ps -q game) -ne $game -or (Compose ps -q db) -ne $db -or (Read-RoundCount) -ne $rounds) {
         throw 'Host recovery did not preserve the game and database round.'
     }
+    $replayed = Read-Research
+    if ($replayed.storage -ne 'ready' -or $replayed.round -ne $journal.round -or $replayed.journal -ne $journal.journal -or
+        $replayed.journalFormat -ne $journal.journalFormat -or $replayed.recoveredEntries -lt 2 -or
+        $replayed.truncatedBytes -ne 0 -or !$replayed.totals.balanced) {
+        throw 'The recreated Host did not replay the round journal from the research volume.'
+    }
+    Write-Host "BlueMoon Compose recovered: nodes=$($recovered.nodes) round=$roundId journalRecords=$($replayed.recoveredEntries)"
     Compose stop game
-    if ((docker inspect -f '{{.State.ExitCode}}' $game) -ne '0') { throw 'DreamDaemon did not stop cleanly.' }
-    $closedRounds = [int](Compose exec -T db sh -ec 'export MYSQL_PWD="$(cat /run/secrets/db_password)"; mariadb -ubluemoon -Dbluemoon -Nse "SELECT COUNT(*) FROM round WHERE shutdown_datetime IS NOT NULL"')
-    if ($closedRounds -lt 1) { throw 'DreamDaemon did not write the round shutdown to MariaDB.' }
-    Write-Host "BLUEMOON_COMPOSE_PASS nodes=$($initial.nodes) restored=$($recovered.nodes) rounds=$rounds"
+    $gameExit = docker inspect -f '{{.State.ExitCode}}' $game
+    if ($gameExit -ne '0') { throw "DreamDaemon did not stop cleanly (container exit $gameExit)." }
+    if ((Read-LatestRound) -ne "$roundId`t1") { throw 'DreamDaemon did not write the current round shutdown to MariaDB.' }
+    Write-Host "BLUEMOON_COMPOSE_PASS nodes=$($initial.nodes) restored=$($recovered.nodes) rounds=$rounds journalRecords=$($replayed.recoveredEntries)"
 
     if ($ManifestPath) {
         $pins = foreach ($dockerfile in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.Dockerfile') {
@@ -90,7 +114,8 @@ try {
             }
             basePins = @($pins)
             acceptance = [ordered]@{ marker = 'BLUEMOON_COMPOSE_PASS'; nodes = $initial.nodes
-                restored = $recovered.nodes; rounds = $rounds; at = [DateTime]::UtcNow.ToString('o') }
+                restored = $recovered.nodes; rounds = $rounds; journalRecords = $replayed.recoveredEntries
+                journalFormat = $replayed.journalFormat; at = [DateTime]::UtcNow.ToString('o') }
         } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ManifestPath -Encoding utf8
         Write-Host "Release manifest: $ManifestPath"
     }

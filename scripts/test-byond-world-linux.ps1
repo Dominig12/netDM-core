@@ -16,8 +16,8 @@ Copy-Item -LiteralPath (Join-Path $root 'tests/byond-world/smoke.dme'),
     (Join-Path $root 'dm/netdm_services.dm') -Destination $work
 Set-Content -LiteralPath (Join-Path $work 'bridge-path.dm') -Value '#define NETDM_DLL "./netdm_byond.so"', '#define NETDM_CRASH_SMOKE'
 
-function Wait-Probe([string] $Description, [scriptblock] $Probe) {
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+function Wait-Probe([string] $Description, [scriptblock] $Probe, [int] $TimeoutSeconds = 30) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
         if (& $Probe) { return }
         Start-Sleep -Milliseconds 200
@@ -43,16 +43,18 @@ try {
         --mount "type=volume,source=$volume,target=/ipc" `
         --mount "type=bind,source=$root,target=/repo,readonly" `
         --env NETDM_IPC_MODE=v1 --env NETDM_SOCKET_PATH=/ipc/run/core.sock `
+        --env NetDM__ResearchDirectory=/ipc/research `
         $SdkImage -ec 'if ! test -f /work/src/NetDM.Host/bin/Release/net10.0/NetDM.Host.dll; then mkdir -p /work; tar -C /repo --exclude=bin --exclude=obj -cf - Directory.Build.props src | tar -C /work -xf -; dotnet build /work/src/NetDM.Host -c Release --nologo; fi; install -d -m 700 /ipc/run; cd /work/src/NetDM.Host; exec dotnet bin/Release/net10.0/NetDM.Host.dll' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Host container launch failed.' }
-    Wait-Probe 'initial IPC readiness' { Test-Ready 'ipc' 200 }
+    # The first launch builds the Host in a fresh SDK container.
+    Wait-Probe 'initial IPC readiness' { Test-Ready 'ipc' 200 } 120
     if (-not (Test-Ready 'game' 503)) { throw 'Game became ready before Hello.' }
 
     docker run -d --network none --name $gameName --entrypoint /bin/sh `
         --mount "type=volume,source=$volume,target=/ipc" `
         --mount "type=bind,source=$work,target=/out" `
         --env NETDM_IPC_MODE=v1 --env NETDM_SOCKET_PATH=/ipc/run/core.sock `
-        $ByondImage -ec 'mkdir /tmp/smoke; cd /tmp/smoke; cp /out/*.dm /out/*.dme /out/*.so .; DreamMaker smoke.dme; result=0; timeout -k 2s 85s DreamDaemon smoke.dmb -ports 51339 -trusted -invisible >daemon.log 2>&1 || result=$?; cp ./*.log /out/; cat daemon.log; cat smoke.log; test "$result" -eq 0; grep -qx NETDM_WORLD_PASS smoke.log; ! grep -Ei "NETDM_WORLD_FAIL|runtime error" smoke.log' | Out-Null
+        $ByondImage -ec 'mkdir /tmp/smoke; cd /tmp/smoke; cp /out/*.dm /out/*.dme /out/*.so .; DreamMaker smoke.dme; result=0; timeout -k 2s 85s DreamDaemon smoke.dmb -ports 51339 -trusted -close -invisible >daemon.log 2>&1 || result=$?; cp ./*.log /out/; cat daemon.log; cat smoke.log; test "$result" -eq 0; grep -qx NETDM_WORLD_PASS smoke.log; ! grep -Ei "NETDM_WORLD_FAIL|runtime error" smoke.log' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'DreamDaemon container launch failed.' }
     Wait-Probe 'snapshot and delivery before crash' { Test-Path -LiteralPath (Join-Path $work 'crash.ready') }
     if (-not (Test-Ready 'game' 200)) { throw 'Initial snapshot did not make game ready.' }
@@ -75,7 +77,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Could not release the DreamDaemon completion gate.' }
     Wait-Probe 'DreamDaemon completion' {
         (docker inspect -f '{{.State.Running}}' $gameName 2>$null) -eq 'false'
-    }
+    } 90
     if ((docker inspect -f '{{.State.ExitCode}}' $gameName) -ne '0') { throw 'Real Linux DreamDaemon smoke failed.' }
     Write-Host 'NETDM_CRASH_RECOVERY_PASS'
 }

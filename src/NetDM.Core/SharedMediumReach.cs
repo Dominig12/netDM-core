@@ -36,6 +36,11 @@ public sealed partial class SharedMediumNetwork
         ReachAll(snapshot, sources.Distinct().ToDictionary(source => source, BroadcastReach.Start), targets, maxExplored,
             cableHopsPerTick);
 
+    public static Dictionary<NodeId, BroadcastReach> ReachAll(SharedMediumSnapshot snapshot, NodeId source,
+        IReadOnlySet<NodeId> targets, int maxExplored, out bool exhausted) =>
+        ReachAll(snapshot, new Dictionary<NodeId, BroadcastReach> { [source] = BroadcastReach.Start(source) },
+            targets, maxExplored, 16, out exhausted);
+
     /// <summary>
     /// As above, with each source continuing a route that reached it: a gateway (a telecomms receiver,
     /// say) passes the transmission on within the same packet, so hops, ticks and the cable run carry over.
@@ -43,7 +48,11 @@ public sealed partial class SharedMediumNetwork
     /// </summary>
     public static Dictionary<NodeId, BroadcastReach> ReachAll(SharedMediumSnapshot snapshot,
         IReadOnlyDictionary<NodeId, BroadcastReach> sources, IReadOnlySet<NodeId> targets, int maxExplored = 100_000,
-        int cableHopsPerTick = 16)
+        int cableHopsPerTick = 16) => ReachAll(snapshot, sources, targets, maxExplored, cableHopsPerTick, out _);
+
+    private static Dictionary<NodeId, BroadcastReach> ReachAll(SharedMediumSnapshot snapshot,
+        IReadOnlyDictionary<NodeId, BroadcastReach> sources, IReadOnlySet<NodeId> targets, int maxExplored,
+        int cableHopsPerTick, out bool exhausted)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxExplored);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(cableHopsPerTick);
@@ -60,14 +69,18 @@ public sealed partial class SharedMediumNetwork
             }
         var remaining = targets.Count(nodes.ContainsKey);
         var explored = 0;
+        exhausted = false;
         while (remaining > 0 && queue.TryDequeue(out var node, out var distance))
         {
             var reach = best[node];
             if (reach.Cost != distance)
                 continue;
-            if (targets.Contains(node) && reached.TryAdd(node, reach))
-                remaining--;
             if (++explored > maxExplored)
+            {
+                exhausted = true;
+                break;
+            }
+            if (targets.Contains(node) && reached.TryAdd(node, reach) && --remaining == 0)
                 break;
             if (!origins.Contains(node) && !nodes[node].CanForward)
                 continue;

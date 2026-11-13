@@ -935,9 +935,9 @@ try {
     }
     Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'netquery.apc2'; serviceType = 'network.query'; schema = 'query.page'
         major = 1; minor = 0 } + $apc2)).ok) 'APC 2 offers queries'
-    function Invoke-Query([hashtable] $Arguments, [string] $Key, [string] $Sequence, [hashtable] $Asker = $engineer) {
+    function Invoke-Query([hashtable] $Arguments, [string] $Key, [string] $Sequence, [hashtable] $Asker = $engineer, [string] $Instance = 'netquery.apc2') {
         Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = $Sequence }).ok) "heartbeat before $Key"
-        Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = 'netquery.apc2'; command = 'services'; idempotencyKey = $Key
+        Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = $Instance; command = 'services'; idempotencyKey = $Key
             arguments = $Arguments; trafficClass = 1; timeoutTicks = 60 } + $Asker)).ok) "query $Key sent"
         $answer = Wait-Result $Asker.endpoint 'services'
         Assert-True ($null -ne $answer) "query $Key answered"
@@ -952,7 +952,12 @@ try {
     Assert-True ($first.status -ceq 'partial' -and $first.items -ceq 'door.a|machine.door|1' -and $first.cursor) "a page names its cursor: $($first | ConvertTo-Json -Compress)"
     $second = Invoke-Query @{ type = 'machine.door'; limit = 1; cursor = $first.cursor } 'q-4' '6'
     Assert-True ($second.status -ceq 'complete' -and $second.items -ceq 'door.b|machine.door|1' -and $second.revision -ceq $first.revision) 'the cursor continues the list'
-    Assert-True ((Invoke-Query @{ type = 'machine.door'; cursor = $first.cursor } 'q-5' '6' $apc2).status -ceq 'invalid_cursor') 'a cursor belongs to its asker'
+    Assert-True ((Invoke-Query @{ type = 'machine.door'; limit = 1; cursor = $first.cursor } 'q-5' '6' $apc2).status -ceq 'invalid_cursor') 'a cursor belongs to its asker'
+    Assert-True ((Invoke-Query @{ type = 'network.query'; limit = 1; cursor = $first.cursor } 'q-filter' '6').status -ceq 'invalid_cursor') 'a cursor belongs to its filter'
+    Assert-True ((Invoke-Query @{ type = 'machine.door'; limit = 2; cursor = $first.cursor } 'q-limit' '6').status -ceq 'invalid_cursor') 'a cursor belongs to its page size'
+    $bytes = [Convert]::FromBase64String($first.cursor)
+    $bytes[0] = $bytes[0] -bxor 1
+    Assert-True ((Invoke-Query @{ type = 'machine.door'; limit = 1; cursor = [Convert]::ToBase64String($bytes) } 'q-tampered' '6').status -ceq 'invalid_cursor') 'a tampered cursor is rejected'
     Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'door.c'; serviceType = 'machine.door'; schema = 'machine.door_state'
         major = 1; minor = 0 } + $doors)).ok) 'the directory changes'
     $expired = Invoke-Query @{ type = 'machine.door'; limit = 1; cursor = $first.cursor } 'q-6' '6'
@@ -1007,6 +1012,135 @@ try {
     $back = Wait-DirectoryEvent '10'
     Assert-True ($null -ne $back -and $back.digest -ceq $grown.digest) 'the same set gives the same digest again'
     Assert-True ((Invoke-Next (@{ op = 'unsubscribe'; key = 'directory' } + $engineer)).ok) 'the console stops watching the directory'
+    $scoped = Invoke-Query @{ type = 'machine.door'; limit = 1 } 'q-scoped' '10'
+    Assert-True ((Invoke-Query @{ type = 'machine.door'; limit = 1; cursor = $scoped.cursor } 'q-other-provider' '10' $engineer 'netquery.apc2w').status -ceq 'invalid_cursor') 'a cursor cannot move to another query instance on the same APC'
+    $renewedEngineer = @{ endpoint = $engineer.endpoint; generation = '2' }
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '1' } + $renewedEngineer)).ok) 'replace the console generation'
+    Assert-True ((Invoke-Query @{ type = 'machine.door'; limit = 1; cursor = $scoped.cursor } 'q-other-generation' '10' $renewedEngineer).status -ceq 'invalid_cursor') 'reused endpoint ID cannot reuse its previous generation cursor'
+    $engineer = $renewedEngineer
+
+    function Read-QueryInstance([string] $Command, [string] $Target, [string] $Key, [string] $FactSequence = '10') {
+        Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = $FactSequence }).ok) "heartbeat before $Key"
+        Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = 'netquery.apc2'; command = $Command; idempotencyKey = $Key
+            arguments = @{ instance = $Target }; trafficClass = 1; timeoutTicks = 60 } + $engineer)).ok) "query $Key sent"
+        $answer = Wait-Result $engineer.endpoint $Command
+        Assert-True ($null -ne $answer -and $answer.producer -ceq 'apc-2' -and $answer.outcome -ceq 'applied') "query $Key answered by APC 2"
+        return $answer.payload
+    }
+    $schema = Read-QueryInstance 'schema' 'door.a' 'schema-visible'
+    Assert-True ($schema.status -ceq 'complete' -and $schema.instance -ceq 'door.a' -and $schema.serviceType -ceq 'machine.door' -and
+        $schema.schema -ceq 'machine.door_state' -and $schema.major -eq 1 -and $schema.minor -eq 0 -and $schema.commands -ceq 'set_state') 'query reads the registered contract'
+    $idle = Read-QueryInstance 'state' 'door.a' 'state-idle'
+    Assert-True ($idle.status -ceq 'complete' -and $idle.publication -ceq 'idle' -and $idle.sequence -ceq '0') 'the new service has not published'
+    $doorState = @{ press = 'ipc-test'; state = 'closed'; changed = $true }
+    $sequence = '9007199254740993'
+    Assert-True ((Invoke-Next (@{ op = 'publish'; instance = 'door.a'; producerSequence = $sequence; payload = $doorState } + $doors)).ok) 'publish a door state'
+    $published = Read-QueryInstance 'state' 'door.a' 'state-published'
+    Assert-True ($published.status -ceq 'complete' -and $published.publication -ceq 'published' -and $published.sequence -ceq $sequence -and
+        $published.Count -eq 4) 'query returns exact sequence and no application payload'
+
+    $private = @{ endpoint = 'hidden-3'; generation = '1' }
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '3'; domain = 'syndicate' } + $private)).ok) 'attach a hidden device'
+    foreach ($name in 'hidden.door', 'public.contract') {
+        $discoverScope = if ($name -eq 'hidden.door') { 'domain' } else { 'open' }
+        Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = $name; serviceType = 'machine.door'; schema = 'machine.door_state'
+            major = 1; discoverScope = $discoverScope } + $private)).ok) "register $name"
+    }
+    foreach ($command in 'schema', 'state') {
+        $absent = Read-QueryInstance $command 'absent.door' "$command-absent"
+        $hidden = Read-QueryInstance $command 'hidden.door' "$command-hidden"
+        Assert-True ($absent.status -ceq 'empty' -and $hidden.status -ceq 'empty' -and $absent.Count -eq 1 -and $hidden.Count -eq 1) 'hidden and missing instances have identical answers'
+    }
+    Assert-True ((Read-QueryInstance 'schema' 'public.contract' 'schema-public').status -ceq 'complete') 'an open schema is discoverable across domains'
+    Assert-True ((Read-QueryInstance 'state' 'public.contract' 'state-private').status -ceq 'empty') 'discovery does not grant access to publication state'
+    Assert-True ((Read-QueryInstance 'schema' 'not an instance' 'schema-invalid').status -ceq 'invalid_request') 'invalid instance name is rejected'
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '11'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 0; operational = 1 }) }).ok) 'APC 3 loses power behind the query APC'
+    Assert-True ((Read-QueryInstance 'schema' 'door.a' 'schema-cut' '11').status -ceq 'empty') 'a cut-off service has no visible schema'
+    Assert-True ((Read-QueryInstance 'state' 'door.a' 'state-cut' '11').status -ceq 'empty') 'a cut-off service has no visible state'
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '12'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 1; operational = 1 }) }).ok) 'APC 3 recovers'
+    Assert-True ((Read-QueryInstance 'state' 'door.a' 'state-recovered' '12').sequence -ceq $sequence) 'the same publication is visible after repair'
+
+    # P11 network.shell: the console sends one line to APC 2; the APC runs it against what it reaches and
+    # what the console may discover, and the records come back over the network.
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '2' } + @{ endpoint = 'apc-2s'; generation = '1' })).ok) 'attach the shell endpoint on APC 2'
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'netshell.apc2'; serviceType = 'network.shell'; schema = 'shell.output'
+        major = 1; minor = 0 } + @{ endpoint = 'apc-2s'; generation = '1' })).ok) 'APC 2 offers a shell'
+    $script:shellRun = 0
+    function Invoke-Shell([string] $Line, [string] $Sequence = '12', [switch] $Script) {
+        $script:shellRun++
+        $command = if ($Script) { 'run_script' } else { 'run' }
+        $arguments = if ($Script) { @{ source = $Line } } else { @{ line = $Line } }
+        Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = $Sequence }).ok) "heartbeat before shell line $script:shellRun"
+        Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = 'netshell.apc2'; command = $command; idempotencyKey = "sh-$script:shellRun"
+            arguments = $arguments; trafficClass = 1; timeoutTicks = 60 } + $engineer)).ok) "shell request sent: $Line"
+        $answer = Wait-Result 'eng-1' $command
+        Assert-True ($null -ne $answer -and $answer.producer -ceq 'apc-2s') "shell line answered: $Line"
+        return $answer.payload
+    }
+    $out = Invoke-Shell 'services -type machine.door | sort instance | first 1'
+    Assert-True ($out.status -ceq 'ok' -and $out.count -eq 1 -and $out.rows -ceq 'instance=door.a,type=machine.door,hops=1' -and $out.fuel -gt 0) "a pipeline runs on the device: $($out | ConvertTo-Json -Compress)"
+    $out = Invoke-Shell 'services | where hops -eq 0 | where instance -like netshell.* | select instance'
+    Assert-True ($out.status -ceq 'ok' -and $out.rows -ceq 'instance=netshell.apc2') "the device lists its own services at no hops: $($out.rows)"
+    $out = Invoke-Shell 'links | where state -eq up | count'
+    Assert-True ($out.rows -ceq 'count=2') "the device reads its own ports: $($out.rows)"
+    $out = Invoke-Shell 'trace 3 | select state hops'
+    Assert-True ($out.rows -ceq 'state=reachable,hops=1') "a trace is a record: $($out.rows)"
+    $out = Invoke-Shell 'self | select state wired wiredUp'
+    Assert-True ($out.rows -ceq 'state=active,wired=2,wiredUp=2') "the device describes itself: $($out.rows)"
+    $bad = Invoke-Shell 'services | explode'
+    Assert-True ($bad.status -ceq 'unknown_command' -and $bad.count -eq 0 -and $bad.position -eq 11 -and $bad.error) "an unknown stage is an answer with its position: $($bad | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Shell 'services | where hops').status -ceq 'invalid_argument') 'wrong arguments are an answer'
+    # invoke: the line sends an ordinary command as the console, from the console's node, and does not wait.
+    function Take-DoorCommand {
+        for ($poll = 0; $poll -lt 40; $poll++) {
+            $found = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 16 }).result.items |
+                Where-Object { $_.recipient -ceq 'dev-3' -and $_.kind -ceq 'command' } | Select-Object -First 1
+            if ($null -ne $found) {
+                $null = Invoke-Next @{ op = 'delivery_ack'; acks = @(@{ deliveryId = $found.deliveryId; applied = $false; reason = 'shadow' }) }
+                return $found
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        return $null
+    }
+    $sent = Invoke-Shell 'invoke door.a set_state press=p1 state=open'
+    Assert-True ($sent.status -ceq 'ok' -and $sent.count -eq 1 -and $sent.rows -clike 'instance=door.a,command=set_state,status=sent,operation=*') "a line sends a command: $($sent | ConvertTo-Json -Compress)"
+    $arrived = Take-DoorCommand
+    Assert-True ($null -ne $arrived -and $arrived.instance -ceq 'door.a' -and $arrived.command -ceq 'set_state' -and $arrived.producer -ceq 'eng-1' -and
+        $arrived.payload.press -ceq 'p1' -and $arrived.payload.state -ceq 'open') "the command reaches the door as the console's own: $($arrived | ConvertTo-Json -Compress -Depth 4)"
+    $both = Invoke-Shell 'services -type machine.door | where instance -like door.* | sort instance | first 2 | invoke set_state press=p2 state=closed'
+    Assert-True ($both.status -ceq 'ok' -and $both.count -eq 2 -and $both.rows -clike 'instance=door.a,*status=sent*;instance=door.b,*status=sent*') "a pipeline feeds the action: $($both.rows)"
+    $one = Take-DoorCommand
+    $two = Take-DoorCommand
+    Assert-True ($null -ne $one -and $null -ne $two -and (@($one.instance, $two.instance) | Sort-Object) -join ',' -ceq 'door.a,door.b' -and $one.payload.press -ceq 'p2') 'each record of the pipeline got its command'
+    $scripted = Invoke-Shell "if links | where state -eq up`r`n`tinvoke door.a set_state press=script1 state=open`r`n`tinvoke door.a set_state press=script2 state=closed`r`nend" -Script
+    $one = Take-DoorCommand
+    $two = Take-DoorCommand
+    Assert-True ($scripted.status -ceq 'ok' -and $scripted.rows -clike '*status=sent*' -and $one.payload.press -ceq 'script1' -and
+        $two.payload.press -ceq 'script2' -and $one.producer -ceq 'eng-1' -and $two.producer -ceq 'eng-1') 'two script lines reach the same service as distinct commands'
+    $skipped = Invoke-Shell "if links | where state -eq missing`n  invoke door.a set_state press=skip state=open`nend" -Script
+    Assert-True ($skipped.status -ceq 'ok' -and $skipped.count -eq 0) 'false script condition skips its action'
+    Assert-True ((Invoke-Shell "services`ntrace 3`nservices" -Script).status -ceq 'source_failed') 'script graph searches share one budget'
+    $wide = Invoke-Shell 'services | invoke set_state press=p3'
+    Assert-True ($wide.status -ceq 'limit_exceeded' -and $wide.count -eq 0) "a pipeline too wide for an action is refused whole: $($wide | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Shell 'invoke door.a set_state').rows -cnotlike '*status=sent*') 'arguments outside the command schema send nothing'
+    Assert-True ((Invoke-Shell 'invoke no.such set_state press=p4').rows -clike '*status=unknown_service*') 'a service the console cannot see is unknown to its line'
+    Assert-True ((Invoke-Shell 'invoke netshell.apc2 run line=self').rows -clike '*status=forbidden*') 'a line may not start further lines'
+    Start-Sleep -Milliseconds 500
+    $stray = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 16 }).result.items | Where-Object { $_.recipient -ceq 'dev-3' -and $_.kind -ceq 'command' }
+    Assert-True ($null -eq $stray) 'refused lines sent no command'
+    Assert-True ((Invoke-Shell 'trace nowhere').status -ceq 'source_failed') 'a command names its own usage'
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '13'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 0; operational = 1 }) }).ok) 'APC 3 loses power under the doors'
+    $cut = Invoke-Shell 'services -type machine.door | count' '13'
+    Assert-True ($cut.rows -ceq 'count=0') "services the device does not reach are not there: $($cut.rows)"
+    $dead = Invoke-Shell 'links | where state -ne up | select node state' '13'
+    Assert-True ($dead.rows -ceq 'node=3,state=unpowered') "the dead port is a record: $($dead.rows)"
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '14'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 1; operational = 1 }) }).ok) 'APC 3 has power again'
+    Assert-True ((Invoke-Shell 'trace 3 | select state' '14').rows -ceq 'state=reachable') 'the repaired network is reachable again'
 
     if ($IsLinux) {
         Assert-StartupRejected $socketPath

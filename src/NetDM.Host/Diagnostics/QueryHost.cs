@@ -1,4 +1,7 @@
+using System.Buffers.Binary;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using NetDM.Core;
 using NetDM.Host.Transport;
@@ -20,40 +23,70 @@ public static class QueryHost
     public const int ScanBudget = 64;
     /// <summary>Nodes one reachability search may expand.</summary>
     public const int ReachBudget = 20_000;
+    private const int CursorNonceBytes = 12, CursorTagBytes = 16, CursorHeaderBytes = 16;
+    private const long CursorLifetimeMs = 60_000;
+    private static readonly byte[] CursorKey = RandomNumberGenerator.GetBytes(32);
 
-    public static JsonElement Answer(GameNetworkService game, HostCommand command)
+    internal static JsonElement Answer(GameNetworkService.Session session, HostCommand command)
     {
         using var arguments = JsonDocument.Parse(command.Arguments);
         var args = arguments.RootElement;
+        if (command.Command is "schema" or "state")
+            return Instance(session.Services, session.Medium.Snapshot, command, args.GetProperty("instance").GetString());
         var type = args.TryGetProperty("type", out var typeValue) ? typeValue.GetString() : null;
         var limit = args.TryGetProperty("limit", out var limitValue) ? Math.Clamp(limitValue.GetInt32(), 1, MaxLimit) : DefaultLimit;
         var cursor = args.TryGetProperty("cursor", out var cursorValue) ? cursorValue.GetString() : null;
-        return Services(game, command.Instance, command.Initiator, string.IsNullOrEmpty(type) ? null : type, limit,
+        return Services(session, command, string.IsNullOrEmpty(type) ? null : type, limit,
             string.IsNullOrEmpty(cursor) ? null : cursor);
     }
 
-    private static JsonElement Services(GameNetworkService game, string instance, string initiator, string? type, int limit, string? cursor)
+    private static JsonElement Instance(ServiceRuntime services, SharedMediumSnapshot world, HostCommand command, string? instance)
     {
-        var services = game.Services;
-        long cursorRevision = 0;
-        string? after = null;
-        if (cursor is not null)
+        if (!ServiceNames.IsValid(instance))
+            return JsonSerializer.SerializeToElement(new { status = "invalid_request" });
+        var publicationState = command.Command == "state";
+        if (services.QueryService(command.DeliveryId, instance!, publicationState) is not { } target ||
+            NetworkDiagnostics.Trace(world, target.Origin, target.Target, ReachBudget).State != NetworkDiagnostics.Reachable)
+            return JsonSerializer.SerializeToElement(new { status = "empty" });
+
+        if (publicationState)
+            return JsonSerializer.SerializeToElement(new
+            {
+                status = "complete", instance,
+                publication = target.Sequence == 0 ? "idle" : "published",
+                sequence = target.Sequence.ToString(CultureInfo.InvariantCulture)
+            });
+
+        var descriptor = target.Descriptor;
+        return JsonSerializer.SerializeToElement(new
         {
-            // "<revision>:<asker>:<last instance>": a cursor belongs to its asker and to one directory revision.
-            var parts = cursor.Split(':');
-            if (parts.Length != 3 || parts[1] != initiator || !ServiceNames.IsValid(parts[2]) ||
-                !long.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out cursorRevision))
-                return Page("invalid_cursor", 0, [], null);
-            after = parts[2];
-        }
-        var slice = services.QueryDirectory(initiator, type, after, ScanBudget);
-        if (slice is null || services.ProviderNode(instance) is not { } origin)
-            return Page("empty", slice?.Revision ?? 0, [], null);
-        if (cursor is not null && cursorRevision != slice.Revision)
+            status = "complete", instance = descriptor.Instance, serviceType = descriptor.ServiceType,
+            schema = descriptor.Schema, major = descriptor.Major, minor = descriptor.Minor, commands = descriptor.Commands
+        });
+    }
+
+    private static JsonElement Services(GameNetworkService.Session session, HostCommand command, string? type, int limit, string? cursor)
+    {
+        if (type is not null && !ServiceNames.IsValid(type))
+            return Page(cursor is null ? "empty" : "invalid_cursor", 0, [], null);
+        var scope = Encoding.UTF8.GetBytes(FormattableString.Invariant(
+            $"{session.Packets.ReceiptStreamId:N}\n{command.Instance}\n{command.ProviderKey.Id}\n{command.ProviderKey.Generation}\n{command.ProviderNode.Value}\n{command.InitiatorKey.Id}\n{command.InitiatorKey.Generation}\n{type}\n{limit}"));
+        long cursorRevision = 0;
+        var expires = Environment.TickCount64 + CursorLifetimeMs;
+        string? after = null;
+        if (cursor is not null && !ReadCursor(cursor, scope, out cursorRevision, out expires, out after))
+            return Page("invalid_cursor", 0, [], null);
+        if (session.Services.QueryDirectory(command.DeliveryId, type, after, ScanBudget) is not { } query)
+            return Page("empty", 0, [], null);
+        var (origin, slice) = query;
+        if (origin != command.ProviderNode || (cursor is not null &&
+            (cursorRevision != slice.Revision || Environment.TickCount64 >= expires)))
             return Page("snapshot_expired", slice.Revision, [], null);
 
         var targets = slice.Entries.Select(entry => entry.Node).Where(node => node != origin).ToHashSet();
-        var reached = targets.Count == 0 ? [] : SharedMediumNetwork.ReachAll(game.Snapshot, [origin], targets, ReachBudget);
+        var reached = SharedMediumNetwork.ReachAll(session.Medium.Snapshot, origin, targets, ReachBudget, out var exhausted);
+        if (exhausted)
+            return Page("budget_exhausted", slice.Revision, [], null);
         var items = new List<string>(limit);
         string? last = null;
         var examined = 0;
@@ -74,8 +107,48 @@ public static class QueryHost
         }
         var more = examined < slice.Entries.Count || slice.More;
         return more
-            ? Page("partial", slice.Revision, items, $"{slice.Revision.ToString(CultureInfo.InvariantCulture)}:{initiator}:{last}")
+            ? Page("partial", slice.Revision, items, WriteCursor(scope, slice.Revision, expires, last!))
             : Page(items.Count == 0 && cursor is null ? "empty" : "complete", slice.Revision, items, null);
+    }
+
+    private static string WriteCursor(byte[] scope, long revision, long expires, string after)
+    {
+        Span<byte> data = stackalloc byte[CursorHeaderBytes + after.Length];
+        BinaryPrimitives.WriteInt64LittleEndian(data, revision);
+        BinaryPrimitives.WriteInt64LittleEndian(data[8..], expires);
+        Encoding.ASCII.GetBytes(after, data[CursorHeaderBytes..]);
+        Span<byte> token = stackalloc byte[CursorNonceBytes + CursorTagBytes + data.Length];
+        var nonce = token[..CursorNonceBytes];
+        RandomNumberGenerator.Fill(nonce);
+        using var cipher = new AesGcm(CursorKey, CursorTagBytes);
+        cipher.Encrypt(nonce, data, token[(CursorNonceBytes + CursorTagBytes)..], token.Slice(CursorNonceBytes, CursorTagBytes), scope);
+        return Convert.ToBase64String(token);
+    }
+
+    private static bool ReadCursor(string cursor, byte[] scope, out long revision, out long expires, out string? after)
+    {
+        revision = expires = 0;
+        after = null;
+        const int overhead = CursorNonceBytes + CursorTagBytes + CursorHeaderBytes;
+        Span<byte> buffer = stackalloc byte[overhead + 64];
+        if (!Convert.TryFromBase64String(cursor, buffer, out var length) || length <= overhead ||
+            cursor != Convert.ToBase64String(buffer[..length]))
+            return false;
+        Span<byte> data = stackalloc byte[length - CursorNonceBytes - CursorTagBytes];
+        try
+        {
+            using var cipher = new AesGcm(CursorKey, CursorTagBytes);
+            cipher.Decrypt(buffer[..CursorNonceBytes], buffer[(CursorNonceBytes + CursorTagBytes)..length],
+                buffer.Slice(CursorNonceBytes, CursorTagBytes), data, scope);
+        }
+        catch (AuthenticationTagMismatchException)
+        {
+            return false;
+        }
+        revision = BinaryPrimitives.ReadInt64LittleEndian(data);
+        expires = BinaryPrimitives.ReadInt64LittleEndian(data[8..]);
+        after = Encoding.ASCII.GetString(data[CursorHeaderBytes..]);
+        return true;
     }
 
     /// <summary>Devices whose directory is watched at once: each costs one reachability search per pass.</summary>
@@ -94,17 +167,17 @@ public static class QueryHost
 
     private static JsonElement DirectoryState(GameNetworkService game, WatchedService service)
     {
-        var slice = game.Services.QueryDirectory(service.Owner.Id, null, null, WatchScanBudget);
+        var slice = game.Services.QueryDirectory(service.Owner, null, null, WatchScanBudget);
         if (slice is null)
             return JsonSerializer.SerializeToElement(new { services = 0, digest = "", partial = false });
         var targets = slice.Entries.Select(entry => entry.Node).Where(node => node != service.Node).ToHashSet();
-        var reached = targets.Count == 0 ? [] : SharedMediumNetwork.ReachAll(game.Snapshot, [service.Node], targets, ReachBudget);
+        var reached = SharedMediumNetwork.ReachAll(game.Snapshot, service.Node, targets, ReachBudget, out var exhausted);
         var names = slice.Entries.Where(entry => entry.Node == service.Node || reached.ContainsKey(entry.Node))
             .Select(entry => entry.Instance + "|" + entry.ServiceType).ToArray();
-        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Join(",", names)));
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(string.Join(",", names)));
         // The revision is not part of the state: a service that came and left between two passes, or one
         // out of reach, changes nothing a query from here would return.
-        return JsonSerializer.SerializeToElement(new { services = names.Length, digest = Convert.ToHexString(hash, 0, 8), partial = slice.More });
+        return JsonSerializer.SerializeToElement(new { services = names.Length, digest = Convert.ToHexString(hash, 0, 8), partial = slice.More || exhausted });
     }
 
     private static JsonElement Page(string status, long revision, IReadOnlyList<string> items, string? cursor) =>
