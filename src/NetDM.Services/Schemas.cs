@@ -341,6 +341,14 @@ public sealed class SchemaRegistry
         ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "revision", "count", "items", "cursor"] },
             MaxPayloadBytes: 4096));
         registry.RegisterCommand("network.query", "services", "query.services_request", 1, "query.page", 1);
+        // WatchQuery: the published state of a network.query instance. It changes when the set of services
+        // the device reaches changes; a watcher then asks "services" again.
+        registry.Register(new SchemaDefinition("query.directory", 1, 0,
+        [
+            new SchemaField("services", SchemaFieldType.Integer, true, 0, 65_536),
+            new SchemaField("digest", SchemaFieldType.Text, true, MaxLength: 16),
+            new SchemaField("partial", SchemaFieldType.Boolean, true)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["services", "digest", "partial"] }, MaxPayloadBytes: 128));
 
         // Discovery is a network round trip answered by the provider's descriptor.
         registry.Register(new SchemaDefinition("directory.probe", 1, 0,

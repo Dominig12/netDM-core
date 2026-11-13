@@ -78,6 +78,35 @@ public static class QueryHost
             : Page(items.Count == 0 && cursor is null ? "empty" : "complete", slice.Revision, items, null);
     }
 
+    /// <summary>Devices whose directory is watched at once: each costs one reachability search per pass.</summary>
+    public const int MaxWatched = 16;
+    /// <summary>Directory entries one watched device examines per pass; beyond them the state is marked partial.</summary>
+    public const int WatchScanBudget = 256;
+
+    /// <summary>
+    /// WatchQuery (§14.5): a device with subscribers publishes when the directory it reaches changes: the
+    /// revision it was read at, how many services it reaches and a digest of their names. A watcher asks
+    /// <c>services</c> again when the digest moves; the publication carries no service names. The view is
+    /// the device's own (what its endpoint may discover), and the default subscribe policy admits only its
+    /// domain, so a watcher learns of nothing it could not list itself.
+    /// </summary>
+    public static DiagnosticsHost.Watch DirectoryWatch() => new(ServiceType, DirectoryState, MaxWatched);
+
+    private static JsonElement DirectoryState(GameNetworkService game, WatchedService service)
+    {
+        var slice = game.Services.QueryDirectory(service.Owner.Id, null, null, WatchScanBudget);
+        if (slice is null)
+            return JsonSerializer.SerializeToElement(new { services = 0, digest = "", partial = false });
+        var targets = slice.Entries.Select(entry => entry.Node).Where(node => node != service.Node).ToHashSet();
+        var reached = targets.Count == 0 ? [] : SharedMediumNetwork.ReachAll(game.Snapshot, [service.Node], targets, ReachBudget);
+        var names = slice.Entries.Where(entry => entry.Node == service.Node || reached.ContainsKey(entry.Node))
+            .Select(entry => entry.Instance + "|" + entry.ServiceType).ToArray();
+        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Join(",", names)));
+        // The revision is not part of the state: a service that came and left between two passes, or one
+        // out of reach, changes nothing a query from here would return.
+        return JsonSerializer.SerializeToElement(new { services = names.Length, digest = Convert.ToHexString(hash, 0, 8), partial = slice.More });
+    }
+
     private static JsonElement Page(string status, long revision, IReadOnlyList<string> items, string? cursor) =>
         cursor is null
             ? JsonSerializer.SerializeToElement(new { status, revision, count = items.Count, items = string.Join(",", items) })

@@ -967,6 +967,47 @@ try {
     Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = 'netquery.apc2'; command = 'services'; idempotencyKey = 'q-bad'
         arguments = @{ limit = 500 }; trafficClass = 1; timeoutTicks = 60 } + $engineer)).ok -eq $false) 'a limit outside the schema is refused'
 
+    # WatchQuery: the console subscribes to APC 2's directory. A publication says that the set of services
+    # the APC reaches changed; it names no service, the watcher asks again.
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '2' } + @{ endpoint = 'apc-2w'; generation = '1' })).ok) 'attach a second endpoint on APC 2'
+    $watchInstance = @{ endpoint = 'apc-2w'; generation = '1' }
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'netquery.apc2w'; serviceType = 'network.query'; schema = 'query.directory'
+        major = 1; minor = 0 } + $watchInstance)).ok) 'APC 2 offers a watchable directory'
+    function Wait-DirectoryEvent([string] $Sequence) {
+        for ($poll = 0; $poll -lt 60; $poll++) {
+            Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = $Sequence }).ok) 'heartbeat while watching the directory'
+            $found = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 16 }).result.items |
+                Where-Object { $_.recipient -ceq 'eng-1' -and $_.kind -ceq 'event' -and $_.instance -ceq 'netquery.apc2w' } | Select-Object -First 1
+            if ($null -ne $found) {
+                $null = Invoke-Next @{ op = 'delivery_ack'; acks = @(@{ deliveryId = $found.deliveryId; applied = $true }) }
+                return $found.payload
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        return $null
+    }
+    Assert-True ((Invoke-Next (@{ op = 'subscribe'; key = 'directory'; instance = 'netquery.apc2w'; schema = 'query.directory'; major = 1
+        projection = 'full'; mode = 'latest_value' } + $engineer)).ok) 'the console watches the directory'
+    $seen = Wait-DirectoryEvent '8'
+    Assert-True ($null -ne $seen -and $seen.services -eq 6 -and $seen.digest.Length -eq 16 -and -not $seen.partial) "a watched directory publishes its state: $($seen | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'door.d'; serviceType = 'machine.door'; schema = 'machine.door_state'
+        major = 1; minor = 0 } + $doors)).ok) 'a service appears'
+    $grown = Wait-DirectoryEvent '8'
+    Assert-True ($null -ne $grown -and $grown.services -eq 7 -and $grown.digest -cne $seen.digest) "a new service moves the digest: $($grown | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '9'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 0; operational = 1 }) }).ok) 'APC 3 loses power under the doors'
+    $cutOff = Wait-DirectoryEvent '9'
+    Assert-True ($null -ne $cutOff -and $cutOff.services -eq 3 -and $cutOff.digest -cne $grown.digest) "services out of reach leave the watched set: $($cutOff | ConvertTo-Json -Compress)"
+    Start-Sleep -Milliseconds 1500
+    Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = '9' }).ok) 'heartbeat while the directory rests'
+    $still = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 16 }).result.items | Where-Object { $_.kind -ceq 'event' -and $_.instance -ceq 'netquery.apc2w' }
+    Assert-True ($null -eq $still) 'an unchanged directory is not published again'
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '10'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 1; operational = 1 }) }).ok) 'APC 3 has power again'
+    $back = Wait-DirectoryEvent '10'
+    Assert-True ($null -ne $back -and $back.digest -ceq $grown.digest) 'the same set gives the same digest again'
+    Assert-True ((Invoke-Next (@{ op = 'unsubscribe'; key = 'directory' } + $engineer)).ok) 'the console stops watching the directory'
+
     if ($IsLinux) {
         Assert-StartupRejected $socketPath
         Assert-True ((Invoke-Next @{ op = 'game_stats' }).game.nodes -eq 3) 'second Host does not unlink live socket'

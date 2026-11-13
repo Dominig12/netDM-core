@@ -59,8 +59,15 @@ public static class DiagnosticsHost
     /// from the device's node over the network, so a subscriber the network does not reach learns nothing.
     /// A new subscriber of a device that is already watched asks <c>link_state</c> for the current state.
     /// </summary>
-    public sealed class Watch
+    /// <param name="serviceType">The host-provided type whose watched instances are published.</param>
+    /// <param name="state">The state of one watched instance now, read from the published world.</param>
+    /// <param name="maxWatched">Instances served at once; the rest wait in instance order.</param>
+    public sealed class Watch(string serviceType, Func<GameNetworkService, WatchedService, JsonElement> state, int maxWatched)
     {
+        /// <summary>The watch of network.diagnostics: each watched device's own ports.</summary>
+        public static Watch Links() => new(ServiceType,
+            (game, service) => LinkState(NetworkDiagnostics.LinkState(game.Snapshot, game.Wiring, service.Node)), MaxWatched);
+
         private readonly Dictionary<string, string> _published = new(StringComparer.Ordinal);
         private Guid _stream;
         private long _next;
@@ -78,24 +85,22 @@ public static class DiagnosticsHost
                 _stream = game.StreamId; // A new runtime has no subscriptions and no sequences of the old one.
                 _published.Clear();
             }
-            var watched = game.Services.WatchedHostServices(ServiceType, MaxWatched);
+            var watched = game.Services.WatchedHostServices(serviceType, maxWatched);
             if (watched.Length == 0)
             {
                 _published.Clear();
                 return 0;
             }
-            var world = game.Snapshot;
-            var wiring = game.Wiring;
             var sent = 0;
             var live = new HashSet<string>(StringComparer.Ordinal);
             foreach (var service in watched)
             {
                 live.Add(service.Instance);
-                var state = LinkState(NetworkDiagnostics.LinkState(world, wiring, service.Node));
-                var text = state.GetRawText();
+                var current = state(game, service);
+                var text = current.GetRawText();
                 if (_published.TryGetValue(service.Instance, out var last) && last == text)
                     continue;
-                var result = game.Publish(service.Owner, service.Instance, service.LastSequence + 1, state, null,
+                var result = game.Publish(service.Owner, service.Instance, service.LastSequence + 1, current, null,
                     PacketTrafficClass.Background);
                 if (result.Status is not (ServiceStatus.Ok or ServiceStatus.Duplicate))
                     continue; // Busy or over the fan-out: the difference stays, and the next pass tries again.

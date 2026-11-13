@@ -22,7 +22,8 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
     public const string InstancePrefix = "research.";
     private const int MaxCatalogChunks = 64;
     /// <summary>This loop serves every service the Host runs for a device; diagnostics publishes from it too.</summary>
-    private readonly Diagnostics.DiagnosticsHost.Watch _diagnosticsWatch = new();
+    private readonly Diagnostics.DiagnosticsHost.Watch _diagnosticsWatch = Diagnostics.DiagnosticsHost.Watch.Links();
+    private readonly Diagnostics.DiagnosticsHost.Watch _directoryWatch = Diagnostics.QueryHost.DirectoryWatch();
     private readonly object _gate = new();
     private readonly string _directory = Path.GetFullPath(configuration.GetValue("NetDM:ResearchDirectory", "research")!);
     private ResearchLedger? _ledger;
@@ -385,6 +386,7 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
                 ExpireTransfers();
                 RecoverStorage();
                 _diagnosticsWatch.Publish(game);
+                _directoryWatch.Publish(game);
             }
             catch (Exception exception)
             {
