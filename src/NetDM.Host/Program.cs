@@ -14,7 +14,23 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
     ContentRootPath = contentRoot
 });
 // Deliberately localhost-only; this development observability endpoint has no authentication.
-builder.WebHost.UseUrls("http://127.0.0.1:5087");
+var httpPort = builder.Configuration.GetValue("NetDM:HttpPort", 5087);
+var readinessPort = builder.Configuration.GetValue<int?>("NetDM:ReadinessPort");
+if (readinessPort is { } port)
+{
+    if (port is < 1 or > 65535 || port == httpPort)
+        throw new ArgumentException("ReadinessPort must be distinct from HttpPort.");
+    builder.WebHost.ConfigureKestrel(options =>
+    {
+        options.Listen(System.Net.IPAddress.Loopback, httpPort);
+        options.ListenAnyIP(port);
+    });
+}
+else
+{
+    builder.WebHost.UseUrls($"http://127.0.0.1:{httpPort}");
+}
+var deployment = builder.Configuration.GetValue("NetDM:Deployment", false);
 builder.Services.AddSingleton<NetworkRuntime>();
 builder.Services.AddSingleton(_ => new PriorityWorkScheduler(new WorkSchedulerOptions(
     Workers: Math.Clamp(Environment.ProcessorCount / 2, 1, 8),
@@ -25,9 +41,33 @@ builder.Services.AddSingleton<ThreeScenarioBenchmarkSuite>();
 builder.Services.AddSingleton<RoutingComparisonRunner>();
 builder.Services.AddSingleton<GameNetworkService>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<GameNetworkService>());
-builder.Services.AddHostedService<PipeHostedService>();
+builder.Services.AddSingleton<NetDM.Host.Research.ResearchHost>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<NetDM.Host.Research.ResearchHost>());
+builder.Services.AddSingleton<PipeHostedService>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<PipeHostedService>());
 
 var app = builder.Build();
+if (readinessPort.HasValue || deployment)
+{
+    app.Use(async (context, next) =>
+    {
+        var path = context.Request.Path;
+        if (context.Connection.LocalPort == readinessPort &&
+            (!HttpMethods.IsGet(context.Request.Method) ||
+             (path != "/api/readiness/ipc" && path != "/api/readiness/game" && path != "/api/readiness/network")))
+        {
+            context.Response.StatusCode = 404;
+            return;
+        }
+        if (deployment && (path.StartsWithSegments("/api/benchmark") ||
+            path.StartsWithSegments("/api/benchmark-suite") || path.StartsWithSegments("/api/comparison")))
+        {
+            context.Response.StatusCode = 404;
+            return;
+        }
+        await next(context);
+    });
+}
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
@@ -195,10 +235,16 @@ app.MapGet("/api/map", (NetworkRuntime runtime, BenchmarkRunner benchmark,
 app.MapGet("/api/game/summary", (GameNetworkService game) =>
     Results.Ok(game.TopologySummary()));
 
+// Transport, tick runner and service counters of the live game runtime, for diagnostics.
+app.MapGet("/api/game/status", (GameNetworkService game) => Results.Ok(game.Status()));
+
+// The round's research ledger: storages, wallets, conservation totals and journal recovery.
+app.MapGet("/api/research/status", (NetDM.Host.Research.ResearchHost research) => Results.Ok(research.Status()));
+
 app.MapGet("/api/game/map", (GameNetworkService game,
     int? minX, int? minY, int? maxX, int? maxY, int? z, int? limit) =>
 {
-    var snapshot = game.Snapshot;
+    var (streamId, snapshot) = game.CaptureTopology();
     var physical = snapshot.Physical;
     var left = minX ?? -100;
     var top = minY ?? -100;
@@ -218,7 +264,7 @@ app.MapGet("/api/game/map", (GameNetworkService game,
     return Results.Ok(new
     {
         source = "game",
-        streamId = game.StreamId,
+        streamId,
         version = snapshot.Version,
         connectivityVersion = physical.ConnectivityVersion,
         domainCells = game.ViewCells(left, top, right, bottom, layer, snapshot),
@@ -253,5 +299,24 @@ app.MapGet("/api/health", () => Results.Ok(new
 {
     status = "ok", protocol = 1, processId = Environment.ProcessId
 }));
+
+app.MapGet("/api/readiness/ipc", (PipeHostedService ipc) =>
+{
+    var ready = ipc.IpcReady;
+    return Results.Json(new { ready }, statusCode: ready ? 200 : 503);
+});
+// The ability to serve the game: the simulated network and durable research storage (§17.4).
+app.MapGet("/api/readiness/game", (PipeHostedService ipc) =>
+{
+    var state = ipc.GameReadiness();
+    return Results.Json(state, statusCode: state.Ready ? 200 : 503);
+});
+// The network session alone, as admission sees it. A supervisor that would stop the world watches this
+// one: research storage that cannot be written blocks research, not the round.
+app.MapGet("/api/readiness/network", (PipeHostedService ipc) =>
+{
+    var state = ipc.GameReadiness();
+    return Results.Json(state, statusCode: state.NetworkReady ? 200 : 503);
+});
 
 app.Run();

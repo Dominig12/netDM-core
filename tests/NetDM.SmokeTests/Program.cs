@@ -83,6 +83,7 @@ CheckSharedMediumOracle();
 CheckRadioAStar();
 CheckDenseRadioAStar();
 CheckPacketTransport();
+CheckCableHopsPerTick();
 CheckAdaptivePacketTransport();
 CheckEventDrivenPacketWaiting();
 CheckEventDrivenRerouteCapacity();
@@ -100,8 +101,105 @@ CheckWirelessTopology();
 CheckRadioOracle();
 CheckRoutingEquivalence();
 CheckRouteCacheBudgets();
+ServiceSmokeTests.Run();
+CheckAreaWiring();
+CheckForwardingRoles();
+DeviceAttachmentSmokeTests.Run();
+ResearchSmokeTests.Run();
 Console.WriteLine("All netDM-core smoke tests passed.");
 
+static void CheckAreaWiring()
+{
+    AreaSpan[] spans =
+    [
+        new(1, 1, 1, 1, 3), new(1, 1, 2, 1, 2), new(1, 1, 2, 3, 3),
+        new(2, 1, 1, 4, 4), new(2, 1, 2, 4, 5), new(3, 1, 3, 5, 6),
+        new(4, 1, 4, 7, 7), // Diagonal only.
+        new(1, 1, 10, 1, 3), // Separate island of the same area.
+        new(5, 2, 1, 1, 4), // Overlapping XY on another Z.
+        new(2, 2, 1, 5, 8) // A second segment of area 2.
+    ];
+    AreaApc[] apcs =
+    [
+        new(1, new(1), new(1, 2, 1)), new(2, new(2), new(4, 1, 1)),
+        new(3, new(3), new(6, 3, 1)), new(4, new(4), new(7, 4, 1)),
+        new(1, new(5), new(1, 10, 1)), new(5, new(6), new(1, 1, 2))
+    ];
+    var links = AreaWiring.BuildLinks(spans.Reverse().ToArray(), apcs);
+    Check(links.Select(link => (link.A.Value, link.B.Value)).SequenceEqual(new[] { (1UL, 2UL), (2UL, 3UL) }));
+    var sharedApc = new AreaApc(2, new NodeId(2), new NodePosition(8, 1, 2));
+    links = AreaWiring.BuildLinks(spans, [.. apcs, sharedApc]);
+    Check(links.Select(link => (link.A.Value, link.B.Value)).SequenceEqual(new[] { (1UL, 2UL), (2UL, 3UL), (2UL, 6UL) }));
+    Check(AreaWiring.BuildLinks(spans, apcs.Where(apc => apc.Area != 2).ToArray()).Length == 0);
+    Reject([.. spans, new AreaSpan(2, 1, 1, 2, 4)], apcs);
+    Reject(spans, [.. apcs, new AreaApc(1, new NodeId(7), new NodePosition(3, 2, 1))]);
+    Reject(spans, [.. apcs, new AreaApc(1, new NodeId(7), new NodePosition(4, 1, 1))]);
+    Reject(spans, [.. apcs, sharedApc with { Area = 5, ServedCell = new NodePosition(1, 1, 2) }]);
+
+    static void Reject(AreaSpan[] spans, AreaApc[] apcs)
+    {
+        try
+        {
+            AreaWiring.BuildLinks(spans, apcs);
+        }
+        catch (ArgumentException)
+        {
+            return;
+        }
+        throw new InvalidOperationException("Invalid area geometry or APC assignment was accepted.");
+    }
+}
+
+static void CheckForwardingRoles()
+{
+    var a = new NodeId(1);
+    var b = new NodeId(2);
+    var c = new NodeId(3);
+    var demote = new TopologyChange(TopologyOperation.SetForwarding, b) { CanForward = false };
+    TopologyChange[] wired =
+    [
+        new(TopologyOperation.AddNode, a, Position: new NodePosition(1, 1, 1)) { CanForward = false },
+        new(TopologyOperation.AddNode, b, Position: new NodePosition(5, 1, 1)),
+        new(TopologyOperation.AddNode, c, Position: new NodePosition(9, 1, 1)) { CanForward = false },
+        new(TopologyOperation.Connect, a, b),
+        new(TopologyOperation.Connect, b, c)
+    ];
+    var network = new NetworkRuntime();
+    network.Apply(wired);
+    Check(network.Route(a, c).Found);
+    network.Apply([demote]);
+    var snapshot = network.Topology.Snapshot;
+    var compact = CompactGraph.Build(snapshot);
+    Check(!network.Route(a, c).Found && !Router.Find(snapshot, c, a).Found);
+    Check(!BidirectionalRouter.Find(snapshot, a, c).Found && BidirectionalRouter.Find(snapshot, b, c).Found);
+    Check(!CompactRouter.Dijkstra(compact, a, c).Found && CompactRouter.Dijkstra(compact, b, a).Found);
+    Check(!CompactRouter.Bidirectional(compact, c, a).Found && CompactRouter.Bidirectional(compact, a, b).Found);
+
+    foreach (var mode in Enum.GetValues<SharedRadioSearchMode>())
+    {
+        var medium = new SharedMediumNetwork(new NetworkRuntime(), searchMode: mode);
+        medium.ApplyExternalTopology(wired[..^1]);
+        medium.Update(
+        [
+            new RadioNodeUpdate(b, Profile: new RadioProfile(5, 1, 8), ChangeProfile: true),
+            new RadioNodeUpdate(c, Profile: new RadioProfile(5, 1, 8), ChangeProfile: true)
+        ]);
+        var mixedRoute = medium.Route(a, c);
+        Check(mixedRoute.Found);
+        var packets = new RadioPacketTransport(medium, new PacketTransportOptions(MaxAdvancesPerTick: 1));
+        Check(packets.Submit("role-change", mixedRoute, 64, 1).Accepted && packets.Advance(1) == 1);
+        medium.ApplyExternalTopology([demote]);
+        Check(!medium.Route(a, c).Found && medium.Route(b, c).Found && medium.Route(c, b).Found);
+        Check(packets.Advance(2) == 0 && !medium.TryTransmit(mixedRoute, 64, 2));
+        var stale = new RadioPacketTransport(medium);
+        Check(stale.Submit("stale-route", mixedRoute, 64, 2).Accepted && stale.Advance(2) == 0);
+        medium.ApplyExternalTopology([demote with { CanForward = true }, new TopologyChange(TopologyOperation.Disconnect, a, b)]);
+        medium.Update([new RadioNodeUpdate(a, Profile: new RadioProfile(5, 1, 8), ChangeProfile: true)]);
+        Check(medium.Route(a, c).Found);
+        medium.ApplyExternalTopology([demote]);
+        Check(!medium.Route(a, c).Found && medium.Route(a, b).Found);
+    }
+}
 
 
 
@@ -385,6 +483,79 @@ static void CheckSharedMediumOracle()
             }
         }
     }
+}
+
+// P4: wires carry no airtime, so a wired backbone may be crossed within one tick.
+// The default keeps one hop per tick; a radio hop always waits for the next tick.
+static void CheckCableHopsPerTick()
+{
+    static (SharedMediumNetwork Medium, RouteResult Route) MakeLine(bool radioTail)
+    {
+        var medium = new SharedMediumNetwork(new NetworkRuntime(), bytesPerTick: 4096);
+        var changes = new List<TopologyChange>();
+        for (ulong id = 1; id <= 6; id++)
+            changes.Add(new TopologyChange(TopologyOperation.AddNode, new NodeId(id),
+                Position: new NodePosition((int)id * 10, 0)) { CanForward = true });
+        for (ulong id = 1; id < 5; id++)
+            changes.Add(new TopologyChange(TopologyOperation.Connect, new NodeId(id), new NodeId(id + 1)));
+        medium.ApplyExternalTopology(changes, radioTail
+            ? [new RadioNodeUpdate(new NodeId(5), Profile: new RadioProfile(14, 1, 8), ChangeProfile: true),
+               new RadioNodeUpdate(new NodeId(6), Profile: new RadioProfile(14, 1, 8), ChangeProfile: true)]
+            : null);
+        var route = medium.Route(new NodeId(1), new NodeId(radioTail ? 6UL : 5UL));
+        Check(route.Found && route.Path.Count == (radioTail ? 6 : 5));
+        return (medium, route);
+    }
+
+    // A fresh line per measurement: radio airtime remembers the ticks of an earlier run.
+    static long DeliveredAt(bool radioTail, bool reversed, int cableHops)
+    {
+        var (medium, route) = MakeLine(radioTail);
+        if (reversed)
+            route = new RouteResult(route.Version, true, route.Cost, route.Path.Reverse().ToArray(), 0);
+        var packets = new RadioPacketTransport(medium, new PacketTransportOptions(MaxCableHopsPerTick: cableHops));
+        Check(packets.Submit("line", route, 64, 1).Accepted);
+        for (long tick = 1; tick <= 20; tick++)
+        {
+            packets.Advance(tick);
+            if (packets.Capture().Delivered == 1)
+                return tick;
+        }
+        return -1;
+    }
+
+    Check(DeliveredAt(false, false, 1) == 4); // four cable hops, one per tick by default
+    Check(DeliveredAt(false, false, 8) == 1); // the whole wired line within one tick
+    Check(DeliveredAt(false, false, 2) == 2); // the bound holds
+    Check(DeliveredAt(true, false, 8) == 2); // cable within the tick, the radio hop on the next
+    Check(DeliveredAt(true, false, 1) == 5);
+    Check(DeliveredAt(true, true, 8) == 1); // a radio hop first: the wires after it in the same tick
+    Check(DeliveredAt(true, true, 1) == 5);
+
+    // P8: an interactive packet submitted after the tick's forwarding pass. With the option it takes its
+    // first hop (and the wires after it) at once, in the same tick; without it, at the next pass.
+    static long DeliveredOnSubmit(bool advanceOnSubmit, PacketTrafficClass trafficClass)
+    {
+        var (medium, route) = MakeLine(false);
+        var packets = new RadioPacketTransport(medium, new PacketTransportOptions(MaxCableHopsPerTick: 8,
+            EventDrivenPacketWaiting: true, PrioritizeInteractiveTraffic: true, AdvanceInteractiveOnSubmit: advanceOnSubmit));
+        packets.Advance(1);
+        Check(packets.Submit("line", route, 64, 1, trafficClass).Accepted);
+        if (packets.Capture().Delivered == 1)
+            return 1;
+        for (long tick = 2; tick <= 20; tick++)
+        {
+            packets.Advance(tick);
+            if (packets.Capture().Delivered == 1)
+                return tick;
+        }
+        return -1;
+    }
+
+    Check(DeliveredOnSubmit(true, PacketTrafficClass.Interactive) == 1);
+    Check(DeliveredOnSubmit(false, PacketTrafficClass.Interactive) == 2);
+    Check(DeliveredOnSubmit(true, PacketTrafficClass.Background) == 2); // background keeps the tick schedule
+    Console.WriteLine("P4 cable hops per tick and P8 submit fast path checks passed.");
 }
 
 static void CheckPacketTransport()

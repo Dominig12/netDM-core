@@ -4,4 +4,5 @@ EXPORTS
     netdm_send
     netdm_poll
     netdm_status
+    netdm_reconnect
     netdm_shutdown

@@ -14,6 +14,9 @@ public readonly record struct GridCell(int X, int Y, int Z);
 
 public sealed record Node(NodeId Id, ImmutableDictionary<NodeId, Edge> Links, NodePosition? Position)
 {
+    // Legacy graphs model transit at every node. Gameplay snapshots supply explicit roles.
+    public bool CanForward { get; init; } = true;
+
     public static Node Create(NodeId id, NodePosition? position = null) =>
         new(id, ImmutableDictionary<NodeId, Edge>.Empty, position);
 }
@@ -29,14 +32,17 @@ public sealed record TopologySnapshot(
         ImmutableDictionary<GridCell, ImmutableHashSet<NodeId>>.Empty);
 }
 
-public enum TopologyOperation { AddNode, RemoveNode, Connect, Disconnect, MoveNode }
+public enum TopologyOperation { AddNode, RemoveNode, Connect, Disconnect, MoveNode, SetForwarding }
 
 public readonly record struct TopologyChange(
     TopologyOperation Operation,
     NodeId A,
     NodeId B = default,
     uint Cost = 1,
-    NodePosition? Position = null);
+    NodePosition? Position = null)
+{
+    public bool? CanForward { get; init; }
+}
 
 public readonly record struct BatchResult(long Version, int Applied, int Skipped);
 
@@ -80,6 +86,8 @@ public sealed class TopologyStore
                 throw new ArgumentException("A link needs two positive IDs.", nameof(changes));
             if (change.Operation == TopologyOperation.MoveNode && change.Position is null)
                 throw new ArgumentException("A move needs a position.", nameof(changes));
+            if (change.Operation == TopologyOperation.SetForwarding && change.CanForward is null)
+                throw new ArgumentException("A forwarding update needs a role.", nameof(changes));
         }
 
         lock (_writerGate)
@@ -96,7 +104,7 @@ public sealed class TopologyStore
                 {
                     case TopologyOperation.AddNode:
                         if (nodes.ContainsKey(change.A)) break;
-                        nodes.Add(change.A, Node.Create(change.A, change.Position));
+                        nodes.Add(change.A, Node.Create(change.A, change.Position) with { CanForward = change.CanForward ?? true });
                         if (change.Position is { } newPosition)
                             AddToCell(cells, change.A, newPosition);
                         applied++;
@@ -152,6 +160,14 @@ public sealed class TopologyStore
                         AddToCell(cells, change.A, change.Position!.Value);
                         nodes[change.A] = moving with { Position = change.Position };
                         applied++;
+                        break;
+
+                    case TopologyOperation.SetForwarding:
+                        if (!nodes.TryGetValue(change.A, out var forwarder) || forwarder.CanForward == change.CanForward)
+                            break;
+                        nodes[change.A] = forwarder with { CanForward = change.CanForward!.Value };
+                        applied++;
+                        connectivityChanged = true;
                         break;
 
                     default:

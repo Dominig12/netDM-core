@@ -1,5 +1,9 @@
 # BYOND x86 → NetDM.Host x64 native bridge
 
+For framed V1 over a Windows pipe or Linux Unix socket, see the
+[integration contract and real DreamDaemon smoke commands](integration-contracts.ru.md).
+The original Windows JSON-lines development mode is documented below.
+
 ## Architecture
 
 ```text
@@ -143,10 +147,9 @@ and `op`; response echoes `id` with `ok`.
 - IDs crossing DM as JSON numbers should remain within BYOND's
   numerical precision; a future version should send 64-bit IDs as
   decimal strings to eliminate floating-point truncation.
-- No bundled DreamDaemon executable/compiler in GitHub CI: **Win32
-  call_ext ABI is compile/link/run-tested using a genuine 32-bit
-  Windows test process, but the final BYOND DM compile/runtime
-  and server trust settings still require verification in BYOND.**
+- The legacy GitHub CI test invokes the ABI from a 32-bit Windows test
+  executable. The V1 world harness runs real DreamMaker and DreamDaemon
+  on each platform with a standalone fixture.
 
 
 ## Live SS13 topology in Observatory
@@ -164,7 +167,7 @@ coordinates, wired link count, radio range and channel.
 `GET /api/game/map` accepts the benchmark map viewport filters but reads
 the actual `GameNetworkService.Snapshot`.
 
-New local pipe commands: `game_reset` atomically clears the previous
-SS13 graph; `game_radio_batch` applies 1..256 profiles. Only one SS13
+Local pipe commands: `game_reset` replaces the game graph, queues and
+receipt stream. `game_radio_batch` applies 1..256 profiles. Only one SS13
 process may own the Host game graph at a time: do not attach independent
 game servers to one development Host. HTTP observation is localhost-only.

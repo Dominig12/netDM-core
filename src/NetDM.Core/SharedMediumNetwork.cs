@@ -319,30 +319,56 @@ public sealed partial class SharedMediumNetwork
     /// from retained profiles, dropping removed nodes atomically.
     /// This intentionally uses a conservative full membership rebuild; game
     /// batches are bounded and routing readers always see one coherent snapshot.
+    /// Profile replacements in <paramref name="radios"/> apply to the post-batch nodes in
+    /// the same publication, so a wired/radio attachment switch never has an
+    /// intermediate state with both paths. They are validated before any mutation.
     /// </summary>
-    public BatchResult ApplyExternalTopology(IReadOnlyList<TopologyChange> changes)
+    public BatchResult ApplyExternalTopology(IReadOnlyList<TopologyChange> changes,
+        IReadOnlyList<RadioNodeUpdate>? radios = null)
     {
         ArgumentNullException.ThrowIfNull(changes);
-        if (changes.Count is < 1 or > 4096)
+        radios ??= [];
+        if (changes.Count > MaxExternalChanges || radios.Count > MaxExternalChanges ||
+            changes.Count + radios.Count < 1)
             throw new ArgumentOutOfRangeException(nameof(changes));
         lock (_writer)
         {
             var before = Snapshot;
             VerifyOwnership(before);
-            var result = _runtime.Apply(changes);
-            if (result.Applied == 0) return result;
+            ValidateProfileReplacements(before.Physical, changes, radios);
+            var result = changes.Count == 0
+                ? new BatchResult(before.Physical.Version, 0, 0) : _runtime.Apply(changes);
             var physical = _runtime.Topology.Snapshot;
             var devices = before.Devices.ToBuilder();
             foreach (var id in before.Devices.Keys)
                 if (!physical.Nodes.ContainsKey(id)) devices.Remove(id);
+            // A node removed and added again in one batch is a new node without the old radio.
+            foreach (var change in changes)
+                if (change.Operation == TopologyOperation.RemoveNode) devices.Remove(change.A);
+            var changedRadios = 0;
+            foreach (var update in radios)
+            {
+                var present = devices.TryGetValue(update.Id, out var previous);
+                if (update.Profile is { Enabled: true } profile)
+                {
+                    if (present && previous == profile) continue;
+                    devices[update.Id] = profile;
+                }
+                else if (!present || !devices.Remove(update.Id)) continue;
+                changedRadios++;
+            }
+            if (result.Applied == 0 && changedRadios == 0) return result;
             var cells = ImmutableDictionary.CreateBuilder<RadioMediumCell, ImmutableHashSet<NodeId>>();
             foreach (var device in devices)
                 if (physical.Nodes[device.Key].Position is { } position)
                     AddToCell(cells, device.Key, CellOf(device.Value, position));
             var nextDevices = devices.ToImmutable();
             var nextCells = cells.ToImmutable();
+            // Only nodes that exist feed the incremental dense update; ignored IDs never reach it.
             var affected = changes.SelectMany(c => new[] { c.A, c.B })
-                .Where(id => id.Value != 0).Distinct().ToArray();
+                .Concat(radios.Select(update => update.Id))
+                .Where(id => id.Value != 0 && physical.Nodes.ContainsKey(id)).Distinct().ToArray();
+            result = result with { Applied = result.Applied + changedRadios };
             var next = new SharedMediumSnapshot(checked(before.Version + 1),
                 physical, nextDevices, nextCells)
             {
@@ -358,6 +384,51 @@ public sealed partial class SharedMediumNetwork
             _cache.Clear();
             Volatile.Write(ref _current, next);
             return result;
+        }
+    }
+
+    /// <summary>Upper bound of one external batch: client facts plus derived device follow-ups.</summary>
+    public const int MaxExternalChanges = 16_384;
+
+    /// <summary>Profiles must target distinct nodes that exist with a position after the batch.</summary>
+    private void ValidateProfileReplacements(TopologySnapshot before,
+        IReadOnlyList<TopologyChange> changes, IReadOnlyList<RadioNodeUpdate> radios)
+    {
+        if (radios.Count == 0)
+            return;
+        // Mirrors the store: adding a present node and moving or removing a missing one are no-ops.
+        var after = new Dictionary<NodeId, (bool Present, NodePosition? Position)>();
+        foreach (var change in changes)
+        {
+            (bool Present, NodePosition? Position) state = after.TryGetValue(change.A, out var simulated) ? simulated
+                : before.Nodes.TryGetValue(change.A, out var existing) ? (true, existing.Position) : (false, null);
+            switch (change.Operation)
+            {
+                case TopologyOperation.AddNode when !state.Present:
+                    after[change.A] = (true, change.Position);
+                    break;
+                case TopologyOperation.MoveNode when state.Present && change.Position is not null:
+                    after[change.A] = (true, change.Position);
+                    break;
+                case TopologyOperation.RemoveNode when state.Present:
+                    after[change.A] = (false, null);
+                    break;
+            }
+        }
+        var seen = new HashSet<NodeId>();
+        foreach (var update in radios)
+        {
+            if (!update.ChangeProfile || update.Position is not null || !seen.Add(update.Id))
+                throw new ArgumentException("Radio replacements must be distinct profile-only updates.");
+            var (present, position) = after.TryGetValue(update.Id, out var changed) ? changed
+                : before.Nodes.TryGetValue(update.Id, out var node) ? (true, node.Position) : (false, null);
+            if (!present)
+                throw new ArgumentException("Radio replacement must target a node that exists after the batch.");
+            if (update.Profile is not { Enabled: true } profile)
+                continue;
+            profile.Validate();
+            if (position is null || profile.Range > _maximumRadioRange || profile.Cost < _minimumRadioCost)
+                throw new ArgumentException("Radio replacement needs a positioned node and bounded profile.");
         }
     }
 
@@ -510,6 +581,8 @@ public sealed partial class SharedMediumNetwork
             }
             void Relax(NodeId candidate, uint weight)
             {
+                if (candidate != target && !snapshot.Physical.Nodes[candidate].CanForward)
+                    return;
                 var next = checked(distance + weight);
                 if (costs.TryGetValue(candidate, out var old) && old <= next) return;
                 costs[candidate] = next;
@@ -599,6 +672,8 @@ public sealed partial class SharedMediumNetwork
 
             void Relax(NodeId candidate, uint weight)
             {
+                if (candidate != target && !snapshot.Physical.Nodes[candidate].CanForward)
+                    return;
                 var next = checked(cost + weight);
                 if (distances.TryGetValue(candidate, out var prior) && next >= prior)
                     return;
@@ -691,6 +766,8 @@ public sealed partial class SharedMediumNetwork
 
                 void Relax(NodeId nextNode, uint weight)
                 {
+                    if (nextNode != target && !snapshot.Physical.Nodes[nextNode].CanForward)
+                        return;
                     var candidateCost = checked(cost + weight);
                     if (costs.TryGetValue(nextNode, out var previous) &&
                         candidateCost >= previous)
@@ -731,7 +808,8 @@ public sealed partial class SharedMediumNetwork
                     foreach (var neighbor in members)
                     {
                         if (neighbor == node ||
-                            !snapshot.Devices.TryGetValue(neighbor, out var other))
+                            !snapshot.Devices.TryGetValue(neighbor, out var other) ||
+                            !profile.PairsWith(other))
                             continue;
                         var destination = snapshot.Physical.Nodes[neighbor].Position!.Value;
                         if (!Within(origin, destination,
@@ -762,12 +840,15 @@ public sealed partial class SharedMediumNetwork
     /// transmission will succeed. Used to wake a waiting packet when its
     /// original wireless/cable hop has physically recovered.
     /// </summary>
-    public bool HasUsableHop(NodeId from, NodeId to)
+    public bool HasUsableHop(NodeId from, NodeId to) => HasUsableHop(from, to, true, true);
+
+    internal bool HasUsableHop(NodeId from, NodeId to, bool isFirstHop, bool isLastHop)
     {
         var snapshot = Snapshot;
         if (from == to ||
             !snapshot.Physical.Nodes.TryGetValue(from, out var node) ||
-            !snapshot.Physical.Nodes.ContainsKey(to))
+            !snapshot.Physical.Nodes.TryGetValue(to, out var target) ||
+            (!isFirstHop && !node.CanForward) || (!isLastHop && !target.CanForward))
             return false;
         return node.Links.ContainsKey(to) ||
             RadioCost(snapshot, from, to, out _) is not null;
@@ -787,7 +868,27 @@ public sealed partial class SharedMediumNetwork
     /// </summary>
     public RadioHopOutcome TryTransmitHop(NodeId from, NodeId to, int bytes, long tick,
         PacketTrafficClass trafficClass = PacketTrafficClass.Background,
-        int interactiveReservePercent = 0)
+        int interactiveReservePercent = 0) =>
+        TryTransmitHop(from, to, bytes, tick, trafficClass, interactiveReservePercent, true, true);
+
+    /// <summary>
+    /// Whether a forwarded hop would go over cable: both ends allow it and the wire is not
+    /// costlier than radio. No airtime is reserved; a false answer leaves the hop to
+    /// <see cref="TryTransmitHop(NodeId, NodeId, int, long, PacketTrafficClass, int)"/>.
+    /// </summary>
+    internal bool IsCableHop(NodeId from, NodeId to, bool isLastHop)
+    {
+        var snapshot = Snapshot;
+        if (from == to || !snapshot.Physical.Nodes.TryGetValue(from, out var node) ||
+            !snapshot.Physical.Nodes.TryGetValue(to, out var target) || !node.CanForward ||
+            (!isLastHop && !target.CanForward) || !node.Links.TryGetValue(to, out var edge))
+            return false;
+        var radio = RadioCost(snapshot, from, to, out _);
+        return (ulong)edge.Cost <= (ulong)(radio ?? uint.MaxValue);
+    }
+
+    internal RadioHopOutcome TryTransmitHop(NodeId from, NodeId to, int bytes, long tick,
+        PacketTrafficClass trafficClass, int interactiveReservePercent, bool isFirstHop, bool isLastHop)
     {
         if (bytes is < 1 or > 1_000_000)
             throw new ArgumentOutOfRangeException(nameof(bytes));
@@ -799,7 +900,8 @@ public sealed partial class SharedMediumNetwork
         var snapshot = Snapshot;
         if (from == to ||
             !snapshot.Physical.Nodes.TryGetValue(from, out var node) ||
-            !snapshot.Physical.Nodes.ContainsKey(to))
+            !snapshot.Physical.Nodes.TryGetValue(to, out var target) ||
+            (!isFirstHop && !node.CanForward) || (!isLastHop && !target.CanForward))
             return RadioHopOutcome.LinkUnavailable;
 
         var wire = node.Links.TryGetValue(to, out var edge)
@@ -957,7 +1059,7 @@ public sealed partial class SharedMediumNetwork
         for (var i = 1; i < route.Path.Count; i++)
         {
             var a = route.Path[i - 1]; var b = route.Path[i];
-            if (a == b)
+            if (a == b || (i > 1 && !snapshot.Physical.Nodes[a].CanForward))
             {
                 if (needsRevalidation)
                     RegisterRejection(payloadBytes, ref _rejectedStaleRoute);
@@ -1050,6 +1152,10 @@ public sealed partial class SharedMediumNetwork
         return result;
     }
 
+    /// <summary>Radio partners of one node on a pinned snapshot, for diagnostics and views.</summary>
+    public static IEnumerable<NodeId> RadioPartners(SharedMediumSnapshot snapshot, NodeId id) =>
+        RadioNeighbors(snapshot, id).Select(edge => edge.To);
+
     private static IEnumerable<Edge> RadioNeighbors(SharedMediumSnapshot snapshot, NodeId id)
     {
         if (!snapshot.Devices.TryGetValue(id, out var profile)) yield break;
@@ -1071,7 +1177,8 @@ public sealed partial class SharedMediumNetwork
             foreach (var candidate in members)
             {
                 if (candidate == id ||
-                    !snapshot.Devices.TryGetValue(candidate, out var other)) continue;
+                    !snapshot.Devices.TryGetValue(candidate, out var other) ||
+                    !profile.PairsWith(other)) continue;
                 var destination = snapshot.Physical.Nodes[candidate].Position!.Value;
                 if (!Within(origin, destination, Math.Min(profile.Range, other.Range)))
                     continue;
@@ -1086,7 +1193,7 @@ public sealed partial class SharedMediumNetwork
         domain = default;
         if (!snapshot.Devices.TryGetValue(a, out var left) ||
             !snapshot.Devices.TryGetValue(b, out var right) ||
-            left.Channel != right.Channel) return null;
+            !left.PairsWith(right)) return null;
         var p = snapshot.Physical.Nodes[a].Position!.Value;
         var q = snapshot.Physical.Nodes[b].Position!.Value;
         if (p.Z != q.Z ||

@@ -1,0 +1,107 @@
+services:
+  db:
+    image: ${BLUEMOON_IMAGE_PREFIX:-netdm-local/bluemoon}-db:${BLUEMOON_RELEASE:-p1}
+    build:
+      context: ../..
+      dockerfile: deploy/bluemoon/Database.Dockerfile
+      additional_contexts:
+        game: ${BLUEMOON_SOURCE:-./source}
+    environment:
+      MARIADB_DATABASE: bluemoon
+      MARIADB_USER: bluemoon
+      MARIADB_PASSWORD_FILE: /run/secrets/db_password
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+    secrets: [db_password, db_root_password]
+    volumes: [database:/var/lib/mysql]
+    networks: [backend]
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+
+  db-init:
+    image: ${BLUEMOON_IMAGE_PREFIX:-netdm-local/bluemoon}-db:${BLUEMOON_RELEASE:-p1}
+    entrypoint: [/usr/local/bin/bluemoon-check-db]
+    depends_on:
+      db: {condition: service_healthy}
+    secrets: [db_password]
+    networks: [backend]
+
+  ipc-init:
+    image: ${BLUEMOON_IMAGE_PREFIX:-netdm-local/bluemoon}-host:${BLUEMOON_RELEASE:-p1}
+    user: '0:0'
+    # The Host runs as 1654: it owns the IPC session directory and the research journal.
+    entrypoint: [/usr/bin/install, -d, -m, '0770', -o, '1654', -g, '1654', /run/netdm/session, /var/lib/netdm/research]
+    volumes: [ipc:/run/netdm, research:/var/lib/netdm/research]
+    network_mode: none
+
+  netdm:
+    image: ${BLUEMOON_IMAGE_PREFIX:-netdm-local/bluemoon}-host:${BLUEMOON_RELEASE:-p1}
+    build:
+      context: ../..
+      dockerfile: deploy/bluemoon/Host.Dockerfile
+    depends_on:
+      ipc-init: {condition: service_completed_successfully}
+    # A packet worker fault exits with code 70; Docker restarts with backoff and
+    # the running game re-handshakes and republishes its snapshot.
+    restart: on-failure
+    environment:
+      NETDM_IPC_MODE: v1
+      NETDM_SOCKET_PATH: /run/netdm/session/core.sock
+      NetDM__Deployment: 'true'
+      NetDM__ReadinessPort: '5088'
+      # One durable journal per round; recreating the container keeps it (P5).
+      NetDM__ResearchDirectory: /var/lib/netdm/research
+    volumes: [ipc:/run/netdm, research:/var/lib/netdm/research]
+    networks: [backend]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:5088/api/readiness/ipc]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+
+  game:
+    image: ${BLUEMOON_IMAGE_PREFIX:-netdm-local/bluemoon}-game:${BLUEMOON_RELEASE:-p1}
+    build:
+      context: ../..
+      dockerfile: deploy/bluemoon/Game.Dockerfile
+      additional_contexts:
+        game: ${BLUEMOON_SOURCE:-./source}
+    depends_on:
+      db-init: {condition: service_completed_successfully}
+      netdm: {condition: service_healthy}
+    environment:
+      NETDM_IPC_MODE: v1
+      NETDM_OBSERVE: '1'
+      NETDM_SOCKET_PATH: /run/netdm/session/core.sock
+      NETDM_SERVER_ID: ${BLUEMOON_SERVER_ID:-bluemoon}
+    secrets: [db_password]
+    volumes: [ipc:/run/netdm, game-config:/game/config, game-data:/game/data]
+    networks: [backend, edge]
+    ports: ['${BLUEMOON_BIND_ADDRESS:-127.0.0.1}:${BLUEMOON_PORT:-1337}:1337']
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, curl, -fsS, http://netdm:5088/api/readiness/game]
+      interval: 3s
+      timeout: 2s
+      # Delta Station initializes in about 5.5 minutes in Docker on the test stand.
+      start_period: 4m
+      retries: 120
+
+networks:
+  backend: {internal: true}
+  edge: {}
+
+volumes:
+  ipc: {}
+  research: {}
+  game-config: {}
+  game-data: {}
+  database: {}
+
+secrets:
+  db_password:
+    file: ${BLUEMOON_DB_PASSWORD_FILE:-./secrets/db-password}
+  db_root_password:
+    file: ${BLUEMOON_DB_ROOT_PASSWORD_FILE:-./secrets/db-root-password}

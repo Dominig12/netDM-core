@@ -22,7 +22,7 @@ public enum PacketTrafficClass : byte { Background = 0, Interactive = 1 }
 public enum PacketSubmissionRejection : byte
 {
     None = 0, InvalidRoute = 1, QueueFull = 2, BackgroundCongestion = 3,
-    RouteSchedulerBusy = 4
+    RouteSchedulerBusy = 4, SessionChanged = 5
 }
 public readonly record struct PacketSubmissionResult(
     bool Accepted, Guid StreamId, long PacketId, string RequestId,
@@ -77,7 +77,13 @@ public sealed record PacketTransportOptions(
     int BackgroundCongestionHighPercent = 0,
     int BackgroundCongestionLowPercent = 60,
     int InteractiveLatencyObjectiveTicks = 10,
-    int ReceiptHistoryCapacity = 1024)
+    int ReceiptHistoryCapacity = 1024,
+    // Cable hops a packet may cross within one tick. Wires carry no airtime, so a
+    // wired backbone need not cost a tick per hop; radio hops still take one tick each.
+    int MaxCableHopsPerTick = 1,
+    // An interactive packet submitted after the tick's forwarding pass takes its first hop at once
+    // instead of waiting up to a tick (event-driven waiting only). Speech needs it for its latency.
+    bool AdvanceInteractiveOnSubmit = false)
 {
     public void Validate()
     {
@@ -135,6 +141,8 @@ public sealed record PacketTransportOptions(
             throw new ArgumentOutOfRangeException(nameof(InteractiveLatencyObjectiveTicks));
         if (ReceiptHistoryCapacity is < 0 or > 65_536)
             throw new ArgumentOutOfRangeException(nameof(ReceiptHistoryCapacity));
+        if (MaxCableHopsPerTick is < 1 or > 64)
+            throw new ArgumentOutOfRangeException(nameof(MaxCableHopsPerTick));
     }
 }
 
@@ -301,6 +309,7 @@ public sealed class RadioPacketTransport
     private long _rerouteSchedulerRejections, _skippedTicks, _tickAdmissionFailures;
     private long _rerouteSampleCount, _forwardSampleCount, _firstHopSampleCount;
     private long _tickBudgetStops;
+    private long _submitAdvances;
     private long _noRouteBackoffs, _noRouteBackoffTicks, _cooldownSkips;
     private long _localWakes, _recoveredHops, _staleNegativeResults;
     private long _lastTick = -1, _nextPacketId, _nextRequestId;
@@ -314,10 +323,18 @@ public sealed class RadioPacketTransport
     private long _backgroundCongestionRejects;
     private long _interactiveDropped, _backgroundDropped, _interactiveExpired, _backgroundExpired;
     private long _interactiveDeliveredBeyondObjective;
+    private readonly Action<PacketDeliveryReceipt>? _terminalObserver;
 
-    public RadioPacketTransport(SharedMediumNetwork network, PacketTransportOptions? settings = null)
+    /// <param name="terminalObserver">
+    /// Optional exact feed of every terminal receipt of a tracked packet, independent
+    /// of the bounded replay window. It runs under the transport lock: it must be
+    /// short, must not block and must never call back into this transport.
+    /// </param>
+    public RadioPacketTransport(SharedMediumNetwork network, PacketTransportOptions? settings = null,
+        Action<PacketDeliveryReceipt>? terminalObserver = null)
     {
         _network = network ?? throw new ArgumentNullException(nameof(network));
+        _terminalObserver = terminalObserver;
         _settings = settings ?? new PacketTransportOptions();
         _settings.Validate();
         _currentVisitLimit = _settings.AdaptivePacketVisits
@@ -364,12 +381,15 @@ public sealed class RadioPacketTransport
     {
         if (packet.RequestId is null) return;
         long sequence = ++_receiptSequence;
-        if (_settings.ReceiptHistoryCapacity == 0) return;
-        if (_receipts.Count == _settings.ReceiptHistoryCapacity) _receipts.Dequeue();
-        _receipts.Enqueue(new PacketDeliveryReceipt(sequence, packet.Id,
+        if (_settings.ReceiptHistoryCapacity == 0 && _terminalObserver is null) return;
+        var receipt = new PacketDeliveryReceipt(sequence, packet.Id,
             packet.RequestId, packet.TrafficClass, status, reason,
             packet.CreatedTick, Math.Max(packet.CreatedTick, tick),
-            packet.Bytes, packet.SuccessfulHops));
+            packet.Bytes, packet.SuccessfulHops);
+        _terminalObserver?.Invoke(receipt);
+        if (_settings.ReceiptHistoryCapacity == 0) return;
+        if (_receipts.Count == _settings.ReceiptHistoryCapacity) _receipts.Dequeue();
+        _receipts.Enqueue(receipt);
     }
     private int QueuedCount => _settings.EventDrivenPacketWaiting ? _active.Count : _queue.Count;
     private int ReadyQueueCount => _ready.Count + _readyInteractive.Count;
@@ -984,7 +1004,9 @@ public sealed class RadioPacketTransport
             _expirations.Enqueue(packet, packet.ExpiresAtTick);
         _enqueued++;
         _peak = Math.Max(_peak, QueuedCount);
-        return new PacketSubmissionResult(true, _receiptStreamId, packet.Id, requestId ?? "",
+        var packetId = packet.Id;
+        AdvanceOnSubmit(packet, tick);
+        return new PacketSubmissionResult(true, _receiptStreamId, packetId, requestId ?? "",
             PacketSubmissionRejection.None);
     }
 
@@ -1117,129 +1139,8 @@ public sealed class RadioPacketTransport
                     packet.WaitState = PacketWaitState.None;
                 }
                 else packet = _queue.Dequeue();
-                if (tick >= packet.ExpiresAtTick)
-                {
-                    Expire(packet, tick);
-                    continue;
-                }
-                if (packet.Index >= packet.Path.Count - 1)
-                {
-                    Delivered(packet, tick);
-                    continue;
-                }
-                if (packet.PendingRerouteId == 0 && tick < packet.NextRetryTick)
-                {
-                    // An endpoint may have moved or changed its radio profile.
-                    // Wake only that packet, with a minimum retry interval,
-                    // rather than invalidating every disconnected route after
-                    // any unrelated global snapshot update.
-                    var revision = LocalRevision(packet);
-                    if (revision > packet.SeenLocalRevision)
-                    {
-                        packet.SeenLocalRevision = revision;
-                        var probeFrom = packet.Path[packet.Index];
-                        var probeTo = packet.Path[packet.Index + 1];
-                        // Local recovery does not need another full A* search
-                        // and must not wait for an exponential backoff deadline.
-                        if (_network.HasUsableHop(probeFrom, probeTo) ||
-                            (packet.LastRouteAttemptTick >= 0 &&
-                             tick - packet.LastRouteAttemptTick >=
-                                 _settings.NoRouteRetryDelayTicks))
-                        {
-                            packet.NextRetryTick = tick;
-                            _localWakes++;
-                        }
-                    }
-                    if (tick < packet.NextRetryTick)
-                    {
-                        _cooldownSkips++;
-                        WaitUntil(packet, packet.NextRetryTick);
-                        continue;
-                    }
-                }
-                // A temporarily broken hop may heal while its reroute is
-                // queued or running. Recheck the cheap single-hop path so
-                // it can recover without waiting for an expensive search.
-                // A successful hop invalidates the ticket generation; any
-                // late reroute result is ignored.
-
-                var from = packet.Path[packet.Index];
-                var to = packet.Path[packet.Index + 1];
-                var airtimeReserve = _settings.PrioritizeInteractiveAirtime &&
-                    interactiveReadyAtStart > 0 ? _settings.InteractiveAirtimeReservePercent : 0;
-                var result = _network.TryTransmitHop(from, to, packet.Bytes, tick,
-                    packet.TrafficClass, airtimeReserve);
-                switch (result)
-                {
-                    case RadioHopOutcome.TransmittedRadio:
-                    case RadioHopOutcome.TransmittedCable:
-                        if (packet.NoRouteStreak > 0) _recoveredHops++;
-                        packet.NoRouteStreak = 0;
-                        packet.NextRetryTick = 0;
-                        packet.PendingRerouteId = 0; // Cancel logical ticket on healing.
-                        if (packet.SuccessfulHops == 0)
-                        {
-                            long firstAge = Math.Max(0, tick - packet.CreatedTick);
-                            _firstHopAges[(int)(_firstHopSampleCount++ % SampleWindow)] = firstAge;
-                            if (packet.TrafficClass == PacketTrafficClass.Interactive)
-                                _interactiveFirstHopAges[
-                                    (int)(_interactiveFirstHopSamples++ % SampleWindow)] = firstAge;
-                            else
-                                _backgroundFirstHopAges[
-                                    (int)(_backgroundFirstHopSamples++ % SampleWindow)] = firstAge;
-                        }
-                        packet.Index++;
-                        packet.SuccessfulHops++;
-                        forwarded++;
-                        if (result == RadioHopOutcome.TransmittedRadio) _radioHops++;
-                        else _cableHops++;
-                        if (packet.Index == packet.Path.Count - 1)
-                            Delivered(packet, tick);
-                        else Ready(packet);
-                        break;
-
-                    case RadioHopOutcome.ChannelBusy:
-                    case RadioHopOutcome.OldTick:
-                        _busy++;
-                        Ready(packet);
-                        break;
-
-                    case RadioHopOutcome.LinkUnavailable:
-                        if (packet.PendingRerouteId != 0)
-                        {
-                            AwaitReroute(packet);
-                            break;
-                        }
-                        if (packet.Reroutes >= _settings.MaxReroutes)
-                        {
-                            Drop(packet, PacketCompletionReason.LinkFailure, tick);
-                            _linkFailureDrops++;
-                            break;
-                        }
-                        if (!CanQueueReroute(packet.TrafficClass))
-                        {
-                            _rerouteQueueDeferrals++;
-                            WaitForRerouteCapacity(packet, tick);
-                            break;
-                        }
-                        var ticket = new PacketRerouteRequest(++_nextRequestId,
-                            packet.Id, from, packet.Destination, tick,
-                            packet.TrafficClass);
-                        packet.PendingRerouteId = ticket.Id;
-                        if (_settings.PrioritizeInteractiveReroutes &&
-                            ticket.TrafficClass == PacketTrafficClass.Interactive)
-                            _rerouteInteractiveQueue.Enqueue(ticket);
-                        else
-                            _rerouteQueue.Enqueue(ticket);
-                        AwaitReroute(packet);
-                        break;
-
-                    case RadioHopOutcome.PacketTooLarge:
-                    default:
-                        Drop(packet, PacketCompletionReason.PacketTooLarge, tick);
-                        _oversizeDrops++;
-                        break;
-                }
+                if (VisitPacket(packet, tick, interactiveReadyAtStart > 0))
+                    forwarded++;
             }
             var elapsedUs = (long)((Stopwatch.GetTimestamp() - started) *
                 1_000_000.0 / Stopwatch.Frequency);
@@ -1278,6 +1179,174 @@ public sealed class RadioPacketTransport
             _maxAdvanceUs = Math.Max(_maxAdvanceUs, elapsedUs);
             return forwarded;
         }
+    }
+
+    /// <summary>
+    /// One visit of a packet in a tick: expiry, delivery, cooldown, then one hop and the wires after it.
+    /// Returns true when the packet moved. The caller holds the gate and has taken the packet out of
+    /// its wait state. <paramref name="reserveAirtime"/> keeps the interactive airtime reserve.
+    /// </summary>
+    private bool VisitPacket(PendingPacket packet, long tick, bool reserveAirtime)
+    {
+        var forwarded = false;
+        if (tick >= packet.ExpiresAtTick)
+        {
+            Expire(packet, tick);
+            return false;
+        }
+        if (packet.Index >= packet.Path.Count - 1)
+        {
+            Delivered(packet, tick);
+            return false;
+        }
+        if (packet.PendingRerouteId == 0 && tick < packet.NextRetryTick)
+        {
+            // An endpoint may have moved or changed its radio profile.
+            // Wake only that packet, with a minimum retry interval,
+            // rather than invalidating every disconnected route after
+            // any unrelated global snapshot update.
+            var revision = LocalRevision(packet);
+            if (revision > packet.SeenLocalRevision)
+            {
+                packet.SeenLocalRevision = revision;
+                var probeFrom = packet.Path[packet.Index];
+                var probeTo = packet.Path[packet.Index + 1];
+                // Local recovery does not need another full A* search
+                // and must not wait for an exponential backoff deadline.
+                if (_network.HasUsableHop(probeFrom, probeTo, packet.SuccessfulHops == 0,
+                        probeTo == packet.Destination) ||
+                    (packet.LastRouteAttemptTick >= 0 &&
+                     tick - packet.LastRouteAttemptTick >=
+                         _settings.NoRouteRetryDelayTicks))
+                {
+                    packet.NextRetryTick = tick;
+                    _localWakes++;
+                }
+            }
+            if (tick < packet.NextRetryTick)
+            {
+                _cooldownSkips++;
+                WaitUntil(packet, packet.NextRetryTick);
+                return false;
+            }
+        }
+        // A temporarily broken hop may heal while its reroute is
+        // queued or running. Recheck the cheap single-hop path so
+        // it can recover without waiting for an expensive search.
+        // A successful hop invalidates the ticket generation; any
+        // late reroute result is ignored.
+
+        var from = packet.Path[packet.Index];
+        var to = packet.Path[packet.Index + 1];
+        var airtimeReserve = _settings.PrioritizeInteractiveAirtime &&
+            reserveAirtime ? _settings.InteractiveAirtimeReservePercent : 0;
+        var result = _network.TryTransmitHop(from, to, packet.Bytes, tick,
+            packet.TrafficClass, airtimeReserve, packet.SuccessfulHops == 0, to == packet.Destination);
+        switch (result)
+        {
+            case RadioHopOutcome.TransmittedRadio:
+            case RadioHopOutcome.TransmittedCable:
+                if (packet.NoRouteStreak > 0) _recoveredHops++;
+                packet.NoRouteStreak = 0;
+                packet.NextRetryTick = 0;
+                packet.PendingRerouteId = 0; // Cancel logical ticket on healing.
+                if (packet.SuccessfulHops == 0)
+                {
+                    long firstAge = Math.Max(0, tick - packet.CreatedTick);
+                    _firstHopAges[(int)(_firstHopSampleCount++ % SampleWindow)] = firstAge;
+                    if (packet.TrafficClass == PacketTrafficClass.Interactive)
+                        _interactiveFirstHopAges[
+                            (int)(_interactiveFirstHopSamples++ % SampleWindow)] = firstAge;
+                    else
+                        _backgroundFirstHopAges[
+                            (int)(_backgroundFirstHopSamples++ % SampleWindow)] = firstAge;
+                }
+                packet.Index++;
+                packet.SuccessfulHops++;
+                forwarded = true;
+                if (result == RadioHopOutcome.TransmittedRadio) _radioHops++;
+                else _cableHops++;
+                // Wires are fast: within the tick the packet keeps crossing consecutive
+                // cable hops, after a cable or a radio hop; the first hop counts towards
+                // the bound. A further radio hop waits for the next tick, so one packet
+                // takes at most one radio hop per tick, and the default bound of 1 keeps
+                // one hop per tick.
+                var cableRun = 1;
+                while (cableRun < _settings.MaxCableHopsPerTick && packet.Index < packet.Path.Count - 1)
+                {
+                    var cableTo = packet.Path[packet.Index + 1];
+                    if (!_network.IsCableHop(packet.Path[packet.Index], cableTo, cableTo == packet.Destination))
+                        break;
+                    packet.Index++;
+                    packet.SuccessfulHops++;
+                    _cableHops++;
+                    cableRun++;
+                }
+                if (packet.Index == packet.Path.Count - 1)
+                    Delivered(packet, tick);
+                else Ready(packet);
+                break;
+
+            case RadioHopOutcome.ChannelBusy:
+            case RadioHopOutcome.OldTick:
+                _busy++;
+                Ready(packet);
+                break;
+
+            case RadioHopOutcome.LinkUnavailable:
+                if (packet.PendingRerouteId != 0)
+                {
+                    AwaitReroute(packet);
+                    break;
+                }
+                if (packet.Reroutes >= _settings.MaxReroutes)
+                {
+                    Drop(packet, PacketCompletionReason.LinkFailure, tick);
+                    _linkFailureDrops++;
+                    break;
+                }
+                if (!CanQueueReroute(packet.TrafficClass))
+                {
+                    _rerouteQueueDeferrals++;
+                    WaitForRerouteCapacity(packet, tick);
+                    break;
+                }
+                var ticket = new PacketRerouteRequest(++_nextRequestId,
+                    packet.Id, from, packet.Destination, tick,
+                    packet.TrafficClass);
+                packet.PendingRerouteId = ticket.Id;
+                if (_settings.PrioritizeInteractiveReroutes &&
+                    ticket.TrafficClass == PacketTrafficClass.Interactive)
+                    _rerouteInteractiveQueue.Enqueue(ticket);
+                else
+                    _rerouteQueue.Enqueue(ticket);
+                AwaitReroute(packet);
+                break;
+
+            case RadioHopOutcome.PacketTooLarge:
+            default:
+                Drop(packet, PacketCompletionReason.PacketTooLarge, tick);
+                _oversizeDrops++;
+                break;
+        }
+        return forwarded;
+    }
+
+    /// <summary>
+    /// An interactive packet submitted after this tick's forwarding pass takes its first hop now instead of
+    /// waiting up to a tick for the next pass. It gets no more than the tick still has: the same airtime
+    /// accounting, one radio hop and the wires after it.
+    /// </summary>
+    private void AdvanceOnSubmit(PendingPacket packet, long tick)
+    {
+        if (!_settings.AdvanceInteractiveOnSubmit || !_settings.EventDrivenPacketWaiting ||
+            packet.TrafficClass != PacketTrafficClass.Interactive || _lastTick < 0 || tick > _lastTick ||
+            packet.WaitState != PacketWaitState.Ready)
+            return;
+        LeaveWait(packet); // The queued ready entry is now stale and is skipped.
+        _submitAdvances++;
+        if (!VisitPacket(packet, _lastTick, false) && packet.Active && packet.WaitState == PacketWaitState.None)
+            Ready(packet);
     }
 
     /// <summary>

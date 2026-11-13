@@ -52,6 +52,8 @@ public static class Router
 
             foreach (var edge in snapshot.Nodes[current].Links.Values)
             {
+                if (edge.To != target && !snapshot.Nodes[edge.To].CanForward)
+                    continue;
                 var nextCost = checked(best + edge.Cost);
                 if (costs.TryGetValue(edge.To, out var prior) && prior <= nextCost) continue;
                 costs[edge.To] = nextCost;

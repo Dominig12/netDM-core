@@ -1,0 +1,17 @@
+/datum/unit_test/netdm_observe
+/datum/unit_test/netdm_observe/area_map
+/datum/unit_test/netdm_observe/area_map/node_attachment
+/datum/unit_test/netdm_observe/area_map/topology_view
+/datum/unit_test/netdm_observe/area_map/power_state
+/datum/unit_test/netdm_observe/area_map/network_diagnostics
+/datum/unit_test/netdm_observe/area_map/atmos_telemetry
+/datum/unit_test/netdm_observe/area_map/messenger_shadow
+/datum/unit_test/netdm_observe/area_map/messenger_authoritative
+/datum/unit_test/netdm_observe/area_map/radio_shadow
+/datum/unit_test/netdm_observe/area_map/radio_uplink
+/datum/unit_test/netdm_observe/area_map/door_shadow
+/datum/unit_test/netdm_observe/research_shadow
+/datum/unit_test/netdm_observe/research_authoritative
+/datum/unit_test/netdm_observe/research_p6
+/datum/unit_test/netdm_observe/research_authoritative/outbox
+/datum/unit_test/verb_proc_ids

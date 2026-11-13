@@ -153,6 +153,8 @@ public sealed partial class SharedMediumNetwork
 
                 void Relax(int candidate, uint weight)
                 {
+                    if (candidate != targetIndex && !dense.At(candidate).CanForward)
+                        return;
                     ulong next = checked(cost + weight);
                     if (seen[candidate] == stamp && next >= costs[candidate])
                         return;
@@ -191,7 +193,7 @@ public sealed partial class SharedMediumNetwork
                     {
                         if (nextIndex == current) continue;
                         var neighbor = dense.At(nextIndex);
-                        if (neighbor.Radio is not { } other) continue;
+                        if (neighbor.Radio is not { } other || !radio.PairsWith(other)) continue;
                         var destination = neighbor.Position!.Value;
                         if (!Within(origin, destination,
                             Math.Min(radio.Range, other.Range)))
