@@ -1118,8 +1118,9 @@ try {
     $scripted = Invoke-Shell "if links | where state -eq up`r`n`tinvoke door.a set_state press=script1 state=open`r`n`tinvoke door.a set_state press=script2 state=closed`r`nend" -Script
     $one = Take-DoorCommand
     $two = Take-DoorCommand
-    Assert-True ($scripted.status -ceq 'ok' -and $scripted.rows -clike '*status=sent*' -and $one.payload.press -ceq 'script1' -and
-        $two.payload.press -ceq 'script2' -and $one.producer -ceq 'eng-1' -and $two.producer -ceq 'eng-1') 'two script lines reach the same service as distinct commands'
+    # Two commands of one script travel separately: their arrival order is not part of the contract.
+    Assert-True ($scripted.status -ceq 'ok' -and $scripted.rows -clike '*status=sent*' -and $null -ne $one -and $null -ne $two -and
+        (@($one.payload.press, $two.payload.press) | Sort-Object) -join ',' -ceq 'script1,script2' -and $one.producer -ceq 'eng-1' -and $two.producer -ceq 'eng-1') 'two script lines reach the same service as distinct commands'
     $skipped = Invoke-Shell "if links | where state -eq missing`n  invoke door.a set_state press=skip state=open`nend" -Script
     Assert-True ($skipped.status -ceq 'ok' -and $skipped.count -eq 0) 'false script condition skips its action'
     Assert-True ((Invoke-Shell "services`ntrace 3`nservices" -Script).status -ceq 'source_failed') 'script graph searches share one budget'
@@ -1161,11 +1162,12 @@ try {
         Assert-True ($null -ne $answer) "program request answered: $Command"
         return $answer.payload
     }
-    function Take-DoorCommandAs([bool] $Applied, [string] $Sequence = '14', [scriptblock] $BeforeAck) {
+    # -Press waits for that command: commands of one phase travel separately and may arrive in any order.
+    function Take-DoorCommandAs([bool] $Applied, [string] $Sequence = '14', [scriptblock] $BeforeAck, [string] $Press) {
         for ($poll = 0; $poll -lt 60; $poll++) {
             if ($poll % 10 -eq 0) { $null = Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = $Sequence } }
             $found = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 16 }).result.items |
-                Where-Object { $_.recipient -ceq 'dev-3' -and $_.kind -ceq 'command' } | Select-Object -First 1
+                Where-Object { $_.recipient -ceq 'dev-3' -and $_.kind -ceq 'command' -and (-not $Press -or $_.payload.press -ceq $Press) } | Select-Object -First 1
             if ($null -ne $found) {
                 if ($BeforeAck) { & $BeforeAck }
                 $ack = if ($Applied) { @{ deliveryId = $found.deliveryId; applied = $true; result = @{ press = $found.payload.press; state = $found.payload.state; changed = $true } } }
@@ -1245,8 +1247,8 @@ end
 '@
     $multi = Invoke-Program 'start' @{ name = 'all-phase-actions'; source = $multiSource } '16'
     Assert-True ($multi.status -ceq 'started') 'a program with multiple calls in one phase starts'
-    Assert-True ((Take-DoorCommandAs $true '16').payload.press -ceq 'm1') 'the first action in the phase is sent'
-    Assert-True ((Take-DoorCommandAs $false '16').payload.press -ceq 'm2') 'the second action in the phase is sent'
+    Assert-True ((Take-DoorCommandAs $true '16' -Press 'm1').payload.press -ceq 'm1') 'the first action in the phase is sent'
+    Assert-True ((Take-DoorCommandAs $false '16' -Press 'm2').payload.press -ceq 'm2') 'the second action in the phase is sent'
     Assert-True ((Take-DoorCommandAs $true '16').payload.press -ceq 'm3') 'wait retains the first action even when the phase ends in a read'
 
     # Standby pauses execution without removing the PDA's radio or endpoint.
@@ -1361,7 +1363,12 @@ end
     Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '2' } + @{ endpoint = 'apc-2s'; generation = '1' })).ok) 'the shell endpoint attaches again'
     Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'netshell.apc2'; serviceType = 'network.shell'; schema = 'shell.output'
         major = 1; minor = 0 } + @{ endpoint = 'apc-2s'; generation = '1' })).ok) 'APC 2 offers its shell again'
-    $back = Invoke-Shell 'programs | select program name state' '0'
+    # The rule may come back throttled (the old process spent the device budget): the new minute releases it.
+    for ($poll = 0; $poll -lt 20; $poll++) {
+        $back = Invoke-Shell 'programs | select program name state' '0'
+        if ($back.rows -clike '*state=watching') { break }
+        Start-Sleep -Milliseconds 250
+    }
     Assert-True ($back.rows -ceq "program=$($survivor.program),name=survivor,state=watching") "the rule is back under its number: $($back.rows)"
     Start-Sleep -Milliseconds 1500
     Clear-Results
