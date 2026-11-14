@@ -64,13 +64,16 @@ public static class NetShell
     public const int MaxScriptLength = 2048;
     public const int MaxScriptLines = 12;
     public const int MaxConditionDepth = 4;
+    /// <summary>Variables one script may hold; each keeps at most <see cref="ShellLimits.MaxRecords"/> records.</summary>
+    public const int MaxVariables = 8;
+    public const int MaxVariableNameLength = 32;
 
     private static readonly HashSet<string> Filters = new(StringComparer.Ordinal) { "where", "select", "sort", "first", "last", "count" };
     private static readonly HashSet<string> Comparisons = new(StringComparer.Ordinal) { "eq", "ne", "lt", "le", "gt", "ge", "like" };
 
     private sealed record Stage(string Command, ShellArguments Arguments, int Position);
     private sealed record Pipeline(Stage First, Stage[] Filters, Stage? Action);
-    private sealed record ScriptStep(Pipeline Pipeline, int Offset, bool Condition)
+    private sealed record ScriptStep(Pipeline Pipeline, int Offset, bool Condition, string? Assign = null)
     {
         public int AfterBlock { get; set; }
     }
@@ -81,11 +84,22 @@ public static class NetShell
         var failure = Compile(line, limits, sink, false, 0, out var pipeline, out var fuel);
         var remainingActions = limits.MaxActions;
         return failure ?? (pipeline is null ? new ShellResult(ShellStatus.Ok, [], fuel)
-            : Execute(pipeline, source, limits, sink, fuel, ref remainingActions));
+            : Execute(pipeline, source, limits, sink, fuel, ref remainingActions, null));
     }
 
-    /// <summary>Runs pipelines in order. An if block runs when its read-only pipeline produces records.</summary>
-    public static ShellResult RunScript(string script, IShellSource source, ShellLimits? limits = null, IShellSink? sink = null)
+    private static bool IsVariableName(ReadOnlySpan<char> name) =>
+        name.Length is > 0 and <= MaxVariableNameLength && char.IsAsciiLetter(name[0]) && ServiceNames.IsValid(name.ToString()) &&
+        name.IndexOfAny('.', '-') < 0;
+
+    /// <summary>
+    /// Runs pipelines in order. An if block runs when its read-only pipeline produces records.
+    /// <c>$name = pipeline</c> keeps the records of a line; <c>$name</c> as the first stage of a later line
+    /// reads them again without asking the network. A variable never set (its line was skipped) is empty.
+    /// </summary>
+    public static ShellResult RunScript(string script, IShellSource source, ShellLimits? limits = null, IShellSink? sink = null,
+        IReadOnlyDictionary<string, IReadOnlyList<ShellRecord>>? preset = null,
+        Func<string, ShellArguments, bool, string?>? validateSource = null,
+        Func<ShellArguments, bool, string?>? validateAction = null)
     {
         limits ??= new ShellLimits();
         if (script.Length > MaxScriptLength)
@@ -96,6 +110,10 @@ public static class NetShell
 
         var steps = new List<ScriptStep>(lines.Length);
         var blocks = new Stack<ScriptStep>();
+        // Preset variables are what a program was started with: the event of its rule, the result it waited for.
+        var assigned = new HashSet<string>(preset?.Keys ?? [], StringComparer.Ordinal);
+        var variables = new Dictionary<string, IReadOnlyList<ShellRecord>>(preset ?? new Dictionary<string, IReadOnlyList<ShellRecord>>(),
+            StringComparer.Ordinal);
         var offset = 0;
         var fuel = 0;
         foreach (var line in lines)
@@ -112,17 +130,40 @@ public static class NetShell
             }
             var condition = content == "if" || (content.StartsWith("if", StringComparison.Ordinal) &&
                 content.Length > 2 && char.IsWhiteSpace(content[2]));
-            var failure = Compile(condition ? content[2..] : content, limits, sink, condition, fuel, out var pipeline, out fuel);
-            var pipelineOffset = start + (condition ? 2 : 0);
+            // "$name = pipeline": the name ends at the first '=' and the rest is an ordinary line.
+            string? assign = null;
+            var skip = condition ? 2 : 0;
+            var equals = content.IndexOf('=');
+            if (!condition && content.StartsWith('$') && equals > 1 && IsVariableName(content.AsSpan(1, equals - 1).TrimEnd()) &&
+                content.AsSpan(1, equals - 1).IndexOfAny('|', '"') < 0)
+            {
+                assign = content[1..equals].TrimEnd();
+                skip = equals + 1;
+            }
+            var failure = Compile(content[skip..], limits, sink, condition, fuel, out var pipeline, out fuel);
+            var pipelineOffset = start + skip;
             if (failure is not null)
                 return failure with { Position = failure.Position + pipelineOffset };
             if (pipeline is null)
             {
                 if (condition)
                     return new(ShellStatus.ParseError, [], fuel, "if needs a pipeline", start);
+                if (assign is not null)
+                    return new(ShellStatus.ParseError, [], fuel, "a variable needs a pipeline after '='", start);
                 continue;
             }
-            var step = new ScriptStep(pipeline, pipelineOffset, condition);
+            if (pipeline.First.Command.StartsWith('$') && !assigned.Contains(pipeline.First.Command[1..]))
+                return new(ShellStatus.ParseError, [], fuel, $"'{pipeline.First.Command}' is not set before this line", pipelineOffset + pipeline.First.Position);
+            if (validateSource is not null && pipeline.First != pipeline.Action &&
+                validateSource(pipeline.First.Command, pipeline.First.Arguments, pipeline.First.Command.StartsWith('$')) is { } invalidSource)
+                return new(invalidSource == "unknown command" ? ShellStatus.UnknownCommand : ShellStatus.InvalidArgument,
+                    [], fuel, invalidSource, pipelineOffset + pipeline.First.Position);
+            if (validateAction is not null && pipeline.Action is { } action &&
+                validateAction(action.Arguments, pipeline.First != action) is { } invalidAction)
+                return new(ShellStatus.InvalidArgument, [], fuel, invalidAction, pipelineOffset + action.Position);
+            if (assign is not null && assigned.Add(assign) && assigned.Count > MaxVariables)
+                return new(ShellStatus.LimitExceeded, [], fuel, $"a script holds at most {MaxVariables} variables", start);
+            var step = new ScriptStep(pipeline, pipelineOffset, condition, assign);
             if (condition)
             {
                 if (blocks.Count == MaxConditionDepth)
@@ -133,16 +174,20 @@ public static class NetShell
         }
         if (blocks.TryPeek(out var unclosed))
             return new(ShellStatus.ParseError, [], fuel, "if needs a matching end", unclosed.Offset - 2);
+        if (validateSource is not null)
+            return new(ShellStatus.Ok, [], fuel);
 
         IReadOnlyList<ShellRecord> records = [];
         var remainingActions = limits.MaxActions;
         for (var index = 0; index < steps.Count;)
         {
             var step = steps[index];
-            var result = Execute(step.Pipeline, source, limits, sink, fuel, ref remainingActions);
+            var result = Execute(step.Pipeline, source, limits, sink, fuel, ref remainingActions, variables);
             fuel = result.FuelUsed;
             if (!result.Ok)
                 return result with { Position = result.Position + step.Offset };
+            if (step.Assign is not null)
+                variables[step.Assign] = result.Records;
             if (!step.Condition)
                 records = result.Records;
             index = step.Condition && result.Records.Count == 0 ? step.AfterBlock : index + 1;
@@ -189,14 +234,27 @@ public static class NetShell
     }
 
     private static ShellResult Execute(Pipeline pipeline, IShellSource source, ShellLimits limits, IShellSink? sink,
-        int fuel, ref int remainingActions)
+        int fuel, ref int remainingActions, IReadOnlyDictionary<string, IReadOnlyList<ShellRecord>>? variables)
     {
         ShellResult Fail(ShellStatus status, string error, int position = 0) => new(status, [], fuel, error, position);
         IReadOnlyList<ShellRecord>? current = null;
         if (pipeline.First != pipeline.Action)
         {
             var first = pipeline.First;
-            current = source.Read(first.Command, first.Arguments, limits.MaxRecords, out var sourceError);
+            string? sourceError = null;
+            if (first.Command.StartsWith('$'))
+            {
+                if (variables is null)
+                    return Fail(ShellStatus.InvalidArgument, "variables live in scripts", first.Position);
+                if (first.Arguments.Named.Count + first.Arguments.Positional.Count != 0)
+                    return Fail(ShellStatus.InvalidArgument, "a variable takes no arguments", first.Position);
+                current = variables.GetValueOrDefault(first.Command[1..]) ?? [];
+                fuel += 1 + current.Count;
+                if (fuel > limits.Fuel)
+                    return Fail(ShellStatus.FuelExhausted, "out of fuel", first.Position);
+            }
+            else
+                current = source.Read(first.Command, first.Arguments, limits.MaxRecords, out sourceError);
             if (current is null)
                 return sourceError is null
                     ? Fail(ShellStatus.UnknownCommand, $"unknown command '{first.Command}'", first.Position)
@@ -435,7 +493,7 @@ public static class NetShell
                 var word = line[start..index];
                 if (command is null)
                 {
-                    if (!ServiceNames.IsValid(word) || word[0] == '-')
+                    if (word[0] == '-' || !(ServiceNames.IsValid(word) || (word[0] == '$' && IsVariableName(word.AsSpan(1)))))
                     {
                         error = $"'{word}' is not a command name";
                         position = start;

@@ -128,6 +128,7 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
             var removed = Current.Medium.Snapshot.Physical.Nodes.Count;
             var session = CreateSession();
             // No queue, airtime reservation, reroute, or receipt crosses this barrier.
+            Wiring = WiringReport.Empty;
             Volatile.Write(ref _session, session);
             return (removed, session.Packets.ReceiptStreamId);
         }
@@ -144,10 +145,11 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
         return session;
     }
 
-    internal Guid PublishSnapshot(Session session)
+    internal Guid PublishSnapshot(Session session, WiringReport wiring)
     {
         lock (_sessionGate)
         {
+            Wiring = wiring;
             Volatile.Write(ref _session, session);
             return session.Packets.ReceiptStreamId;
         }
@@ -225,12 +227,16 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
 
     /// <summary>Topology and radio profile replacements publish as one medium snapshot.</summary>
     public BatchResult ApplyTopology(IReadOnlyList<TopologyChange> changes,
-        IReadOnlyList<RadioNodeUpdate>? radios = null)
+        IReadOnlyList<RadioNodeUpdate>? radios = null) => ApplyWorldTopology(changes, radios, null);
+
+    internal BatchResult ApplyWorldTopology(IReadOnlyList<TopologyChange> changes,
+        IReadOnlyList<RadioNodeUpdate>? radios, Func<WiringReport>? commitWiring)
     {
         lock (_sessionGate)
         {
             var session = Current;
-            var result = session.Medium.ApplyExternalTopology(changes, radios);
+            var result = changes.Count != 0 || radios is { Count: > 0 }
+                ? session.Medium.ApplyExternalTopology(changes, radios) : default;
             if (result.Applied > 0)
             {
                 var affected = changes.SelectMany(c => new[] { c.A, c.B })
@@ -242,6 +248,8 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
                 session.Services.OnNodesRemoved(changes
                     .Where(c => c.Operation == TopologyOperation.RemoveNode).Select(c => c.A));
             }
+            if (commitWiring is not null)
+                Wiring = commitWiring();
             return result;
         }
     }
@@ -280,6 +288,12 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
     }
 
     private WiringReport _wiring = WiringReport.Empty;
+
+    internal (SharedMediumSnapshot World, WiringReport Wiring)? CapturePowerState(Session session)
+    {
+        lock (_sessionGate)
+            return ReferenceEquals(session, Current) ? (session.Medium.Snapshot, Wiring) : null;
+    }
 
     public object Status()
     {

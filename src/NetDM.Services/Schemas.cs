@@ -398,6 +398,27 @@ public sealed class SchemaRegistry
             MaxPayloadBytes: 8192));
         registry.RegisterCommand("network.shell", "run", "shell.run_request", 1, "shell.output", 1);
         registry.RegisterCommand("network.shell", "run_script", "shell.script_request", 1, "shell.output", 1);
+        // Programs: a script that stays on the device after the request that started it. "on <pipeline>" as
+        // its first line makes it a rule that runs when the pipeline's records change; a line "wait" holds it
+        // until the commands it just sent have an outcome.
+        registry.Register(new SchemaDefinition("shell.program_request", 1, 0,
+        [
+            new SchemaField("name", SchemaFieldType.Text, true, MaxLength: 32),
+            new SchemaField("source", SchemaFieldType.MultilineText, true, MaxLength: NetShell.MaxScriptLength)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["name", "source"] }, MaxPayloadBytes: 4096));
+        registry.Register(new SchemaDefinition("shell.stop_request", 1, 0,
+            [new SchemaField("program", SchemaFieldType.Integer, true, 1, 1_000_000_000)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["program"] }, MaxPayloadBytes: 64));
+        registry.Register(new SchemaDefinition("shell.program", 1, 0,
+        [
+            new SchemaField("status", SchemaFieldType.Enum, true, Values:
+                ["started", "stopped", "unknown_program", "parse_error", "unknown_command", "invalid_argument", "limit_exceeded"]),
+            new SchemaField("program", SchemaFieldType.Integer, false, 0, 1_000_000_000),
+            new SchemaField("error", SchemaFieldType.Text, false, MaxLength: 200),
+            new SchemaField("position", SchemaFieldType.Integer, false, 0, 4096)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "program", "error", "position"] }, MaxPayloadBytes: 512));
+        registry.RegisterCommand("network.shell", "start", "shell.program_request", 1, "shell.program", 1);
+        registry.RegisterCommand("network.shell", "stop", "shell.stop_request", 1, "shell.program", 1);
 
         // Discovery is a network round trip answered by the provider's descriptor.
         registry.Register(new SchemaDefinition("directory.probe", 1, 0,

@@ -472,7 +472,6 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
             // The round's research ledger survives sessions of the same round and Host restarts.
             research.OpenRound(round);
             ownedStream = game.ResetSession().StreamId;
-            game.Wiring = WiringReport.Empty;
             stagedProtocol = request.ProtocolMinor == 1;
             _sync = new(stagedProtocol ? "awaiting_snapshot" : "development", ownedStream);
             return new PipeResponse(request.Id, true, StreamId: ownedStream,
@@ -520,13 +519,12 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
             stage = null;
             var candidate = snapshot.Complete();
             seenNodes = snapshot.SeenNodes;
-            ownedStream = game.PublishSnapshot(candidate);
             publishedSnapshot = snapshot.Id;
             apcMap = snapshot.Map;
             game.ApcBridges = apcMap?.Bridges;
             devices = new DeviceAttachmentTable();
             states = new NodeStateTable();
-            game.Wiring = apcMap?.Wiring(states) ?? WiringReport.Empty;
+            ownedStream = game.PublishSnapshot(candidate, apcMap?.Wiring(states, devices) ?? WiringReport.Empty);
             stateRevision = 0;
             lastFactSequence = snapshot.LastSequence;
             stage = null;
@@ -604,7 +602,7 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
                         Mount: "fixed" or "mobile" }:
                         upserts.Add(new DeviceFact(new NodeId(fact.A), new NodePosition(x, y, z),
                             fact.Mount == "fixed" ? DeviceMount.Fixed : DeviceMount.Mobile, anchored, range,
-                            fact.Powered ?? true, fact.Operational ?? true));
+                            fact.Powered ?? true, fact.Operational ?? true) { ExecutionPowered = fact.ExecutionPowered });
                         break;
                     case { Op: "device_remove" }:
                         removals.Add(new NodeId(fact.A));
@@ -631,14 +629,23 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
             changes.AddRange(plan.Changes);
             radios.AddRange(plan.Radios);
             var stateChanged = reported.Any(pair => pair.Value != states.Get(pair.Key)) ||
-                upserts.Any(fact => devices.TryGet(fact.Id, out var stored) && stored.State != fact.State);
+                upserts.Any(fact => devices.TryGet(fact.Id, out var stored)
+                    ? stored.State != fact.State || (stored.ExecutionPowered == false) != (fact.ExecutionPowered == false)
+                    : !fact.State.Active || fact.ExecutionPowered == false) ||
+                removals.Any(id => devices.TryGet(id, out var stored) && (!stored.State.Active || stored.ExecutionPowered == false));
             var added = CollectNewNodes(changes, seenNodes!);
-            var result = changes.Count + radios.Count == 0 ? default : game.ApplyTopology(changes, radios);
-            devices.Commit(plan);
-            foreach (var (id, state) in reported)
-                states.Set(id, state);
-            if (reported.Count != 0)
-                game.Wiring = map.Wiring(states);
+            WiringReport CommitPower()
+            {
+                devices.Commit(plan);
+                foreach (var (id, state) in reported)
+                    states.Set(id, state);
+                return map.Wiring(states, devices);
+            }
+            var result = stateChanged
+                ? game.ApplyWorldTopology(changes, radios, CommitPower)
+                : game.ApplyTopology(changes, radios);
+            if (!stateChanged)
+                devices.Commit(plan);
             if (stateChanged)
                 stateRevision++;
             seenNodes!.UnionWith(added);
@@ -726,15 +733,17 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
                 radios.AddRange(plan.Radios);
             }
             var added = CollectNewNodes(changes, seenNodes!);
-            var result = changes.Count + radios.Count == 0 ? default : game.ApplyTopology(changes, radios);
-            if (plan is not null)
-                devices.Commit(plan);
-            if (states.InactiveCount != 0)
-                states.RemoveWhere(id => !map.Nodes.ContainsKey(id));
+            var result = game.ApplyWorldTopology(changes, radios, () =>
+            {
+                if (plan is not null)
+                    devices.Commit(plan);
+                if (states.InactiveCount != 0)
+                    states.RemoveWhere(id => !map.Nodes.ContainsKey(id));
+                return map.Wiring(states, devices);
+            });
             seenNodes!.UnionWith(added);
             apcMap = map;
             game.ApcBridges = map.Bridges;
-            game.Wiring = map.Wiring(states);
             areaUpdate = null;
             lastFactSequence = update.LastSequence;
             _sync = _sync with { LastFactSequence = lastFactSequence };
@@ -1258,7 +1267,7 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
         long OperationId = 0, string? ScanKey = null, ulong Area = 0, int? EndX = null, string? Role = null,
         string? Profile = null, string? UpdateId = null, int? AccessRange = null, string? Mount = null,
         bool? Anchored = null, long? SinceVersion = null, int? MaxNodes = null, bool? Powered = null,
-        bool? Operational = null);
+        bool? Operational = null, bool? ExecutionPowered = null);
 
     private sealed record DeliveryAck(long DeliveryId, bool Applied, string? Reason = null, JsonElement? Result = null);
 

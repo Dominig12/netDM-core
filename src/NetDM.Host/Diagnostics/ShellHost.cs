@@ -19,11 +19,22 @@ public static class ShellHost
     private static readonly ShellLimits Limits = new(MaxRecords: MaxRows);
     private static readonly string ActionKeyNamespace = $"sh.{Guid.NewGuid():N}";
 
-    internal static JsonElement Answer(GameNetworkService game, GameNetworkService.Session session, HostCommand command)
+    /// <summary>
+    /// Whose line it is and where it runs. A line that arrived as a command reads through its delivery; a
+    /// program that outlived its request reads as its owner's endpoint, which must still be alive.
+    /// </summary>
+    internal sealed record Scope(EndpointKey Initiator, string Instance, NodeId Origin, long? DeliveryId, string KeyPrefix);
+
+    internal static JsonElement Answer(GameNetworkService game, GameNetworkService.Session session, HostCommand command, out Action? applied)
     {
+        applied = null;
         using var arguments = JsonDocument.Parse(command.Arguments);
-        var source = new Source(game, session, command);
-        var sink = new Sink(session, command);
+        if (command.Command is "start" or "stop")
+            return ShellPrograms.Answer(session, command, arguments.RootElement, out applied);
+        var scope = new Scope(command.InitiatorKey, command.Instance, command.ProviderNode, command.DeliveryId,
+            $"{ActionKeyNamespace}.{command.DeliveryId.ToString(CultureInfo.InvariantCulture)}");
+        var source = new Source(game, session, scope);
+        var sink = new Sink(session, scope);
         var result = command.Command == "run_script"
             ? NetShell.RunScript(arguments.RootElement.GetProperty("source").GetString()!, source, Limits, sink)
             : NetShell.Run(arguments.RootElement.GetProperty("line").GetString()!, source, Limits, sink);
@@ -40,7 +51,9 @@ public static class ShellHost
     }
 
     /// <summary>Records as <c>name=value,name=value;…</c>; a value never holds the separators.</summary>
-    private static string Format(IReadOnlyList<ShellRecord> records)
+    internal static readonly ShellLimits ProgramLimits = Limits;
+
+    internal static string Format(IReadOnlyList<ShellRecord> records)
     {
         var text = new StringBuilder();
         foreach (var record in records)
@@ -64,7 +77,7 @@ public static class ShellHost
         return text.ToString();
     }
 
-    private static string Printable(string text)
+    internal static string Printable(string text)
     {
         var clean = new StringBuilder(Math.Min(text.Length, 200));
         foreach (var c in text)
@@ -76,7 +89,7 @@ public static class ShellHost
         return clean.ToString();
     }
 
-    private static ShellRecord Record(params (string Name, object Value)[] fields)
+    internal static ShellRecord Record(params (string Name, object Value)[] fields)
     {
         var record = new Dictionary<string, object>(fields.Length, StringComparer.Ordinal);
         foreach (var (name, value) in fields)
@@ -91,22 +104,24 @@ public static class ShellHost
     /// over the network like the result of any command. Alone: <c>invoke instance command name=value…</c>;
     /// after a pipeline: <c>… | invoke command name=value…</c> for the <c>instance</c> of each record.
     /// </summary>
-    private sealed class Sink(GameNetworkService.Session session, HostCommand command) : IShellSink
+    internal sealed class Sink(GameNetworkService.Session session, Scope command) : IShellSink
     {
-        private readonly string _keyPrefix = $"{ActionKeyNamespace}.{command.DeliveryId.ToString(CultureInfo.InvariantCulture)}";
+        private readonly string _keyPrefix = command.KeyPrefix;
         private int _ordinal;
+        public List<ShellRecord> Results { get; } = [];
 
         public bool Knows(string name) => name == "invoke";
 
+        internal static string? Validate(ShellArguments arguments, bool piped) =>
+            arguments.Positional.Count == (piped ? 1 : 2) &&
+            arguments.Positional.All(word => word is string text && ServiceNames.IsValid(text)) ? null :
+            piped ? "… | invoke <command> [name=value…]" : "invoke <instance> <command> [name=value…]";
+
         public IReadOnlyList<ShellRecord>? Act(string name, IReadOnlyList<ShellRecord>? input, ShellArguments arguments, out string? error)
         {
-            error = null;
-            var expected = input is null ? 2 : 1;
-            if (arguments.Positional.Count != expected || arguments.Positional.Any(word => word is not string text || !ServiceNames.IsValid(text)))
-            {
-                error = input is null ? "invoke <instance> <command> [name=value…]" : "… | invoke <command> [name=value…]";
+            error = Validate(arguments, input is not null);
+            if (error is not null)
                 return null;
-            }
             var targets = input is null
                 ? [(string)arguments.Positional[0]]
                 : input.Select(record => record["instance"] as string).ToArray();
@@ -123,44 +138,71 @@ public static class ShellHost
                 var instance = targets[i]!;
                 string status, operation = "";
                 // Visibility is the asker's; a line may not start further lines.
-                if (session.Services.QueryService(command.DeliveryId, instance, false) is not { } target)
+                var descriptor = command.DeliveryId is { } delivery
+                    ? session.Services.QueryService(delivery, instance, false)?.Descriptor
+                    : session.Services.Describe(command.Initiator, instance);
+                if (descriptor is null)
                     status = "unknown_service";
-                else if (target.Descriptor.ServiceType == ServiceType)
+                else if (descriptor.ServiceType == ServiceType)
                     status = "forbidden";
                 else
                 {
                     var key = $"{_keyPrefix}.{(_ordinal++).ToString(CultureInfo.InvariantCulture)}";
-                    var result = session.Services.Invoke(command.InitiatorKey, instance, verb, key, payload,
+                    var result = session.Services.Invoke(command.Initiator, instance, verb, key, payload,
                         null, PacketTrafficClass.Interactive);
                     status = result.Status == ServiceStatus.Ok ? "sent" : ServiceNames.Code(result.Status);
                     operation = result.Operation?.OperationId.ToString(CultureInfo.InvariantCulture) ?? "";
                 }
                 done.Add(Record(("instance", instance), ("command", verb), ("status", status), ("operation", operation)));
             }
+            Results.AddRange(done);
             return done;
         }
     }
 
-    private sealed class Source(GameNetworkService game, GameNetworkService.Session session, HostCommand command) : IShellSource
+    internal sealed class Source(GameNetworkService game, GameNetworkService.Session session, Scope command) : IShellSource
     {
         private int _graphQueriesRemaining = 2;
 
+        internal static string? Validate(string name, ShellArguments args, bool variable = false)
+        {
+            if (variable)
+                return args.Positional.Count + args.Named.Count == 0 ? null : "a variable takes no arguments";
+            if (name == "services")
+                return args.Positional.Count == 0 && (args.Named.Count == 0 || (args.Named.Count == 1 &&
+                    args.Named.GetValueOrDefault("type") is string type && ServiceNames.IsValid(type))) ? null : "services [-type <serviceType>]";
+            if (name == "trace")
+                return args.Named.Count == 0 && args.Positional.Count == 1 && args.Positional[0] is long and > 0 ? null : "trace <node>";
+            if (name is "programs" or "links" or "self")
+                return args.Positional.Count + args.Named.Count == 0 ? null : $"{name} takes no arguments";
+            return "unknown command";
+        }
+
         public IReadOnlyList<ShellRecord>? Read(string name, ShellArguments arguments, int maxRecords, out string? error)
         {
-            error = null;
+            error = Validate(name, arguments);
+            if (error is not null)
+            {
+                if (error == "unknown command")
+                    error = null;
+                return null;
+            }
             var world = session.Medium.Snapshot;
-            var origin = command.ProviderNode;
+            var origin = command.Origin;
             switch (name)
             {
+                case "programs":
+                    return ShellPrograms.List(session, command);
                 case "services":
                     var type = arguments.Named.GetValueOrDefault("type") as string;
-                    if (arguments.Positional.Count != 0 || arguments.Named.Count > (type is null ? 0 : 1) ||
-                        (type is not null && !ServiceNames.IsValid(type)))
-                        return Fail("services [-type <serviceType>]", out error);
                     if (_graphQueriesRemaining-- <= 0)
                         return Fail("network search budget exceeded (services and trace share two searches)", out error);
-                    if (session.Services.QueryDirectory(command.DeliveryId, type, null, maxRecords) is not { } query)
+                    var slice = command.DeliveryId is { } delivery
+                        ? session.Services.QueryDirectory(delivery, type, null, maxRecords)?.Slice
+                        : session.Services.QueryDirectory(command.Initiator, type, null, maxRecords);
+                    if (slice is null)
                         return [];
+                    var query = (Slice: slice, Origin: origin);
                     if (query.Slice.More)
                         return Fail("too many services: narrow with -type", out error);
                     var targets = query.Slice.Entries.Select(entry => entry.Node).Where(node => node != origin).ToHashSet();
@@ -172,21 +214,16 @@ public static class ShellHost
                         .Select(entry => Record(("instance", entry.Instance), ("type", entry.ServiceType),
                             ("hops", (long)(entry.Node == origin ? 0 : reached[entry.Node].Hops)))).ToArray();
                 case "links":
-                    if (arguments.Positional.Count != 0 || arguments.Named.Count != 0)
-                        return Fail("links takes no arguments", out error);
                     return NetworkDiagnostics.LinkState(world, game.Wiring, origin) is { } ports
                         ? ports.Neighbors.Select(link => Record(("node", link.Node.Value.ToString(CultureInfo.InvariantCulture)), ("state", link.State))).ToArray()
                         : [];
                 case "self":
-                    if (arguments.Positional.Count != 0 || arguments.Named.Count != 0)
-                        return Fail("self takes no arguments", out error);
                     return NetworkDiagnostics.LinkState(world, game.Wiring, origin) is { } own
                         ? [Record(("node", origin.Value.ToString(CultureInfo.InvariantCulture)), ("state", own.State), ("wired", (long)own.Wired),
                             ("wiredUp", (long)own.WiredUp), ("radio", own.Radio), ("devices", (long)own.Devices))]
                         : [];
                 case "trace":
-                    if (arguments.Named.Count != 0 || arguments.Positional.Count != 1 || arguments.Positional[0] is not long target || target <= 0)
-                        return Fail("trace <node>", out error);
+                    var target = (long)arguments.Positional[0];
                     if (_graphQueriesRemaining-- <= 0)
                         return Fail("network search budget exceeded (services and trace share two searches)", out error);
                     var trace = NetworkDiagnostics.Trace(world, origin, new NodeId((ulong)target), QueryHost.ReachBudget);

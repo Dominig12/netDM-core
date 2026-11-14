@@ -55,6 +55,8 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
                 _recoveryDelayMs = RecoveryMinMs;
             }
             _round = round;
+            // Shell programs of the round live next to its journal.
+            Diagnostics.ShellPrograms.Bind(_directory, round);
             // A session that names its round always gets an attempt; the timer only spaces the retries.
             OpenJournal(round, sameRound);
         }
@@ -387,6 +389,7 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
                 RecoverStorage();
                 _diagnosticsWatch.Publish(game);
                 _directoryWatch.Publish(game);
+                Diagnostics.ShellPrograms.Tick(game);
             }
             catch (Exception exception)
             {
@@ -405,18 +408,22 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
             return 0;
         foreach (var command in commands)
         {
+            Action? applied = null;
             Interlocked.Increment(ref _commands);
             // One queue serves every service the Host runs for a device; each type answers its own.
             var result = command.ServiceType switch
             {
                 Diagnostics.DiagnosticsHost.ServiceType => Diagnostics.DiagnosticsHost.Answer(game, command),
                 Diagnostics.QueryHost.ServiceType => Diagnostics.QueryHost.Answer(session, command),
-                Diagnostics.ShellHost.ServiceType => Diagnostics.ShellHost.Answer(game, session, command),
+                Diagnostics.ShellHost.ServiceType => Diagnostics.ShellHost.Answer(game, session, command, out applied),
                 _ => Answer(command)
             };
             var (status, _) = services.Acknowledge(command.DeliveryId, true, null, result);
             if (status == ServiceStatus.Ok)
+            {
+                applied?.Invoke();
                 Interlocked.Increment(ref _answered);
+            }
             else
                 Interlocked.Increment(ref _lateAnswers); // The session changed or the delivery expired; a retry gets the recorded answer.
         }

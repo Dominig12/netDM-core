@@ -33,7 +33,7 @@ $observeFiles = @('tgstation.dme', 'code/game/world.dm', 'code/game/area/areas.d
     'tgui/packages/tgui/interfaces/NetdmTopology/index.test.tsx',
     'code/modules/buildmode/submodes/area_edit.dm', 'code/modules/lighting/lighting_turf.dm',
     'code/modules/power/apc.dm', 'code/modules/shuttle/docking.dm',
-    'code/modules/modular_computers/computers/item/computer_ui.dm',
+    'code/modules/modular_computers/computers/item/computer.dm', 'code/modules/modular_computers/computers/item/computer_ui.dm',
     'code/modules/research/techweb/nodes/robotics_nodes.dm',
     'code/__DEFINES/dcs/signals.dm', 'code/game/machinery/_machinery.dm',
     'code/controllers/subsystem/mapping.dm', 'code/modules/mapping/space_management/space_reservation.dm',

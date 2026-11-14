@@ -8,6 +8,9 @@ namespace NetDM.Core;
 public sealed record WiringReport(IReadOnlyDictionary<NodeId, NodeId[]> Designed, IReadOnlyDictionary<NodeId, NodeState> Inactive)
 {
     public static WiringReport Empty { get; } = new(new Dictionary<NodeId, NodeId[]>(), new Dictionary<NodeId, NodeState>());
+    public IReadOnlySet<NodeId> ExecutionPaused { get; init; } = new HashSet<NodeId>();
+
+    public bool CanExecute(NodeId node) => !Inactive.ContainsKey(node) && !ExecutionPaused.Contains(node);
 
     /// <summary>Builds the report from the designed cable pairs; a pair names its two ends in any order.</summary>
     public static WiringReport Create(IEnumerable<(NodeId A, NodeId B)> cables, IEnumerable<NodeId> nodes,

@@ -379,6 +379,26 @@ public sealed class ServiceRuntime
         }
     }
 
+    /// <summary>The contract of one service as a living endpoint may discover it; null when hidden, missing or the endpoint is stale.</summary>
+    public ServiceDescriptor? Describe(EndpointKey requester, string instance)
+    {
+        lock (_gate)
+            return Require(requester, out var asker) == ServiceStatus.Ok && _services.TryGetValue(instance, out var target) &&
+                Require(target.Owner, out var owner) == ServiceStatus.Ok && Allows(target.Policy.Discover, asker!, owner!)
+                ? Descriptor(target) : null;
+    }
+
+    /// <summary>Resolves the original provider and checks the current invocation policy for a resident command.</summary>
+    public NodeId? ResidentCommandNode(EndpointKey initiator, EndpointKey provider, string instance)
+    {
+        lock (_gate)
+            return Require(initiator, out var asker) == ServiceStatus.Ok &&
+                _services.TryGetValue(instance, out var service) && service.Owner == provider &&
+                Require(provider, out var owner) == ServiceStatus.Ok &&
+                Allows(service.Policy.Discover, asker!, owner!) && Allows(service.Policy.Invoke, asker!, owner!)
+                ? owner!.Node : null;
+    }
+
     /// <summary>Reads a single service as the original, generation-fenced initiator of a Host command.</summary>
     public (NodeId Origin, NodeId Target, ServiceDescriptor Descriptor, long Sequence)? QueryService(
         long deliveryId, string instance, bool publicationState)

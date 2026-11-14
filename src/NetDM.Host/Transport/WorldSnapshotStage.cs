@@ -175,8 +175,9 @@ internal sealed record ApcMap(Dictionary<NodeId, TopologyChange> Nodes, HashSet<
     public ApcBridgeReport Bridges { get; init; } = ApcBridgeReport.Empty;
 
     /// <summary>The designed cables and bridges of the map with the nodes reported inactive, for network.diagnostics.</summary>
-    public WiringReport Wiring(NodeStateTable states) =>
-        WiringReport.Create(Links.Select(link => (link.A, link.B)), Nodes.Keys, states.Inactive);
+    public WiringReport Wiring(NodeStateTable states, DeviceAttachmentTable devices) =>
+        WiringReport.Create(Links.Select(link => (link.A, link.B)), Nodes.Keys, states.Inactive.Concat(devices.InactiveStates))
+        with { ExecutionPaused = devices.ExecutionPaused.ToHashSet() };
 
     public TopologyChange AddNode(TopologyChange fact) =>
         fact with { CanForward = fact.CanForward ?? Levels.ContainsKey(fact.A) };

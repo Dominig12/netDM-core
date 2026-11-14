@@ -1142,6 +1142,243 @@ try {
         changes = @(@{ op = 'node_state'; a = '3'; powered = 1; operational = 1 }) }).ok) 'APC 3 has power again'
     Assert-True ((Invoke-Shell 'trace 3 | select state' '14').rows -ceq 'state=reachable') 'the repaired network is reachable again'
 
+    # Variables: a script keeps the records of a line and reads them again without another search.
+    $kept = Invoke-Shell "`$doors = services -type machine.door | where instance -like door.* | sort instance`n`$first = `$doors | first 1`nif `$first | where hops -lt 2`n`$first | select instance hops`nend" '14' -Script
+    Assert-True ($kept.status -ceq 'ok' -and $kept.rows -ceq 'instance=door.a,hops=1') "a script keeps records in variables: $($kept | ConvertTo-Json -Compress)"
+    $unset = Invoke-Shell "`$a = self`n`$b | count" '14' -Script
+    Assert-True ($unset.status -ceq 'parse_error' -and $unset.error -clike '*not set*' -and $unset.position -gt 0) "a variable must be set before it is read: $($unset | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Shell '$a | count' '14').status -ceq 'invalid_argument') 'a single line has no variables'
+
+    # Programs: a script that stays on the device. "wait" holds it until its commands have an outcome;
+    # "on <pipeline>" makes it a rule that runs when the pipeline's records change.
+    $script:programCall = 0
+    function Invoke-Program([string] $Command, [hashtable] $Arguments, [string] $Sequence = '14') {
+        $script:programCall++
+        Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = $Sequence }).ok) "heartbeat before program call $script:programCall"
+        Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = 'netshell.apc2'; command = $Command; idempotencyKey = "pg-$script:programCall"
+            arguments = $Arguments; trafficClass = 1; timeoutTicks = 60 } + $engineer)).ok) "program request sent: $Command"
+        $answer = Wait-Result 'eng-1' $Command
+        Assert-True ($null -ne $answer) "program request answered: $Command"
+        return $answer.payload
+    }
+    function Take-DoorCommandAs([bool] $Applied, [string] $Sequence = '14', [scriptblock] $BeforeAck) {
+        for ($poll = 0; $poll -lt 60; $poll++) {
+            if ($poll % 10 -eq 0) { $null = Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = $Sequence } }
+            $found = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 16 }).result.items |
+                Where-Object { $_.recipient -ceq 'dev-3' -and $_.kind -ceq 'command' } | Select-Object -First 1
+            if ($null -ne $found) {
+                if ($BeforeAck) { & $BeforeAck }
+                $ack = if ($Applied) { @{ deliveryId = $found.deliveryId; applied = $true; result = @{ press = $found.payload.press; state = $found.payload.state; changed = $true } } }
+                    else { @{ deliveryId = $found.deliveryId; applied = $false; reason = 'jammed' } }
+                $null = Invoke-Next @{ op = 'delivery_ack'; acks = @($ack) }
+                return $found
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        return $null
+    }
+    function Clear-Results {
+        $items = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 32 }).result.items | Where-Object { $_.recipient -ceq 'eng-1' -and $_.kind -ceq 'result' }
+        foreach ($item in $items) { $null = Invoke-Next @{ op = 'delivery_ack'; acks = @(@{ deliveryId = $item.deliveryId; applied = $true }) } }
+    }
+    $twoStep = "services -type machine.door | where instance -eq door.a | invoke set_state press=w1 state=open`nwait`n`$result | where outcome -eq applied | invoke set_state press=w2 state=closed"
+    $started = Invoke-Program 'start' @{ name = 'open-then-close'; source = $twoStep }
+    Assert-True ($started.status -ceq 'started' -and $started.program -gt 0) "a program starts: $($started | ConvertTo-Json -Compress)"
+    $opened = Take-DoorCommandAs $true
+    Assert-True ($null -ne $opened -and $opened.payload.press -ceq 'w1' -and $opened.producer -ceq 'eng-1') 'the first phase sends its command as the owner'
+    $closed = Take-DoorCommandAs $true
+    Assert-True ($null -ne $closed -and $closed.payload.press -ceq 'w2' -and $closed.payload.state -ceq 'closed') "after the wait the program acts on the outcome: $($closed | ConvertTo-Json -Compress -Depth 4)"
+    Clear-Results
+    $listed = Invoke-Shell 'programs | select name state runs' '14'
+    Assert-True ($listed.rows -ceq 'name=open-then-close,state=done,runs=1') "a finished program is listed: $($listed.rows)"
+
+    $second = Invoke-Program 'start' @{ name = 'jammed'; source = $twoStep }
+    Assert-True ($second.status -ceq 'started') 'a second program starts'
+    Assert-True ($null -ne (Take-DoorCommandAs $false)) 'the door refuses the first command'
+    Start-Sleep -Milliseconds 1500
+    $none = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 16 }).result.items | Where-Object { $_.recipient -ceq 'dev-3' -and $_.kind -ceq 'command' }
+    Assert-True ($null -eq $none) 'a refused command does not continue the program'
+    Clear-Results
+    Assert-True ((Invoke-Shell 'programs | where name -eq jammed | select state' '14').rows -ceq 'state=done') 'the program still finishes'
+
+    # A rule: when the set of dead ports of the APC changes, ask the APC's diagnostics.
+    $rule = Invoke-Program 'start' @{ name = 'port-watch'; source = "on links | where state -ne up`ninvoke netdiag.apc2 link_state reason=refresh" }
+    Assert-True ($rule.status -ceq 'started') "a rule starts: $($rule | ConvertTo-Json -Compress)"
+    Start-Sleep -Milliseconds 1600
+    Assert-True ((Invoke-Shell 'programs | where name -eq port-watch | select state runs' '14').rows -ceq 'state=watching,runs=0') 'a rule does not run for what it first sees'
+    Clear-Results
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '15'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 0; operational = 1 }) }).ok) 'APC 3 loses power under the rule'
+    $fired = $null
+    for ($poll = 0; $poll -lt 40 -and $null -eq $fired; $poll++) {
+        if ($poll % 10 -eq 0) { $null = Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = '15' } }
+        $fired = Wait-Result 'eng-1' 'link_state'
+    }
+    Assert-True ($null -ne $fired -and $fired.payload.neighbors -ceq '1:up,3:unpowered') "the rule ran when its pipeline changed: $($fired | ConvertTo-Json -Compress -Depth 4)"
+    Assert-True ((Invoke-Shell 'programs | where name -eq port-watch | select state runs' '15').rows -ceq 'state=watching,runs=1') 'the rule ran once and watches again'
+    $stopped = Invoke-Program 'stop' @{ program = $rule.program } '15'
+    Assert-True ($stopped.status -ceq 'stopped') "the owner stops its rule: $($stopped | ConvertTo-Json -Compress)"
+    Clear-Results
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '16'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 1; operational = 1 }) }).ok) 'APC 3 has power again'
+    Start-Sleep -Milliseconds 1800
+    $null = Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = '16' }
+    $after = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 16 }).result.items | Where-Object { $_.recipient -ceq 'eng-1' -and $_.command -ceq 'link_state' }
+    Assert-True ($null -eq $after) 'a stopped rule does nothing'
+
+    $broken = Invoke-Program 'start' @{ name = 'broken'; source = "self`nwait`nservices | explode" } '16'
+    Assert-True ($broken.status -ceq 'unknown_command' -and $broken.position -gt 8 -and -not $broken.ContainsKey('program')) "a program is checked whole before it starts: $($broken | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Program 'start' @{ name = 'bad-rule'; source = "on invoke door.a set_state press=x`nself" } '16').status -cne 'started') 'a rule watches with a read-only pipeline'
+    Assert-True ((Invoke-Program 'start' @{ name = 'bad-branch'; source = "if links | first 0`nunknown-source`nend" } '16').status -ceq 'unknown_command') 'sources in skipped branches are checked before starting'
+    Assert-True ((Invoke-Program 'start' @{ name = 'bad-action'; source = "if links | first 0`ninvoke door.a`nend" } '16').status -ceq 'invalid_argument') 'actions in skipped branches are checked before starting'
+    Assert-True ((Invoke-Program 'stop' @{ program = 999999 } '16').status -ceq 'unknown_program') 'an unknown program cannot be stopped'
+    Assert-True ((Invoke-Program 'stop' @{ program = $started.program } '16').status -ceq 'unknown_program') 'a finished program is gone once its owner started another'
+    Assert-True ((Invoke-Shell 'programs | count' '16').rows -ceq 'count=0') 'no program is left on the device'
+    $multiSource = @'
+invoke door.a set_state press=m1 state=open
+invoke door.a set_state press=m2 state=closed
+self
+wait
+if $result | where outcome -eq applied | where instance -eq door.a
+  invoke door.a set_state press=m3 state=open
+end
+'@
+    $multi = Invoke-Program 'start' @{ name = 'all-phase-actions'; source = $multiSource } '16'
+    Assert-True ($multi.status -ceq 'started') 'a program with multiple calls in one phase starts'
+    Assert-True ((Take-DoorCommandAs $true '16').payload.press -ceq 'm1') 'the first action in the phase is sent'
+    Assert-True ((Take-DoorCommandAs $false '16').payload.press -ceq 'm2') 'the second action in the phase is sent'
+    Assert-True ((Take-DoorCommandAs $true '16').payload.press -ceq 'm3') 'wait retains the first action even when the phase ends in a read'
+
+    # Standby pauses execution without removing the PDA's radio or endpoint.
+    $pda = @{ endpoint = 'power-pda'; generation = '1' }
+    $pdaFact = @{ op = 'device_state'; a = '81'; x = 2; y = 1; z = 1; mount = 'mobile'; anchored = 0; range = 7; executionPowered = $true }
+    function Set-PdaExecution([string] $Sequence, [bool] $Powered) {
+        $pdaFact.executionPowered = $Powered
+        Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = $Sequence; changes = @($pdaFact) }).ok) "PDA power fact $Sequence"
+    }
+    $script:pdaCalls = 0
+    function Invoke-PdaShell([string] $Command, [hashtable] $Arguments, [string] $Sequence) {
+        $script:pdaCalls++
+        Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = $Sequence }).ok) 'heartbeat before PDA request'
+        Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = 'netshell.power-pda'; command = $Command; idempotencyKey = "pda-power-$script:pdaCalls"
+            arguments = $Arguments; trafficClass = 1; timeoutTicks = 60 } + $pda)).ok) 'PDA shell request sent'
+        $answer = Wait-Result 'power-pda' $Command
+        Assert-True ($null -ne $answer) 'PDA shell request answered'
+        return $answer.payload
+    }
+    Set-PdaExecution '17' $true
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '81' } + $pda)).ok) 'attach PDA'
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'netshell.power-pda'; serviceType = 'network.shell'
+        schema = 'shell.output'; major = 1; minor = 0; discoverScope = 'none'; invokeScope = 'none' } + $pda)).ok) 'register local shell'
+    $pdaSource = "invoke door.a set_state press=pda1 state=open`nwait`nif `$result | where outcome -eq applied`n  invoke door.a set_state press=pda2 state=closed`nend"
+    $pdaProgram = Invoke-PdaShell 'start' @{ name = 'pause-test'; source = $pdaSource } '17'
+    Assert-True ($pdaProgram.status -ceq 'started') 'PDA program starts'
+    $firstPhase = Take-DoorCommandAs $true '17' { Set-PdaExecution '18' $false }
+    Assert-True ($firstPhase.payload.press -ceq 'pda1' -and $firstPhase.producer -ceq 'power-pda') 'first phase sent by the PDA'
+    for ($poll = 0; $poll -lt 8; $poll++) {
+        $off = Invoke-PdaShell 'run' @{ line = 'programs | select program state runs' } '18'
+        if ($off.rows -clike '*state=suspended*') { break }
+        Start-Sleep -Milliseconds 100
+    }
+    Assert-True ($off.rows -ceq "program=$($pdaProgram.program),state=suspended,runs=1") "PDA program suspends: $($off.rows)"
+    Assert-True ((Invoke-PdaShell 'run' @{ line = 'self | select radio' } '18').rows -ceq 'radio=true') 'standby keeps the radio'
+    $quietPda = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 16 }).result.items |
+        Where-Object { $_.kind -ceq 'command' -and $_.producer -ceq 'power-pda' }
+    Assert-True ($null -eq $quietPda) 'PDA sends nothing from its next phase while off'
+    Set-PdaExecution '19' $true
+    $secondPhase = Take-DoorCommandAs $true '19'
+    Assert-True ($secondPhase.payload.press -ceq 'pda2' -and $secondPhase.producer -ceq 'power-pda') 'the next phase resumes from the same PDA'
+    $afterBoot = Invoke-PdaShell 'run' @{ line = 'programs | select program state runs' } '19'
+    Assert-True ($afterBoot.rows -ceq "program=$($pdaProgram.program),state=done,runs=1") "the same program completes without restarting: $($afterBoot.rows)"
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '20'
+        changes = @(@{ op = 'device_remove'; a = '81' }) }).ok) 'remove the test PDA'
+
+    # Device budget: all programs of APC 2 may try at most 32 commands a minute. A program over the budget
+    # is held ("throttled") instead of dropped, and a refused attempt counts like a sent one.
+    $burst = "invoke door.a set_state press=b state=open`ninvoke door.a set_state press=b state=open`ninvoke door.a set_state press=b state=open`ninvoke door.a set_state press=b state=open"
+    $throttled = $null
+    for ($round = 1; $round -le 10 -and $null -eq $throttled; $round++) {
+        $begun = Invoke-Program 'start' @{ name = "burst-$round"; source = $burst } '20'
+        Assert-True ($begun.status -ceq 'started') "burst program $round starts: $($begun | ConvertTo-Json -Compress)"
+        $state = $null
+        for ($poll = 0; $poll -lt 30; $poll++) {
+            $state = (Invoke-Shell "programs | where name -eq burst-$round | select state reason" '20').rows
+            if ($state -clike 'state=done*' -or $state -clike 'state=throttled*') { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($state -clike 'state=throttled*') { $throttled = @{ Round = $round; State = $state; Program = $begun.program } }
+        else { Assert-True ($state -clike 'state=done*') "burst program $round finishes: $state" }
+    }
+    Assert-True ($null -ne $throttled -and $throttled.Round -ge 2 -and $throttled.Round -le 9 -and $throttled.State -clike '*commands this minute*') "a device over its budget holds its programs: $($throttled | ConvertTo-Json -Compress)"
+    $held = (Invoke-Shell "programs | where name -eq burst-$($throttled.Round) | select runs" '20').rows
+    Assert-True ($held -ceq 'runs=0') "a held program has not run: $held"
+    Assert-True ((Invoke-Program 'stop' @{ program = $throttled.Program } '20').status -ceq 'stopped') 'a held program can be stopped'
+    for ($drain = 0; $drain -lt 60; $drain++) {
+        $waiting = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 32 }).result.items | Where-Object { $_.recipient -ceq 'dev-3' -and $_.kind -ceq 'command' }
+        if ($null -eq $waiting) { break }
+        $null = Invoke-Next @{ op = 'delivery_ack'; acks = @($waiting | ForEach-Object { @{ deliveryId = $_.deliveryId; applied = $false; reason = 'drained' } }) }
+    }
+    Clear-Results
+
+    # Programs survive the Host: a rule started before the Host dies is read back for the same round and
+    # keeps watching once its endpoints are attached again in the new runtime.
+    $survivor = Invoke-Program 'start' @{ name = 'survivor'; source = "on links | where state -ne up`ninvoke netdiag.apc2 link_state reason=refresh" } '20'
+    Assert-True ($survivor.status -ceq 'started') 'the surviving rule starts'
+    Start-Sleep -Milliseconds 1600
+    $programsFile = Join-Path $work 'research' "programs-$(([guid]$blockedHello.roundEpoch).ToString('N')).json"
+    Assert-True ((Test-Path -LiteralPath $programsFile) -and (Get-Content -Raw -LiteralPath $programsFile) -clike '*"survivor"*') 'the rule is written next to the round journal'
+    $owner.Dispose()
+    $owner = $null
+    $hostProcess.Kill($true)
+    $hostProcess.WaitForExit()
+    $hostProcess.Dispose()
+    $hostProcess = [Diagnostics.Process]::Start($launch)
+    for ($attempt = 0; $attempt -lt 100 -and $null -eq $owner; $attempt++) {
+        try {
+            $owner = Open-Stream
+            Send-Frame $owner $blockedHello
+            $session = Read-Frame $owner
+            if (-not $session.ok) { $owner.Dispose(); $owner = $null; Start-Sleep -Milliseconds 50 }
+        }
+        catch {
+            if ($null -ne $owner) { $owner.Dispose(); $owner = $null }
+            if ($hostProcess.HasExited) { throw }
+            Start-Sleep -Milliseconds 50
+        }
+    }
+    Assert-True ($null -ne $owner -and $session.ok) 'the restarted Host takes the same round'
+    $script:seq = 0
+    Assert-True ((Invoke-Next @{ op = 'snapshot_begin'; snapshotId = 'svc3'; profile = 'apc_map'; chunkCount = 1; factCount = $mapFacts.Count; factSequence = '0' }).ok) 'restart snapshot begin'
+    Assert-True ((Invoke-Next @{ op = 'snapshot_chunk'; snapshotId = 'svc3'; chunkIndex = 0; factsJson = $chain; digest = $chainDigest }).ok) 'restart snapshot chunk'
+    Assert-True ((Invoke-Next @{ op = 'snapshot_commit'; snapshotId = 'svc3'; digest = (Get-Digest $chainDigest) }).ok) 'restart snapshot commit'
+    $ready = Invoke-Next @{ op = 'snapshot_ready'; snapshotId = 'svc3'; factSequence = '0' }
+    Assert-True ($ready.ok) 'restart snapshot ready'
+    $session['streamId'] = $ready.streamId
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '1' } + $engineer)).ok) 'the console attaches again'
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '2' } + $apc2)).ok) 'APC 2 attaches again'
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'netdiag.apc2'; serviceType = 'network.diagnostics'
+        schema = 'network.link_state'; major = 1; minor = 0 } + $apc2)).ok) 'APC 2 offers diagnostics again'
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '2' } + @{ endpoint = 'apc-2s'; generation = '1' })).ok) 'the shell endpoint attaches again'
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'netshell.apc2'; serviceType = 'network.shell'; schema = 'shell.output'
+        major = 1; minor = 0 } + @{ endpoint = 'apc-2s'; generation = '1' })).ok) 'APC 2 offers its shell again'
+    $back = Invoke-Shell 'programs | select program name state' '0'
+    Assert-True ($back.rows -ceq "program=$($survivor.program),name=survivor,state=watching") "the rule is back under its number: $($back.rows)"
+    Start-Sleep -Milliseconds 1500
+    Clear-Results
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '1'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 0; operational = 1 }) }).ok) 'APC 3 loses power after the restart'
+    $fired = $null
+    for ($poll = 0; $poll -lt 40 -and $null -eq $fired; $poll++) {
+        if ($poll % 10 -eq 0) { $null = Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = '1' } }
+        $fired = Wait-Result 'eng-1' 'link_state'
+    }
+    Assert-True ($null -ne $fired -and $fired.payload.neighbors -ceq '1:up,3:unpowered') "the restored rule fires in the new runtime: $($fired | ConvertTo-Json -Compress -Depth 4)"
+    Assert-True ((Invoke-Program 'stop' @{ program = $survivor.program } '1').status -ceq 'stopped') 'the restored rule is stopped by its owner'
+    Start-Sleep -Milliseconds 600
+    Assert-True ((Get-Content -Raw -LiteralPath $programsFile) -cnotlike '*"survivor"*') 'a stopped rule leaves the file'
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '2'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 1; operational = 1 }) }).ok) 'APC 3 has power for the rest of the run'
+
     if ($IsLinux) {
         Assert-StartupRejected $socketPath
         Assert-True ((Invoke-Next @{ op = 'game_stats' }).game.nodes -eq 3) 'second Host does not unlink live socket'

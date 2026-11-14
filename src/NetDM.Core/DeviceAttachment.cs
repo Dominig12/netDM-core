@@ -21,6 +21,8 @@ public readonly record struct DeviceFact(NodeId Id, NodePosition Position, Devic
     int RadioRange, bool Powered = true, bool Operational = true)
 {
     public NodeState State => new(Powered, Operational);
+    /// <summary>Optional processor power for devices whose radio can keep listening in standby.</summary>
+    public bool? ExecutionPowered { get; init; }
 }
 
 /// <summary>
@@ -90,6 +92,10 @@ public sealed class DeviceAttachmentTable
     public bool Contains(NodeId id) => _facts.ContainsKey(id);
     public IReadOnlyCollection<NodeId> Ids => _facts.Keys;
     public bool TryGet(NodeId id, out DeviceFact fact) => _facts.TryGetValue(id, out fact);
+    public IEnumerable<KeyValuePair<NodeId, NodeState>> InactiveStates =>
+        _facts.Where(pair => !pair.Value.State.Active).Select(pair => KeyValuePair.Create(pair.Key, pair.Value.State));
+    public IEnumerable<NodeId> ExecutionPaused =>
+        _facts.Where(pair => pair.Value.ExecutionPowered == false).Select(pair => pair.Key);
 
     public static DeviceAttachment Resolve(DeviceFact fact, AreaWiringIndex? map, Func<NodeId, bool> apcAvailable)
     {

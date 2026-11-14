@@ -152,7 +152,23 @@ static class ShellSmokeTests
         Check(NetShell.Run("services | select instance instance", source).Records[0].Fields.Count == 1 &&
             NetShell.Run("services a=1 b=2", source, new ShellLimits(MaxArguments: 1)).Status == ShellStatus.ParseError,
             "repeated projections and named-argument limits are handled");
-        Console.WriteLine("Network shell pipeline, scripts, actions, limits and fuel checks passed.");
+        // Variables: a line's records kept under a name and read again without asking the network.
+        sink.Calls.Clear();
+        var reads = source.Reads;
+        var kept = Script("$labs = services -type research.server | sort hops\n$near = $labs | first 1\nif $near | where hops -lt 3\n$near | invoke status reason=open\nend\n$labs | count");
+        Check(kept is { Ok: true, Records.Count: 1 } && (long)kept.Records[0]["count"]! == 2 && source.Reads == reads + 1 &&
+            sink.Calls.SequenceEqual(["research.srv-a:status:reason=open"]), "a variable is read without asking the network again");
+        Check(Script("$x = services\n$y | count") is { Status: ShellStatus.ParseError, Position: > 0 } &&
+            Script("$x =") .Status == ShellStatus.ParseError && Script("$x = services | explode").Status == ShellStatus.UnknownCommand,
+            "a variable must be set by an earlier line and needs a pipeline");
+        Check(Script("if services -type no.such\n$found = services\nend\n$found | count") is { Ok: true } skipped &&
+            (long)skipped.Records[0]["count"]! == 0, "a variable whose line was skipped is empty");
+        Check(NetShell.Run("$x | count", source).Status == ShellStatus.InvalidArgument && Script("$x = services\n$x extra").Status == ShellStatus.InvalidArgument,
+            "variables live in scripts and take no arguments");
+        Check(Script(string.Join("\n", Enumerable.Range(0, 9).Select(index => $"$v{index} = self"))).Status == ShellStatus.LimitExceeded,
+            "a script holds a bounded number of variables");
+        Check(Script("$big = many 200\n$big | count", new ShellLimits(Fuel: 150)).Status == ShellStatus.FuelExhausted, "reading a variable costs fuel");
+        Console.WriteLine("Network shell pipeline, scripts, variables, actions, limits and fuel checks passed.");
     }
 
     private static void Check(bool condition, string message)

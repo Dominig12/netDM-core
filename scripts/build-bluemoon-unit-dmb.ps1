@@ -20,7 +20,7 @@ $files = @('tgstation.dme', 'code/game/world.dm', 'code/game/area/areas.dm', 'co
     'code/modules/netdm/netdm_services.dm', 'code/modules/netdm/network_diagnostics.dm', 'code/modules/netdm/network_terminal.dm', 'code/modules/netdm/netdm_service_lane.dm', 'code/modules/netdm/atmos_telemetry.dm', 'code/modules/netdm/research_shadow.dm', 'code/modules/netdm/messenger_shadow.dm', 'code/modules/netdm/messenger_relay.dm', 'code/modules/netdm/radio_shadow.dm', 'code/modules/netdm/radio_uplink.dm', 'code/modules/netdm/door_control_shadow.dm', 'code/modules/research/techweb/netdm_research_hooks.dm', 'code/modules/admin/admin_verbs.dm',
     'code/modules/buildmode/submodes/area_edit.dm', 'code/modules/lighting/lighting_turf.dm',
     'code/modules/power/apc.dm', 'code/modules/shuttle/docking.dm', 'code/controllers/subsystem/mapping.dm',
-    'code/modules/modular_computers/computers/item/computer_ui.dm',
+    'code/modules/modular_computers/computers/item/computer.dm', 'code/modules/modular_computers/computers/item/computer_ui.dm',
     'code/modules/research/techweb/nodes/robotics_nodes.dm',
     'code/__DEFINES/dcs/signals.dm', 'code/game/machinery/_machinery.dm',
     'code/modules/mapping/space_management/space_reservation.dm', 'code/modules/unit_tests/_unit_tests.dm',
