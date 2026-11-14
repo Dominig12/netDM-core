@@ -45,8 +45,11 @@ public static class QueryHost
         var type = args.TryGetProperty("type", out var typeValue) ? typeValue.GetString() : null;
         var limit = args.TryGetProperty("limit", out var limitValue) ? Math.Clamp(limitValue.GetInt32(), 1, MaxLimit) : DefaultLimit;
         var cursor = args.TryGetProperty("cursor", out var cursorValue) ? cursorValue.GetString() : null;
+        var prefix = args.TryGetProperty("prefix", out var prefixValue) ? prefixValue.GetString() : null;
+        int? maxHops = args.TryGetProperty("maxHops", out var hopsValue) ? Math.Clamp(hopsValue.GetInt32(), 0, MaxHopsFilter) : null;
+        var projection = args.TryGetProperty("projection", out var projectionValue) ? projectionValue.GetString() ?? "full" : "full";
         return Services(session, command, string.IsNullOrEmpty(type) ? null : type, limit,
-            string.IsNullOrEmpty(cursor) ? null : cursor);
+            string.IsNullOrEmpty(cursor) ? null : cursor, new Filter(string.IsNullOrEmpty(prefix) ? null : prefix, maxHops, projection));
     }
 
     /// <summary>One job of the asker: its operation, where it went and how it ended so far.</summary>
@@ -113,18 +116,35 @@ public static class QueryHost
         });
     }
 
-    private static JsonElement Services(GameNetworkService.Session session, HostCommand command, string? type, int limit, string? cursor)
+    /// <summary>The largest hop filter; a route longer than this is not something a query narrows to.</summary>
+    public const int MaxHopsFilter = 64;
+
+    /// <summary>Predicates and projection of a services query besides its exact type.</summary>
+    internal sealed record Filter(string? Prefix, int? MaxHops, string Projection)
     {
-        if (type is not null && !ServiceNames.IsValid(type))
+        public static readonly Filter None = new(null, null, "full");
+
+        public string Item(DirectoryEntry entry, int hops) => Projection switch
+        {
+            "instance" => entry.Instance,
+            "instance_type" => $"{entry.Instance}|{entry.ServiceType}",
+            _ => $"{entry.Instance}|{entry.ServiceType}|{hops}"
+        };
+    }
+
+    private static JsonElement Services(GameNetworkService.Session session, HostCommand command, string? type, int limit, string? cursor,
+        Filter filter)
+    {
+        if ((type is not null && !ServiceNames.IsValid(type)) || (filter.Prefix is not null && !ServiceNames.IsValid(filter.Prefix)))
             return Page(cursor is null ? "empty" : "invalid_cursor", 0, [], null);
         var scope = Encoding.UTF8.GetBytes(FormattableString.Invariant(
-            $"{session.Packets.ReceiptStreamId:N}\n{command.Instance}\n{command.ProviderKey.Id}\n{command.ProviderKey.Generation}\n{command.ProviderNode.Value}\n{command.InitiatorKey.Id}\n{command.InitiatorKey.Generation}\n{type}\n{limit}"));
+            $"{session.Packets.ReceiptStreamId:N}\n{command.Instance}\n{command.ProviderKey.Id}\n{command.ProviderKey.Generation}\n{command.ProviderNode.Value}\n{command.InitiatorKey.Id}\n{command.InitiatorKey.Generation}\n{type}\n{limit}\n{filter.Prefix}\n{filter.MaxHops}\n{filter.Projection}"));
         long cursorRevision = 0;
         var expires = Environment.TickCount64 + CursorLifetimeMs;
         string? after = null;
         if (cursor is not null && !ReadCursor(cursor, scope, out cursorRevision, out expires, out after))
             return Page("invalid_cursor", 0, [], null);
-        if (session.Services.QueryDirectory(command.DeliveryId, type, after, ScanBudget) is not { } query)
+        if (session.Services.QueryDirectory(command.DeliveryId, type, after, ScanBudget, filter.Prefix) is not { } query)
             return Page("empty", 0, [], null);
         var (origin, slice) = query;
         if (origin != command.ProviderNode || (cursor is not null &&
@@ -151,7 +171,9 @@ public static class QueryHost
                 hops = reach.Hops;
             else
                 continue; // Not reachable from here now: for this query it does not exist.
-            items.Add($"{entry.Instance}|{entry.ServiceType}|{hops}");
+            if (hops > filter.MaxHops)
+                continue;
+            items.Add(filter.Item(entry, hops));
         }
         var more = examined < slice.Entries.Count || slice.More;
         return more

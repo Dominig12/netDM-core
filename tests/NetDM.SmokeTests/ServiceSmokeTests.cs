@@ -426,6 +426,13 @@ static class ServiceSmokeTests
         var rest = services.QueryDirectory("console-1", "machine.control", first.Entries[^1].Instance, 2)!;
         Check(first is { Entries.Count: 2, More: true } && rest.Entries.Single().Instance == "pump-c" && !rest.More &&
             rest.Revision == first.Revision, "a cursor continues after the last entry at the same revision");
+        var pumps = services.QueryDirectory(console, null, null, 8, "pump-")!;
+        var afterA = services.QueryDirectory(console, "machine.control", "pump-a", 8, "pump-")!;
+        Check(pumps.Entries.Select(entry => entry.Instance).SequenceEqual(["pump-a", "pump-b", "pump-c"]) && !pumps.More &&
+            afterA.Entries.Select(entry => entry.Instance).SequenceEqual(["pump-b", "pump-c"]) &&
+            services.QueryDirectory(console, null, null, 8, "pump-c")!.Entries.Single().Instance == "pump-c" &&
+            services.QueryDirectory(console, null, null, 8, "zzz")!.Entries.Count == 0 &&
+            services.QueryDirectory(rogue, null, null, 8, "pump")!.Entries.Count == 0, "a prefix narrows the index ranges, within what the asker may discover");
         Check(services.QueryDirectory("nobody", null, null, 8) is null && services.QueryDirectory("console-1", null, null, 0) is null,
             "an unknown asker and an empty budget get no slice");
         services.DetachEndpoint(pump);

@@ -321,14 +321,16 @@ public sealed class ServiceRuntime
                 ? ReadDirectory(record, serviceType, after, max) : null;
     }
 
-    public DirectorySlice? QueryDirectory(EndpointKey requester, string? serviceType, string? after, int max)
+    public DirectorySlice? QueryDirectory(EndpointKey requester, string? serviceType, string? after, int max, string? prefix = null)
     {
         lock (_gate)
             return Require(requester, out var record) == ServiceStatus.Ok && max > 0
-                ? ReadDirectory(record!, serviceType, after, max) : null;
+                ? ReadDirectory(record!, serviceType, after, max, prefix) : null;
     }
 
-    public (NodeId Origin, DirectorySlice Slice)? QueryDirectory(long deliveryId, string? serviceType, string? after, int max)
+    /// <param name="prefix">Only instances that start with it; the index ranges begin and end at it.</param>
+    public (NodeId Origin, DirectorySlice Slice)? QueryDirectory(long deliveryId, string? serviceType, string? after, int max,
+        string? prefix = null)
     {
         lock (_gate)
         {
@@ -336,16 +338,24 @@ public sealed class ServiceRuntime
                 Require(delivery.Producer, out var requester) != ServiceStatus.Ok ||
                 Require(delivery.Recipient, out var origin) != ServiceStatus.Ok || AccessFailure(delivery, origin!) is not null || max < 1)
                 return null;
-            return (origin!.Node, ReadDirectory(requester!, serviceType, after, max));
+            return (origin!.Node, ReadDirectory(requester!, serviceType, after, max, prefix));
         }
     }
 
-    private DirectorySlice ReadDirectory(EndpointRecord requester, string? type, string? after, int max)
+    private DirectorySlice ReadDirectory(EndpointRecord requester, string? type, string? after, int max, string? prefix = null)
     {
         var lower = after is null ? "" : after + '\0';
-        using var open = DirectoryRange(AccessScope.Open, "", type, lower);
-        using var domain = DirectoryRange(AccessScope.Domain, requester.Domain, type, lower);
-        using var owned = DirectoryRange(AccessScope.None, requester.Key.Id, type, lower);
+        var upper = "\uffff";
+        if (!string.IsNullOrEmpty(prefix))
+        {
+            // Names are ASCII: every name with the prefix sorts between it and the prefix followed by U+FFFF.
+            if (string.CompareOrdinal(lower, prefix) < 0)
+                lower = prefix;
+            upper = prefix + '\uffff';
+        }
+        using var open = DirectoryRange(AccessScope.Open, "", type, lower, upper);
+        using var domain = DirectoryRange(AccessScope.Domain, requester.Domain, type, lower, upper);
+        using var owned = DirectoryRange(AccessScope.None, requester.Key.Id, type, lower, upper);
         IEnumerator<string>?[] ranges = [open, domain, owned];
         for (var i = 0; i < ranges.Length; i++)
             if (ranges[i]?.MoveNext() != true)
@@ -366,9 +376,9 @@ public sealed class ServiceRuntime
         }
     }
 
-    private IEnumerator<string>? DirectoryRange(AccessScope scope, string principal, string? type, string lower) =>
-        _directory.TryGetValue((scope, principal, type), out var names) && string.CompareOrdinal(lower, "\uffff") <= 0
-            ? names.GetViewBetween(lower, "\uffff").GetEnumerator() : null;
+    private IEnumerator<string>? DirectoryRange(AccessScope scope, string principal, string? type, string lower, string upper) =>
+        _directory.TryGetValue((scope, principal, type), out var names) && string.CompareOrdinal(lower, upper) <= 0
+            ? names.GetViewBetween(lower, upper).GetEnumerator() : null;
 
     private void IndexService(ServiceRecord service, EndpointRecord owner, bool add)
     {

@@ -1441,6 +1441,22 @@ end
     Assert-True ($shellJobs.rows -ceq 'command=run,outcome=applied') "the shell lists jobs without its own line: $($shellJobs.rows)"
     Assert-True ((Invoke-Shell 'route door.none' '2').rows -ceq '') 'a route to a hidden service is empty'
 
+    # §14.5 predicates and projection of "services": an instance prefix, the most hops, and which item parts.
+    $named = Invoke-QueryCommand 'services' @{ prefix = 'net'; projection = 'instance' }
+    Assert-True ($named.status -ceq 'complete' -and $named.items -ceq 'netdiag.apc2,netquery.apc2,netshell.apc2') "a prefix with the instance projection: $($named | ConvertTo-Json -Compress)"
+    $local = Invoke-QueryCommand 'services' @{ maxHops = 0; projection = 'instance_type' }
+    Assert-True ($local.items -ceq 'netdiag.apc2|network.diagnostics,netquery.apc2|network.query,netshell.apc2|network.shell') "maxHops 0 keeps the APC's own services: $($local.items)"
+    Assert-True ((Invoke-QueryCommand 'services' @{ type = 'machine.door'; maxHops = 1 }).items -ceq 'door.a|machine.door|1') 'a service one hop away passes maxHops 1'
+    $prefixPage = Invoke-QueryCommand 'services' @{ prefix = 'net'; limit = 1 }
+    Assert-True ($prefixPage.status -ceq 'partial' -and $prefixPage.items -ceq 'netdiag.apc2|network.diagnostics|0' -and $prefixPage.cursor) "a filtered page names its cursor: $($prefixPage | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-QueryCommand 'services' @{ prefix = 'net'; limit = 1; cursor = $prefixPage.cursor }).items -ceq 'netquery.apc2|network.query|0') 'the cursor continues within the prefix'
+    Assert-True ((Invoke-QueryCommand 'services' @{ prefix = 'netd'; limit = 1; cursor = $prefixPage.cursor }).status -ceq 'invalid_cursor') 'a cursor belongs to its prefix'
+    Assert-True ((Invoke-QueryCommand 'services' @{ prefix = 'net'; limit = 1; projection = 'instance'; cursor = $prefixPage.cursor }).status -ceq 'invalid_cursor') 'a cursor belongs to its projection'
+    Assert-True ((Invoke-Shell 'services -prefix door -hops 1 | select instance hops' '2').rows -ceq 'instance=door.a,hops=1') 'the shell filters by prefix and hops'
+    Assert-True ((Invoke-Shell 'services -prefix door -hops 0' '2').rows -ceq '') 'a service beyond -hops is left out'
+    $tooFar = Invoke-Shell 'services -hops 99' '2'
+    Assert-True ($tooFar.status -ceq 'source_failed' -and $tooFar.error -clike 'services *-hops*') "the shell bounds -hops: $($tooFar | ConvertTo-Json -Compress)"
+
     if ($IsLinux) {
         Assert-StartupRejected $socketPath
         Assert-True ((Invoke-Next @{ op = 'game_stats' }).game.nodes -eq 3) 'second Host does not unlink live socket'

@@ -330,8 +330,13 @@ public sealed class SchemaRegistry
         [
             new SchemaField("type", SchemaFieldType.Text, false, MaxLength: 64),
             new SchemaField("limit", SchemaFieldType.Integer, false, 1, 16),
-            new SchemaField("cursor", SchemaFieldType.Text, false, MaxLength: 160)
-        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["type", "limit", "cursor"] }, MaxPayloadBytes: 512));
+            new SchemaField("cursor", SchemaFieldType.Text, false, MaxLength: 160),
+            // Allowlisted predicates and a projection (§14.5): an instance prefix, the most hops from the
+            // device, and which parts of each item are returned. A cursor belongs to all of them.
+            new SchemaField("prefix", SchemaFieldType.Text, false, MaxLength: 64),
+            new SchemaField("maxHops", SchemaFieldType.Integer, false, 0, 64),
+            new SchemaField("projection", SchemaFieldType.Enum, false, Values: ["full", "instance", "instance_type"])
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["type", "limit", "cursor", "prefix", "maxHops", "projection"] }, MaxPayloadBytes: 512));
         registry.Register(new SchemaDefinition("query.page", 1, 0,
         [
             new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "partial", "empty", "snapshot_expired", "invalid_cursor", "budget_exhausted"]),

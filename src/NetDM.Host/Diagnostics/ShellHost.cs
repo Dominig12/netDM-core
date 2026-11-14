@@ -171,8 +171,12 @@ public static class ShellHost
             if (variable)
                 return args.Positional.Count + args.Named.Count == 0 ? null : "a variable takes no arguments";
             if (name == "services")
-                return args.Positional.Count == 0 && (args.Named.Count == 0 || (args.Named.Count == 1 &&
-                    args.Named.GetValueOrDefault("type") is string type && ServiceNames.IsValid(type))) ? null : "services [-type <serviceType>]";
+                return args.Positional.Count == 0 && args.Named.All(pair => pair switch
+                {
+                    { Key: "type" or "prefix", Value: string text } => ServiceNames.IsValid(text),
+                    { Key: "hops", Value: long hops } => hops is >= 0 and <= QueryHost.MaxHopsFilter,
+                    _ => false
+                }) ? null : "services [-type <serviceType>] [-prefix <instance prefix>] [-hops <0-64>]";
             if (name == "trace")
                 return args.Named.Count == 0 && args.Positional.Count == 1 && args.Positional[0] is long and > 0 ? null : "trace <node>";
             if (name == "route")
@@ -219,22 +223,24 @@ public static class ShellHost
                         ("link", index == 0 ? "start" : hop.Radio ? "radio" : "cable"))).ToArray();
                 case "services":
                     var type = arguments.Named.GetValueOrDefault("type") as string;
+                    var prefix = arguments.Named.GetValueOrDefault("prefix") as string;
+                    var maxHops = arguments.Named.GetValueOrDefault("hops") is long hopLimit ? hopLimit : long.MaxValue;
                     if (_graphQueriesRemaining-- <= 0)
                         return Fail("network search budget exceeded (services and trace share two searches)", out error);
                     var slice = command.DeliveryId is { } delivery
-                        ? session.Services.QueryDirectory(delivery, type, null, maxRecords)?.Slice
-                        : session.Services.QueryDirectory(command.Initiator, type, null, maxRecords);
+                        ? session.Services.QueryDirectory(delivery, type, null, maxRecords, prefix)?.Slice
+                        : session.Services.QueryDirectory(command.Initiator, type, null, maxRecords, prefix);
                     if (slice is null)
                         return [];
                     var query = (Slice: slice, Origin: origin);
                     if (query.Slice.More)
-                        return Fail("too many services: narrow with -type", out error);
+                        return Fail("too many services: narrow with -type or -prefix", out error);
                     var targets = query.Slice.Entries.Select(entry => entry.Node).Where(node => node != origin).ToHashSet();
                     var reached = SharedMediumNetwork.ReachAll(world, origin, targets, QueryHost.ReachBudget, out var exhausted);
                     if (exhausted)
                         return Fail("the network is too large to search from here", out error);
                     return query.Slice.Entries
-                        .Where(entry => entry.Node == origin || reached.ContainsKey(entry.Node))
+                        .Where(entry => entry.Node == origin || (reached.TryGetValue(entry.Node, out var near) && near.Hops <= maxHops))
                         .Select(entry => Record(("instance", entry.Instance), ("type", entry.ServiceType),
                             ("hops", (long)(entry.Node == origin ? 0 : reached[entry.Node].Hops)))).ToArray();
                 case "links":
