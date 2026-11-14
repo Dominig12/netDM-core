@@ -29,6 +29,8 @@ public sealed record ShellResult(ShellStatus Status, IReadOnlyList<ShellRecord> 
     int Position = 0)
 {
     public bool Ok => Status == ShellStatus.Ok;
+    /// <summary>The variables of a script that ran to its end, presets included; null otherwise.</summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<ShellRecord>>? Variables { get; init; }
 }
 
 /// <summary>
@@ -99,7 +101,7 @@ public static class NetShell
     public static ShellResult RunScript(string script, IShellSource source, ShellLimits? limits = null, IShellSink? sink = null,
         IReadOnlyDictionary<string, IReadOnlyList<ShellRecord>>? preset = null,
         Func<string, ShellArguments, bool, string?>? validateSource = null,
-        Func<ShellArguments, bool, string?>? validateAction = null)
+        Func<string, ShellArguments, bool, string?>? validateAction = null)
     {
         limits ??= new ShellLimits();
         if (script.Length > MaxScriptLength)
@@ -159,7 +161,7 @@ public static class NetShell
                 return new(invalidSource == "unknown command" ? ShellStatus.UnknownCommand : ShellStatus.InvalidArgument,
                     [], fuel, invalidSource, pipelineOffset + pipeline.First.Position);
             if (validateAction is not null && pipeline.Action is { } action &&
-                validateAction(action.Arguments, pipeline.First != action) is { } invalidAction)
+                validateAction(action.Command, action.Arguments, pipeline.First != action) is { } invalidAction)
                 return new(ShellStatus.InvalidArgument, [], fuel, invalidAction, pipelineOffset + action.Position);
             if (assign is not null && assigned.Add(assign) && assigned.Count > MaxVariables)
                 return new(ShellStatus.LimitExceeded, [], fuel, $"a script holds at most {MaxVariables} variables", start);
@@ -192,7 +194,7 @@ public static class NetShell
                 records = result.Records;
             index = step.Condition && result.Records.Count == 0 ? step.AfterBlock : index + 1;
         }
-        return new(ShellStatus.Ok, records, fuel);
+        return new(ShellStatus.Ok, records, fuel) { Variables = variables };
     }
 
     private static ShellResult? Compile(string line, ShellLimits limits, IShellSink? sink, bool condition, int initialFuel,

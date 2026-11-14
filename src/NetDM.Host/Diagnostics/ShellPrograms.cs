@@ -26,6 +26,16 @@ namespace NetDM.Host.Diagnostics;
 public static class ShellPrograms
 {
     public const int MaxPerDevice = 4, MaxTotal = 64, MaxPhases = 4, MaxRuns = 100;
+    /// <summary>
+    /// What one program may hold, in formatted characters: its own <c>$state</c>, the event and results it
+    /// carries and the last observation of its rule. A program over it is faulted, not trimmed: a cut
+    /// state would mislead it. A device holds at most <see cref="MaxPerDevice"/> such programs.
+    /// </summary>
+    public const int MaxStateBytes = 4096;
+    /// <summary>The budget in force: <see cref="MaxStateBytes"/> unless NetDM:ProgramStateBytes sets another (256–65536).</summary>
+    public static int StateBudget { get; set; } = MaxStateBytes;
+    /// <summary>Bounds of <c>every N</c>: a timer program runs at most once in this many seconds.</summary>
+    public const int MinEverySeconds = 10, MaxEverySeconds = 3600;
     public const int EvaluateEveryMs = 1000, PassEveryMs = 250, WaitDeadlineMs = 30_000;
     /// <summary>
     /// A rule is evaluated again only when something it can read changed (§14.5): the world's version, the
@@ -122,6 +132,10 @@ public static class ShellPrograms
         /// <summary>Kept on the device's media: it waits for its endpoint to come back like a restored program.</summary>
         public bool Kept;
         public string[] Phases = [];
+        /// <summary>Seconds between runs of a timer program ("every N"); 0 for any other.</summary>
+        public int Every;
+        /// <summary>The program's own <c>$state</c>: what its phases kept for the next phase and the next run.</summary>
+        public IReadOnlyList<ShellRecord> Memory = [];
         public string? LastEvent;
         public int Phase, Runs;
         public long NextEvaluation, WaitUntil, SuspendedAt, Fuel, RefreshAt;
@@ -153,7 +167,8 @@ public static class ShellPrograms
     private sealed record SavedProgram(int Id, string Name, string Instance, string OwnerId, ulong OwnerGeneration, string ProviderId,
         ulong ProviderGeneration, string? Rule, string[] Phases, string? LastEvent, int Phase, int Runs, string State, string Resume,
         string ThrottledFrom, string Reason, long Fuel, bool InPhase, List<Dictionary<string, JsonElement>> Sent,
-        List<Dictionary<string, JsonElement>> Event, string? Source = null, bool Kept = false);
+        List<Dictionary<string, JsonElement>> Event, string? Source = null, bool Kept = false, int Every = 0,
+        List<Dictionary<string, JsonElement>>? Memory = null);
 
     private sealed record SavedFile(int Version, Guid Round, int NextId, List<SavedProgram> Programs);
 
@@ -223,7 +238,8 @@ public static class ShellPrograms
             Provider = new EndpointKey(saved.ProviderId, saved.ProviderGeneration), Rule = saved.Rule, Phases = saved.Phases,
             LastEvent = saved.LastEvent, Phase = saved.Phase, Runs = saved.Runs, State = saved.State, Resume = saved.Resume,
             ThrottledFrom = saved.ThrottledFrom, Reason = saved.Reason, Fuel = saved.Fuel, Sent = saved.Sent.Select(Record).ToArray(),
-            Event = saved.Event.Select(Record).ToArray(), Source = saved.Source, Kept = saved.Kept, Detached = true, SuspendedAt = now
+            Event = saved.Event.Select(Record).ToArray(), Source = saved.Source, Kept = saved.Kept, Every = saved.Every,
+            Memory = saved.Memory?.Select(Record).ToArray() ?? [], Detached = true, SuspendedAt = now
         };
         if (saved.InPhase)
         {
@@ -232,7 +248,7 @@ public static class ShellPrograms
             program.Reason = "restored after an interrupted phase";
             if (program.Phase + 1 < program.Phases.Length)
                 program.State = "waiting";
-            else if (program.Rule is null)
+            else if (program.Rule is null && program.Every == 0)
                 program.State = "done";
             else
                 program.State = "watching";
@@ -289,7 +305,7 @@ public static class ShellPrograms
         var file = new SavedFile(FileVersion, _round, _nextId, Programs.Where(program => !program.Finished).Select(program => new SavedProgram(
             program.Id, program.Name, program.Instance, program.Owner.Id, program.Owner.Generation, program.Provider.Id, program.Provider.Generation,
             program.Rule, program.Phases, program.LastEvent, program.Phase, program.Runs, program.State, program.Resume, program.ThrottledFrom,
-            program.Reason, program.Fuel, program.InPhase, Fields(program.Sent), Fields(program.Event), program.Source, program.Kept)).ToList());
+            program.Reason, program.Fuel, program.InPhase, Fields(program.Sent), Fields(program.Event), program.Source, program.Kept, program.Every, Fields(program.Memory))).ToList());
         var text = JsonSerializer.Serialize(file);
         if (text == _written)
         {
@@ -384,14 +400,23 @@ public static class ShellPrograms
             Programs.Count(program => !program.Finished && program != kept && program.Instance == command.Instance) >= MaxPerDevice)
             return JsonSerializer.SerializeToElement(Refuse("limit_exceeded", $"a device holds at most {MaxPerDevice} programs"));
 
-        // "on <pipeline>" is the first line; "wait" on a line of its own separates the phases.
+        // "on <pipeline>" or "every <seconds>" is the first line; "wait" on a line of its own separates the phases.
         var lines = text.Split('\n');
         string? rule = null;
+        var every = 0;
         var offset = 0;
         var first = lines[0].TrimStart();
         if (first.StartsWith("on", StringComparison.Ordinal) && (first.Length == 2 || char.IsWhiteSpace(first[2])))
         {
             rule = first[2..].Trim();
+            offset = lines[0].Length + 1;
+            lines = lines[1..];
+        }
+        else if (first.StartsWith("every", StringComparison.Ordinal) && (first.Length == 5 || char.IsWhiteSpace(first[5])))
+        {
+            if (!int.TryParse(first[5..].Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out every) ||
+                every < MinEverySeconds || every > MaxEverySeconds)
+                return JsonSerializer.SerializeToElement(Refuse("invalid_argument", $"every <{MinEverySeconds}-{MaxEverySeconds} seconds>"));
             offset = lines[0].Length + 1;
             lines = lines[1..];
         }
@@ -416,7 +441,7 @@ public static class ShellPrograms
 
         // The whole program is checked now, against a network that answers nothing: no line runs at start.
         var silent = new Dry();
-        var presets = new Dictionary<string, IReadOnlyList<ShellRecord>>(StringComparer.Ordinal) { ["event"] = [], ["result"] = [] };
+        var presets = new Dictionary<string, IReadOnlyList<ShellRecord>>(StringComparer.Ordinal) { ["event"] = [], ["result"] = [], ["state"] = [] };
         if (rule is not null)
         {
             var checkedRule = rule.Length == 0
@@ -437,7 +462,7 @@ public static class ShellPrograms
         var started = new Program
         {
             Id = ++_nextId, Name = name, Instance = command.Instance, Owner = command.InitiatorKey, Provider = command.ProviderKey,
-            Rule = rule, Source = text, Kept = ensure, Phases = phases.Select(phase => phase.Source).ToArray(),
+            Rule = rule, Every = every, Source = text, Kept = ensure, Phases = phases.Select(phase => phase.Source).ToArray(),
             State = rule is null ? "running" : "watching"
         };
         applied = () =>
@@ -466,7 +491,7 @@ public static class ShellPrograms
         public IReadOnlyList<ShellRecord>? Read(string command, ShellArguments arguments, int maxRecords, out string? error)
             => throw new InvalidOperationException("Validation must not read from the network.");
 
-        public bool Knows(string command) => command == "invoke";
+        public bool Knows(string command) => command is "invoke" or "publish";
 
         public IReadOnlyList<ShellRecord>? Act(string command, IReadOnlyList<ShellRecord>? input, ShellArguments arguments, out string? error)
             => throw new InvalidOperationException("Validation must not send commands.");
@@ -478,7 +503,21 @@ public static class ShellPrograms
         Sync(session);
         return Programs.Where(program => program.Instance == scope.Instance && program.Owner == scope.Initiator)
             .Select(program => ShellHost.Record(("program", (long)program.Id), ("name", program.Name), ("state", program.State),
-                ("runs", (long)program.Runs), ("fuel", program.Fuel), ("reason", program.Reason))).ToArray();
+                ("runs", (long)program.Runs), ("fuel", program.Fuel), ("memory", (long)StateBytes(program)), ("reason", program.Reason))).ToArray();
+    }
+
+    /// <summary>What a program holds now, counted as the formatted text of its records.</summary>
+    private static int StateBytes(Program program) => ShellHost.Format(program.Memory).Length + ShellHost.Format(program.Event).Length +
+        ShellHost.Format(program.Sent).Length + ShellHost.Format(program.Result).Length + (program.LastEvent?.Length ?? 0);
+
+    /// <summary>Faults a program over its state budget; true when it did.</summary>
+    private static bool OverBudget(Program program)
+    {
+        var bytes = StateBytes(program);
+        if (bytes <= StateBudget)
+            return false;
+        Finish(program, "faulted", $"program state {bytes} over {StateBudget} bytes");
+        return true;
     }
 
     /// <summary>One bounded pass over the programs: finished waits continue, due rules are evaluated.</summary>
@@ -549,8 +588,8 @@ public static class ShellPrograms
             var changes = new ChangeIndex(power.World.Version, power.Wiring,
                 Reads("services", "route") ? session.Services.DirectoryRevision : 0, Reads("programs") ? _programsRevision : 0,
                 Reads("jobs") ? session.Services.OperationsRevisionOf(program.Owner) : 0);
-            if (program.State == "watching" && now >= program.NextEvaluation && program.Seen is { } seenIndex && seenIndex.Same(changes) &&
-                now < program.RefreshAt)
+            if (program.State == "watching" && program.Rule is not null && now >= program.NextEvaluation && program.Seen is { } seenIndex &&
+                seenIndex.Same(changes) && now < program.RefreshAt)
             {
                 Unchanged++;
                 continue; // Nothing it reads has changed.
@@ -561,9 +600,23 @@ public static class ShellPrograms
                 continue;
             }
             var scope = new ShellHost.Scope(program.Owner, program.Instance, origin, null,
-                $"pg.{_stream:N}.{program.Id.ToString(CultureInfo.InvariantCulture)}.{program.Runs.ToString(CultureInfo.InvariantCulture)}.{program.Phase.ToString(CultureInfo.InvariantCulture)}");
+                $"pg.{_stream:N}.{program.Id.ToString(CultureInfo.InvariantCulture)}.{program.Runs.ToString(CultureInfo.InvariantCulture)}.{program.Phase.ToString(CultureInfo.InvariantCulture)}",
+                program.Owner == program.Provider ? program.Provider : null);
             switch (program.State)
             {
+                case "watching" when program.Every > 0 && now >= program.NextEvaluation:
+                    // A timer program: its next run is due. Its $event is empty; $state holds what it kept.
+                    if (program.Runs >= MaxRuns)
+                    {
+                        Finish(program, "faulted", "run budget spent");
+                        break;
+                    }
+                    Fired++;
+                    program.Event = [];
+                    program.Result = [];
+                    program.Phase = 0;
+                    due.Add((program, scope));
+                    break;
                 case "watching" when now >= program.NextEvaluation:
                     program.NextEvaluation = now + EvaluateEveryMs;
                     program.Seen = changes;
@@ -584,6 +637,8 @@ public static class ShellPrograms
                         break;
                     program.LastEvent = text;
                     program.Reason = "";
+                    if (OverBudget(program))
+                        break;
                     if (first)
                         break; // The first evaluation is what the rule compares with.
                     if (program.Runs >= MaxRuns)
@@ -647,7 +702,10 @@ public static class ShellPrograms
     /// <summary>Runs the current phase; returns whether it sent commands. Then the program waits, finishes or watches again.</summary>
     private static bool RunPhase(GameNetworkService game, GameNetworkService.Session session, Program program, ShellHost.Scope scope)
     {
-        var presets = new Dictionary<string, IReadOnlyList<ShellRecord>>(StringComparer.Ordinal) { ["event"] = program.Event, ["result"] = program.Result };
+        var presets = new Dictionary<string, IReadOnlyList<ShellRecord>>(StringComparer.Ordinal)
+        {
+            ["event"] = program.Event, ["result"] = program.Result, ["state"] = program.Memory
+        };
         var sink = new ShellHost.Sink(session, scope);
         var result = NetShell.RunScript(program.Phases[program.Phase], new ShellHost.Source(game, session, scope), ShellHost.ProgramLimits, sink, presets);
         program.InPhase = false;
@@ -659,6 +717,8 @@ public static class ShellPrograms
             Finish(program, "faulted", result.Error ?? ServiceNames.Code(result.Status));
             return sent;
         }
+        if (result.Variables?.TryGetValue("state", out var kept) == true)
+            program.Memory = kept; // "$state = …" in a phase: kept for the next phase and the next run.
         if (program.Phase + 1 < program.Phases.Length)
         {
             // "wait": the commands of this phase, sent or not, are what the next phase finds in $result.
@@ -668,13 +728,14 @@ public static class ShellPrograms
             program.WaitUntil = Environment.TickCount64 + WaitDeadlineMs;
             program.State = "waiting";
         }
-        else if (program.Rule is null)
+        else if (program.Rule is null && program.Every == 0)
             Finish(program, "done", "");
         else
         {
             program.State = "watching";
-            program.NextEvaluation = Environment.TickCount64 + RuleCooldownMs;
+            program.NextEvaluation = Environment.TickCount64 + (program.Every > 0 ? program.Every * 1000L : RuleCooldownMs);
         }
+        OverBudget(program);
         return sent;
     }
 

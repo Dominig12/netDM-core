@@ -31,6 +31,8 @@ else
     builder.WebHost.UseUrls($"http://127.0.0.1:{httpPort}");
 }
 var deployment = builder.Configuration.GetValue("NetDM:Deployment", false);
+NetDM.Host.Diagnostics.ShellPrograms.StateBudget = Math.Clamp(
+    builder.Configuration.GetValue("NetDM:ProgramStateBytes", NetDM.Host.Diagnostics.ShellPrograms.MaxStateBytes), 256, 65_536);
 builder.Services.AddSingleton<NetworkRuntime>();
 builder.Services.AddSingleton(_ => new PriorityWorkScheduler(new WorkSchedulerOptions(
     Workers: Math.Clamp(Environment.ProcessorCount / 2, 1, 8),

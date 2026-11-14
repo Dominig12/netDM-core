@@ -648,6 +648,13 @@ public sealed class ServiceRuntime
     /// Accepts one publication. Repeating the same producer sequence with the same
     /// canonical payload returns the original message and creates no deliveries.
     /// </summary>
+    /// <summary>The last producer sequence of a service, for its owner only; null otherwise.</summary>
+    public long? LastSequence(EndpointKey owner, string instance)
+    {
+        lock (_gate)
+            return _services.TryGetValue(instance, out var service) && service.Owner == owner ? service.LastSequence : null;
+    }
+
     public PublishResult Publish(EndpointKey producer, string instance, long producerSequence,
         JsonElement payload, int? timeoutTicks, PacketTrafficClass trafficClass)
     {

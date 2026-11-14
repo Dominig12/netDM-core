@@ -17,6 +17,8 @@ $launch.Environment['NETDM_SOCKET_PATH'] = $socketPath
 $launch.Environment['NetDM__HttpPort'] = "$httpPort"
 $launch.Environment['Logging__LogLevel__Default'] = 'Error'
 $launch.Environment['NetDM__ResearchDirectory'] = Join-Path $work 'research'
+# A small program state budget, so the budget check needs no large world.
+$launch.Environment['NetDM__ProgramStateBytes'] = '1200'
 
 function Open-Stream {
     if ($IsWindows) {
@@ -1456,6 +1458,47 @@ end
     Assert-True ((Invoke-Shell 'services -prefix door -hops 0' '2').rows -ceq '') 'a service beyond -hops is left out'
     $tooFar = Invoke-Shell 'services -hops 99' '2'
     Assert-True ($tooFar.status -ceq 'source_failed' -and $tooFar.error -clike 'services *-hops*') "the shell bounds -hops: $($tooFar | ConvertTo-Json -Compress)"
+
+    # §14.6 script API: $state kept between runs, "every N" timers, "… | publish" by the device itself, and the
+    # program state budget (NetDM__ProgramStateBytes=1200 for this run).
+    $shellDevice = @{ endpoint = 'apc-2s'; generation = '1' }
+    $script:ownCall = 0
+    function Invoke-OwnProgram([string] $Command, [hashtable] $Arguments) {
+        $script:ownCall++
+        Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = '2' }).ok) "heartbeat before own program call $script:ownCall"
+        Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = 'netshell.apc2'; command = $Command; idempotencyKey = "own-$script:ownCall"
+            arguments = $Arguments; trafficClass = 1; timeoutTicks = 60 } + $shellDevice)).ok) "own program request sent: $Command"
+        $answer = Wait-Result 'apc-2s' $Command
+        Assert-True ($null -ne $answer) "own program request answered: $Command"
+        return $answer.payload
+    }
+    Assert-True ((Invoke-Next (@{ op = 'subscribe'; key = 'shellpub'; instance = 'netshell.apc2'; schema = 'shell.output'; major = 1
+        projection = 'full'; mode = 'latest_value' } + $engineer)).ok) 'the console subscribes to the APC shell'
+    $everySource = "every 10`nif `$state`n  `$state | publish`nend`n`$state = self | select node state"
+    $timer = Invoke-OwnProgram 'start' @{ name = 'heartbeat'; source = $everySource }
+    Assert-True ($timer.status -ceq 'started') "a timer program starts: $($timer | ConvertTo-Json -Compress)"
+    $published = $null
+    for ($poll = 0; $poll -lt 150 -and $null -eq $published; $poll++) {
+        if ($poll % 10 -eq 0) { $null = Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = '2' } }
+        $published = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 32 }).result.items |
+            Where-Object { $_.recipient -ceq 'eng-1' -and $_.kind -ceq 'event' -and $_.instance -ceq 'netshell.apc2' } | Select-Object -First 1
+        if ($null -eq $published) { Start-Sleep -Milliseconds 100 }
+    }
+    Assert-True ($null -ne $published -and $published.payload.rows -ceq 'node=2,state=active' -and $published.producer -ceq 'apc-2s') "the second run publishes the state the first run kept: $($published | ConvertTo-Json -Compress -Depth 4)"
+    $null = Invoke-Next @{ op = 'delivery_ack'; acks = @(@{ deliveryId = $published.deliveryId; applied = $true }) }
+    Assert-True ((Invoke-OwnProgram 'stop' @{ program = $timer.program }).status -ceq 'stopped') 'the device stops its timer program'
+    Assert-True ((Invoke-OwnProgram 'start' @{ name = 'too-fast'; source = "every 2`nself" }).status -ceq 'invalid_argument') 'a timer is at least 10 seconds'
+    $foreign = Invoke-Shell 'self | publish' '2'
+    Assert-True ($foreign.status -ceq 'ok' -and $foreign.rows -clike '*status=forbidden*') "a line another endpoint asked for cannot publish for the device: $($foreign.rows)"
+    $heavy = Invoke-Program 'start' @{ name = 'heavy'; source = "`$state = jobs`nself" } '2'
+    Assert-True ($heavy.status -ceq 'started') "a program that keeps too much starts: $($heavy | ConvertTo-Json -Compress)"
+    $heavyState = $null
+    for ($poll = 0; $poll -lt 30; $poll++) {
+        $heavyState = (Invoke-Shell "programs | where name -eq heavy | select state reason" '2').rows
+        if ($heavyState -clike 'state=faulted*') { break }
+        Start-Sleep -Milliseconds 200
+    }
+    Assert-True ($heavyState -clike 'state=faulted,reason=program state * over 1200 bytes') "a program over its state budget is faulted: $heavyState"
 
     if ($IsLinux) {
         Assert-StartupRejected $socketPath

@@ -23,7 +23,10 @@ public static class ShellHost
     /// Whose line it is and where it runs. A line that arrived as a command reads through its delivery; a
     /// program that outlived its request reads as its owner's endpoint, which must still be alive.
     /// </summary>
-    internal sealed record Scope(EndpointKey Initiator, string Instance, NodeId Origin, long? DeliveryId, string KeyPrefix);
+    /// <param name="Publisher">The device's own endpoint when the device runs its own line or program: only then
+    /// may <c>publish</c> speak for the device's shell service. Null for a line another endpoint asked for.</param>
+    internal sealed record Scope(EndpointKey Initiator, string Instance, NodeId Origin, long? DeliveryId, string KeyPrefix,
+        EndpointKey? Publisher = null);
 
     internal static JsonElement Answer(GameNetworkService game, GameNetworkService.Session session, HostCommand command, out Action? applied)
     {
@@ -32,7 +35,8 @@ public static class ShellHost
         if (command.Command is "start" or "stop")
             return ShellPrograms.Answer(session, command, arguments.RootElement, out applied);
         var scope = new Scope(command.InitiatorKey, command.Instance, command.ProviderNode, command.DeliveryId,
-            $"{ActionKeyNamespace}.{command.DeliveryId.ToString(CultureInfo.InvariantCulture)}");
+            $"{ActionKeyNamespace}.{command.DeliveryId.ToString(CultureInfo.InvariantCulture)}",
+            command.InitiatorKey == command.ProviderKey ? command.ProviderKey : null);
         var source = new Source(game, session, scope);
         var sink = new Sink(session, scope);
         var result = command.Command == "run_script"
@@ -110,18 +114,24 @@ public static class ShellHost
         private int _ordinal;
         public List<ShellRecord> Results { get; } = [];
 
-        public bool Knows(string name) => name == "invoke";
+        public bool Knows(string name) => name is "invoke" or "publish";
 
-        internal static string? Validate(ShellArguments arguments, bool piped) =>
-            arguments.Positional.Count == (piped ? 1 : 2) &&
-            arguments.Positional.All(word => word is string text && ServiceNames.IsValid(text)) ? null :
-            piped ? "… | invoke <command> [name=value…]" : "invoke <instance> <command> [name=value…]";
+        internal static string? Validate(string name, ShellArguments arguments, bool piped)
+        {
+            if (name == "publish")
+                return piped && arguments.Positional.Count + arguments.Named.Count == 0 ? null : "… | publish";
+            return arguments.Positional.Count == (piped ? 1 : 2) &&
+                arguments.Positional.All(word => word is string text && ServiceNames.IsValid(text)) ? null :
+                piped ? "… | invoke <command> [name=value…]" : "invoke <instance> <command> [name=value…]";
+        }
 
         public IReadOnlyList<ShellRecord>? Act(string name, IReadOnlyList<ShellRecord>? input, ShellArguments arguments, out string? error)
         {
-            error = Validate(arguments, input is not null);
+            error = Validate(name, arguments, input is not null);
             if (error is not null)
                 return null;
+            if (name == "publish")
+                return Publish(input!, out error);
             var targets = input is null
                 ? [(string)arguments.Positional[0]]
                 : input.Select(record => record["instance"] as string).ToArray();
@@ -155,6 +165,38 @@ public static class ShellHost
                 }
                 done.Add(Record(("instance", instance), ("command", verb), ("status", status), ("operation", operation)));
             }
+            Results.AddRange(done);
+            return done;
+        }
+
+        /// <summary>
+        /// <c>… | publish</c>: the records become the next publication of the device's shell service
+        /// (<c>shell.output</c>), delivered to its subscribers like any service's. Only the device itself
+        /// publishes for itself; a line another endpoint asked for is refused.
+        /// </summary>
+        private IReadOnlyList<ShellRecord>? Publish(IReadOnlyList<ShellRecord> input, out string? error)
+        {
+            error = null;
+            var rows = Format(input);
+            if (rows.Length > MaxOutputChars)
+            {
+                error = "publication too long: select fewer fields or records";
+                return null;
+            }
+            string status;
+            long recipients = 0;
+            if (command.Publisher is not { } publisher)
+                status = "forbidden";
+            else
+            {
+                var sequence = (session.Services.LastSequence(publisher, command.Instance) ?? 0) + 1;
+                var payload = JsonSerializer.SerializeToElement(new { status = "ok", count = input.Count, fuel = 0, rows });
+                var published = session.Services.Publish(publisher, command.Instance, sequence, payload, null, PacketTrafficClass.Background);
+                status = published.Status == ServiceStatus.Ok ? "published" : ServiceNames.Code(published.Status);
+                recipients = published.Recipients;
+            }
+            ShellRecord[] done = [Record(("instance", command.Instance), ("command", "publish"), ("status", status), ("operation", ""),
+                ("recipients", recipients))];
             Results.AddRange(done);
             return done;
         }
