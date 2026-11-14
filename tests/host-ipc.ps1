@@ -1409,6 +1409,38 @@ end
     Assert-True ((Invoke-Shell 'programs | select program name' '2').rows -ceq "program=$($changed.program),name=keeper") 'only the replacement is left'
     Assert-True ((Invoke-Program 'stop' @{ program = $changed.program } '2').status -ceq 'stopped') 'the kept program is stopped by its owner'
 
+    # §14.5 route and job status. The route is the path a packet from the answering APC takes to a service
+    # the asker may discover; jobs are the asker's own latest commands with their outcomes.
+    $routeDoors = @{ endpoint = 'dev-3'; generation = '1' }
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '3' } + $routeDoors)).ok) 'a door device attaches behind APC 3 for routes'
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'door.a'; serviceType = 'machine.door'; schema = 'machine.door_state'
+        major = 1; minor = 0 } + $routeDoors)).ok) 'door.a is offered again'
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'netquery.apc2'; serviceType = 'network.query'; schema = 'query.page'
+        major = 1; minor = 0 } + $apc2)).ok) 'APC 2 offers queries again'
+    $script:queryCall = 0
+    function Invoke-QueryCommand([string] $Command, [hashtable] $Arguments) {
+        $script:queryCall++
+        Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = '2' }).ok) "heartbeat before query $Command $script:queryCall"
+        Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = 'netquery.apc2'; command = $Command; idempotencyKey = "rq-$script:queryCall"
+            arguments = $Arguments; trafficClass = 1; timeoutTicks = 60 } + $engineer)).ok) "query sent: $Command"
+        $answer = Wait-Result 'eng-1' $Command
+        Assert-True ($null -ne $answer) "query answered: $Command"
+        return $answer.payload
+    }
+    $route = Invoke-QueryCommand 'route' @{ instance = 'door.a' }
+    Assert-True ($route.status -ceq 'complete' -and $route.hops -eq 1 -and $route.radioHops -eq 0 -and $route.path -ceq '2:start,3:cable') "a route lists its nodes from the APC: $($route | ConvertTo-Json -Compress)"
+    $hidden = Invoke-QueryCommand 'route' @{ instance = 'door.none' }
+    Assert-True ($hidden.status -ceq 'empty' -and -not $hidden.ContainsKey('path')) "a route to an unknown service tells nothing: $($hidden | ConvertTo-Json -Compress)"
+    $jobs = Invoke-QueryCommand 'jobs' @{ limit = 2 }
+    $firstJob = ("$($jobs.items)" -split ',')[0] -split '\|'
+    Assert-True ($jobs.status -ceq 'complete' -and $jobs.count -eq 2 -and $firstJob[1] -ceq 'netquery.apc2' -and $firstJob[2] -ceq 'route' -and
+        $firstJob[3] -ceq 'applied') "jobs list the asker's latest commands, newest first, without the asking one: $($jobs | ConvertTo-Json -Compress)"
+    $shellRoute = Invoke-Shell 'route door.a' '2'
+    Assert-True ($shellRoute.status -ceq 'ok' -and $shellRoute.rows -ceq 'hop=0,node=2,link=start;hop=1,node=3,link=cable') "the shell reads a route: $($shellRoute.rows)"
+    $shellJobs = Invoke-Shell 'jobs | first 1 | select command outcome' '2'
+    Assert-True ($shellJobs.rows -ceq 'command=run,outcome=applied') "the shell lists jobs without its own line: $($shellJobs.rows)"
+    Assert-True ((Invoke-Shell 'route door.none' '2').rows -ceq '') 'a route to a hidden service is empty'
+
     if ($IsLinux) {
         Assert-StartupRejected $socketPath
         Assert-True ((Invoke-Next @{ op = 'game_stats' }).game.nodes -eq 3) 'second Host does not unlink live socket'

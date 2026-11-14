@@ -41,6 +41,9 @@ public sealed record LinkStateReport(string State, int Wired, int WiredUp, bool 
 /// <summary>Whether the network carries a packet from a device to a node now, and how far that is.</summary>
 public sealed record TraceReport(string State, int Hops, int RadioHops, ulong Cost, int Ticks);
 
+/// <summary>A route as its nodes from the asking device, at most <see cref="NetworkDiagnostics.MaxRouteNodes"/>.</summary>
+public sealed record RouteReport(string State, IReadOnlyList<(NodeId Node, bool Radio)> Nodes, int Hops, bool Truncated);
+
 /// <summary>
 /// network.diagnostics (§7.6, §14.1): bounded answers a network device gives about the network around
 /// it. A device reports its own ports: which designed neighbour is reachable over its cable and which is
@@ -87,6 +90,20 @@ public static class NetworkDiagnostics
     }
 
     /// <summary>One bounded search from <paramref name="from"/>; a search that ran out of budget answers unreachable.</summary>
+    /// <summary>Nodes of a route a device reports; a longer route is cut after them.</summary>
+    public const int MaxRouteNodes = 32;
+
+    /// <summary>The route a packet from the device would take now, as one bounded search.</summary>
+    public static RouteReport Route(SharedMediumSnapshot world, NodeId from, NodeId to, int maxExplored = MaxTraceExplored)
+    {
+        if (!world.Physical.Nodes.ContainsKey(from) || !world.Physical.Nodes.ContainsKey(to))
+            return new RouteReport(Unknown, [], 0, false);
+        var path = SharedMediumNetwork.Route(world, from, to, maxExplored, out _);
+        if (path is null)
+            return new RouteReport(Unreachable, [], 0, false);
+        return new RouteReport(Reachable, path.Take(MaxRouteNodes).ToArray(), path.Count - 1, path.Count > MaxRouteNodes);
+    }
+
     public static TraceReport Trace(SharedMediumSnapshot world, NodeId from, NodeId to, int maxExplored = MaxTraceExplored)
     {
         if (!world.Physical.Nodes.ContainsKey(from) || !world.Physical.Nodes.ContainsKey(to))

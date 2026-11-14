@@ -29,16 +29,16 @@ public static class ShellPrograms
     public const int EvaluateEveryMs = 1000, PassEveryMs = 250, WaitDeadlineMs = 30_000;
     /// <summary>
     /// A rule is evaluated again only when something it can read changed (§14.5): the world's version, the
-    /// wiring report, the directory revision or the programs themselves. <see cref="EvaluateEveryMs"/> is the
+    /// wiring report, the directory revision, the programs themselves or the owner's operations and their outcomes (its jobs). <see cref="EvaluateEveryMs"/> is the
     /// shortest spacing; <see cref="RefreshEveryMs"/> re-reads an unchanged network now and then, for what
     /// no index covers (access granted or taken back).
     /// </summary>
     public const int RefreshEveryMs = 30_000;
 
-    private readonly record struct ChangeIndex(long World, object Wiring, long Directory, long Programs)
+    private readonly record struct ChangeIndex(long World, object Wiring, long Directory, long Programs, long Operations)
     {
         public bool Same(ChangeIndex other) => World == other.World && ReferenceEquals(Wiring, other.Wiring) &&
-            Directory == other.Directory && Programs == other.Programs;
+            Directory == other.Directory && Programs == other.Programs && Operations == other.Operations;
     }
 
     private static long _programsRevision;
@@ -112,6 +112,8 @@ public static class ShellPrograms
         public long NextEvaluation, WaitUntil, SuspendedAt, Fuel, RefreshAt;
         /// <summary>What the rule last read; null until it has been evaluated in this runtime.</summary>
         public ChangeIndex? Seen;
+        /// <summary>Sources the rule read at its last evaluation; null reads as all of them.</summary>
+        public HashSet<string>? Reads;
         public long[] Waiting = [];
         public IReadOnlyList<ShellRecord> Sent = [], Event = [], Result = [];
         public bool Finished => State is "done" or "faulted" or "stopped";
@@ -224,6 +226,7 @@ public static class ShellPrograms
         program.WaitUntil = 0;
         program.NextEvaluation = 0;
         program.Seen = null;
+        program.Reads = null;
         program.Detached = true;
         program.DetachedSince = 0;
     }
@@ -496,7 +499,11 @@ public static class ShellPrograms
                 program.State = program.ThrottledFrom;
                 program.Reason = "";
             }
-            var changes = new ChangeIndex(power.World.Version, power.Wiring, session.Services.DirectoryRevision, _programsRevision);
+            // Only what the rule reads counts: the world and the wiring always, the rest by source.
+            bool Reads(params string[] sources) => program.Reads is null || sources.Any(program.Reads.Contains);
+            var changes = new ChangeIndex(power.World.Version, power.Wiring,
+                Reads("services", "route") ? session.Services.DirectoryRevision : 0, Reads("programs") ? _programsRevision : 0,
+                Reads("jobs") ? session.Services.OperationsRevisionOf(program.Owner) : 0);
             if (program.State == "watching" && now >= program.NextEvaluation && program.Seen is { } seenIndex && seenIndex.Same(changes) &&
                 now < program.RefreshAt)
                 continue; // Nothing it reads has changed.
@@ -513,7 +520,9 @@ public static class ShellPrograms
                     program.NextEvaluation = now + EvaluateEveryMs;
                     program.Seen = changes;
                     program.RefreshAt = now + RefreshEveryMs;
-                    var seen = NetShell.Run(program.Rule!, new ShellHost.Source(game, session, scope), ShellHost.ProgramLimits);
+                    var ruleSource = new ShellHost.Source(game, session, scope);
+                    var seen = NetShell.Run(program.Rule!, ruleSource, ShellHost.ProgramLimits);
+                    program.Reads = ruleSource.Names;
                     Charge(program, seen.FuelUsed, 0);
                     if (!seen.Ok)
                     {

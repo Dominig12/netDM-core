@@ -367,6 +367,31 @@ public sealed class SchemaRegistry
         ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "instance", "publication", "sequence"] }, MaxPayloadBytes: 256));
         registry.RegisterCommand("network.query", "schema", "query.instance_request", 1, "query.schema", 1);
         registry.RegisterCommand("network.query", "state", "query.instance_request", 1, "query.state", 1);
+        // "route": the path a packet from the device to a service the asker may discover takes now, as
+        // "node:link" items from the device (link start, cable or radio), cut after 32 nodes ("partial").
+        // A service the asker may not discover is "empty", one it may but the device does not reach is
+        // "unreachable".
+        registry.Register(new SchemaDefinition("query.route", 1, 0,
+        [
+            new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "partial", "unreachable", "empty", "invalid_request"]),
+            new SchemaField("instance", SchemaFieldType.Text, false, MaxLength: 64),
+            new SchemaField("hops", SchemaFieldType.Integer, false, 0, 1_000_000),
+            new SchemaField("radioHops", SchemaFieldType.Integer, false, 0, 1_000_000),
+            new SchemaField("path", SchemaFieldType.Text, false, MaxLength: 1024)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "instance", "hops", "radioHops", "path"] }, MaxPayloadBytes: 1536));
+        registry.RegisterCommand("network.query", "route", "query.instance_request", 1, "query.route", 1);
+        // "jobs": the asker's own latest commands, newest first, as "operation|instance|command|outcome|result"
+        // items. Only the asker's operations of its current endpoint generation are listed.
+        registry.Register(new SchemaDefinition("query.jobs_request", 1, 0,
+            [new SchemaField("limit", SchemaFieldType.Integer, false, 1, 16)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["limit"] }, MaxPayloadBytes: 64));
+        registry.Register(new SchemaDefinition("query.jobs", 1, 0,
+        [
+            new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "empty"]),
+            new SchemaField("count", SchemaFieldType.Integer, true, 0, 16),
+            new SchemaField("items", SchemaFieldType.Text, true, MaxLength: 2400)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "count", "items"] }, MaxPayloadBytes: 3072));
+        registry.RegisterCommand("network.query", "jobs", "query.jobs_request", 1, "query.jobs", 1);
         // WatchQuery: the published state of a network.query instance. It changes when the set of services
         // the device reaches changes; a watcher then asks "services" again.
         registry.Register(new SchemaDefinition("query.directory", 1, 0,

@@ -163,6 +163,8 @@ public static class ShellHost
     internal sealed class Source(GameNetworkService game, GameNetworkService.Session session, Scope command) : IShellSource
     {
         private int _graphQueriesRemaining = 2;
+        /// <summary>Sources a line has read: a rule is evaluated again only when one of them changed.</summary>
+        public HashSet<string> Names { get; } = new(StringComparer.Ordinal);
 
         internal static string? Validate(string name, ShellArguments args, bool variable = false)
         {
@@ -173,7 +175,10 @@ public static class ShellHost
                     args.Named.GetValueOrDefault("type") is string type && ServiceNames.IsValid(type))) ? null : "services [-type <serviceType>]";
             if (name == "trace")
                 return args.Named.Count == 0 && args.Positional.Count == 1 && args.Positional[0] is long and > 0 ? null : "trace <node>";
-            if (name is "programs" or "links" or "self")
+            if (name == "route")
+                return args.Named.Count == 0 && args.Positional.Count == 1 && args.Positional[0] is string instance &&
+                    ServiceNames.IsValid(instance) ? null : "route <instance>";
+            if (name is "programs" or "links" or "self" or "jobs")
                 return args.Positional.Count + args.Named.Count == 0 ? null : $"{name} takes no arguments";
             return "unknown command";
         }
@@ -187,12 +192,31 @@ public static class ShellHost
                     error = null;
                 return null;
             }
+            Names.Add(name);
             var world = session.Medium.Snapshot;
             var origin = command.Origin;
             switch (name)
             {
                 case "programs":
                     return ShellPrograms.List(session, command);
+                case "jobs":
+                    return QueryHost.Jobs(session.Services, command.Initiator, maxRecords, command.DeliveryId is null ? null : command.Instance)
+                        .Select(job => Record(("operation", job.Operation), ("instance", job.Instance), ("command", job.Command),
+                            ("outcome", job.Outcome), ("result", job.Result), ("reason", job.Reason))).ToArray();
+                case "route":
+                    var routed = (string)arguments.Positional[0];
+                    if (_graphQueriesRemaining-- <= 0)
+                        return Fail("network search budget exceeded (services, trace and route share two searches)", out error);
+                    var service = command.DeliveryId is { } routeDelivery
+                        ? session.Services.QueryService(routeDelivery, routed, false)?.Target
+                        : session.Services.DiscoverableNode(command.Initiator, routed);
+                    if (service is not { } serviceNode)
+                        return [];
+                    var path = NetworkDiagnostics.Route(world, origin, serviceNode, QueryHost.ReachBudget);
+                    if (path.State != NetworkDiagnostics.Reachable)
+                        return [Record(("hop", 0L), ("node", ""), ("link", path.State))];
+                    return path.Nodes.Select((hop, index) => Record(("hop", (long)index), ("node", hop.Node.Value.ToString(CultureInfo.InvariantCulture)),
+                        ("link", index == 0 ? "start" : hop.Radio ? "radio" : "cable"))).ToArray();
                 case "services":
                     var type = arguments.Named.GetValueOrDefault("type") as string;
                     if (_graphQueriesRemaining-- <= 0)

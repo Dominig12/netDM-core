@@ -50,15 +50,45 @@ public sealed partial class SharedMediumNetwork
         IReadOnlyDictionary<NodeId, BroadcastReach> sources, IReadOnlySet<NodeId> targets, int maxExplored = 100_000,
         int cableHopsPerTick = 16) => ReachAll(snapshot, sources, targets, maxExplored, cableHopsPerTick, out _);
 
+    /// <summary>
+    /// The cheapest route from one node to another as its nodes, the source first, each with whether it was
+    /// reached over radio. Null when the target is not reached within <paramref name="maxExplored"/> nodes.
+    /// </summary>
+    public static IReadOnlyList<(NodeId Node, bool Radio)>? Route(SharedMediumSnapshot snapshot, NodeId from, NodeId to,
+        int maxExplored, out bool exhausted)
+    {
+        var best = new Dictionary<NodeId, BroadcastReach>();
+        var reached = ReachAll(snapshot, new Dictionary<NodeId, BroadcastReach> { [from] = BroadcastReach.Start(from) },
+            new HashSet<NodeId> { to }, maxExplored, 16, out exhausted, best);
+        if (!reached.TryGetValue(to, out var end))
+            return null;
+        var path = new List<(NodeId Node, bool Radio)>(end.Hops + 1);
+        var node = to;
+        var reach = end;
+        // Each step goes back one hop; the walk is bounded by the hop count of the target.
+        for (var step = 0; step <= end.Hops && node != from; step++)
+        {
+            var previous = best[reach.LastHop];
+            path.Add((node, reach.RadioHops > previous.RadioHops));
+            node = reach.LastHop;
+            reach = previous;
+        }
+        if (node != from)
+            return null;
+        path.Add((from, false));
+        path.Reverse();
+        return path;
+    }
+
     private static Dictionary<NodeId, BroadcastReach> ReachAll(SharedMediumSnapshot snapshot,
         IReadOnlyDictionary<NodeId, BroadcastReach> sources, IReadOnlySet<NodeId> targets, int maxExplored,
-        int cableHopsPerTick, out bool exhausted)
+        int cableHopsPerTick, out bool exhausted, Dictionary<NodeId, BroadcastReach>? bestOut = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxExplored);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(cableHopsPerTick);
         var nodes = snapshot.Physical.Nodes;
         var reached = new Dictionary<NodeId, BroadcastReach>();
-        var best = new Dictionary<NodeId, BroadcastReach>();
+        var best = bestOut ?? new Dictionary<NodeId, BroadcastReach>();
         var origins = new HashSet<NodeId>();
         var queue = new PriorityQueue<NodeId, ulong>();
         foreach (var (source, start) in sources)

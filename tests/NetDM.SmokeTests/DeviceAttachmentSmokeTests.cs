@@ -46,6 +46,18 @@ static class DeviceAttachmentSmokeTests
         Check(NetworkDiagnostics.Trace(medium.Snapshot, new NodeId(50), Apc3) is { State: "reachable", Hops: 2, RadioHops: 0 } &&
             NetworkDiagnostics.Trace(medium.Snapshot, Apc1, Apc1) is { State: "reachable", Hops: 0 } &&
             NetworkDiagnostics.Trace(medium.Snapshot, Apc1, new NodeId(99)).State == "unknown", "a trace counts the hops to a known node");
+        var cableRoute = NetworkDiagnostics.Route(medium.Snapshot, new NodeId(50), Apc3);
+        Check(cableRoute is { State: "reachable", Hops: 2, Truncated: false } &&
+            cableRoute.Nodes.SequenceEqual([(new NodeId(50), false), (Apc2, false), (Apc3, false)]) &&
+            NetworkDiagnostics.Route(medium.Snapshot, Apc1, Apc1).Nodes.SequenceEqual([(Apc1, false)]) &&
+            NetworkDiagnostics.Route(medium.Snapshot, Apc1, new NodeId(99)).State == "unknown", "a route lists its nodes from the device");
+        var radioWorld = new SharedMediumNetwork(new NetworkRuntime(), searchMode: SharedRadioSearchMode.AStarDense);
+        radioWorld.ApplyExternalTopology([Node(60, 1, true), Node(61, 4, true), Node(62, 5, true), Wire(61, 62)],
+            [new RadioNodeUpdate(new NodeId(60), Profile: new RadioProfile(6, 1), ChangeProfile: true),
+             new RadioNodeUpdate(new NodeId(61), Profile: new RadioProfile(6, 1), ChangeProfile: true)]);
+        var mixed = NetworkDiagnostics.Route(radioWorld.Snapshot, new NodeId(60), new NodeId(62));
+        Check(mixed.Nodes.SequenceEqual([(new NodeId(60), false), (new NodeId(61), true), (new NodeId(62), false)]),
+            $"a route marks the radio hop: {string.Join(",", mixed.Nodes)}");
 
         // APC 3 loses power: its cable carries nothing, the wiring still names it and says why.
         medium.ApplyExternalTopology([new TopologyChange(TopologyOperation.Disconnect, Apc2, Apc3)]);

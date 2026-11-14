@@ -33,11 +33,59 @@ public static class QueryHost
         var args = arguments.RootElement;
         if (command.Command is "schema" or "state")
             return Instance(session.Services, session.Medium.Snapshot, command, args.GetProperty("instance").GetString());
+        if (command.Command == "route")
+            return Route(session.Services, session.Medium.Snapshot, command, args.GetProperty("instance").GetString());
+        if (command.Command == "jobs")
+        {
+            var jobs = Jobs(session.Services, command.InitiatorKey,
+                args.TryGetProperty("limit", out var jobLimit) ? Math.Clamp(jobLimit.GetInt32(), 1, MaxLimit) : DefaultLimit, command.Instance);
+            var text = string.Join(",", jobs.Select(job => string.Join("|", job.Operation, job.Instance, job.Command, job.Outcome, job.Result)));
+            return JsonSerializer.SerializeToElement(new { status = jobs.Count == 0 ? "empty" : "complete", count = jobs.Count, items = text });
+        }
         var type = args.TryGetProperty("type", out var typeValue) ? typeValue.GetString() : null;
         var limit = args.TryGetProperty("limit", out var limitValue) ? Math.Clamp(limitValue.GetInt32(), 1, MaxLimit) : DefaultLimit;
         var cursor = args.TryGetProperty("cursor", out var cursorValue) ? cursorValue.GetString() : null;
         return Services(session, command, string.IsNullOrEmpty(type) ? null : type, limit,
             string.IsNullOrEmpty(cursor) ? null : cursor);
+    }
+
+    /// <summary>One job of the asker: its operation, where it went and how it ended so far.</summary>
+    internal sealed record Job(string Operation, string Instance, string Command, string Outcome, string Result, string Reason);
+
+    /// <summary>
+    /// The asker's latest operations, newest first. The request that is asking right now (a jobs query or a
+    /// shell line on the asking instance, still pending) is left out.
+    /// </summary>
+    internal static IReadOnlyList<Job> Jobs(ServiceRuntime services, EndpointKey asker, int limit, string? askingInstance)
+    {
+        var recent = services.RecentOperations(asker, ServiceRuntime.RecentOperationsPerEndpoint) ?? [];
+        return recent
+            .Where(operation => !(operation.Instance == askingInstance && operation.Command is "jobs" or "run" or "run_script" &&
+                operation.Outcome == CommandOutcome.Pending))
+            .Take(limit)
+            .Select(operation => new Job(operation.OperationId.ToString(CultureInfo.InvariantCulture), operation.Instance, operation.Command,
+                ServiceNames.Code(operation.Outcome), ServiceNames.Code(operation.Result), operation.OutcomeReason ?? operation.ResultReason ?? ""))
+            .ToArray();
+    }
+
+    /// <summary>Items of a route: "node:link" from the asking device, link start, cable or radio.</summary>
+    internal static string Path(RouteReport route) => string.Join(",", route.Nodes.Select((hop, index) =>
+        $"{hop.Node.Value.ToString(CultureInfo.InvariantCulture)}:{(index == 0 ? "start" : hop.Radio ? "radio" : "cable")}"));
+
+    private static JsonElement Route(ServiceRuntime services, SharedMediumSnapshot world, HostCommand command, string? instance)
+    {
+        if (!ServiceNames.IsValid(instance))
+            return JsonSerializer.SerializeToElement(new { status = "invalid_request" });
+        if (services.QueryService(command.DeliveryId, instance!, false) is not { } target)
+            return JsonSerializer.SerializeToElement(new { status = "empty" });
+        var route = NetworkDiagnostics.Route(world, target.Origin, target.Target, ReachBudget);
+        if (route.State != NetworkDiagnostics.Reachable)
+            return JsonSerializer.SerializeToElement(new { status = "unreachable", instance });
+        return JsonSerializer.SerializeToElement(new
+        {
+            status = route.Truncated ? "partial" : "complete", instance, hops = route.Hops,
+            radioHops = route.Nodes.Count(hop => hop.Radio), path = Path(route)
+        });
     }
 
     private static JsonElement Instance(ServiceRuntime services, SharedMediumSnapshot world, HostCommand command, string? instance)

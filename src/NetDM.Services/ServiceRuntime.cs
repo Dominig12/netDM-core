@@ -145,6 +145,10 @@ public sealed class ServiceRuntime
         public string Domain = domain;
         public int ActiveOperations;
         public int PendingCommands;
+        /// <summary>The endpoint's latest operations, oldest first, at most <see cref="RecentOperationsPerEndpoint"/>.</summary>
+        public readonly Queue<long> Recent = new();
+        /// <summary>Counts this endpoint's operations created and outcomes recorded.</summary>
+        public long OperationsRevision;
         public readonly HashSet<string> Services = new(StringComparer.Ordinal);
         public readonly Dictionary<string, long> Subscriptions = new(StringComparer.Ordinal);
         public readonly HashSet<long> Inbound = [];
@@ -232,6 +236,8 @@ public sealed class ServiceRuntime
     private int _activeDeliveries;
     /// <summary>Counts every service that appeared in or left the directory; see <see cref="QueryDirectory"/>.</summary>
     private long _directoryRevision;
+    /// <summary>Operations an endpoint can list as its jobs (§14.5 job status).</summary>
+    public const int RecentOperationsPerEndpoint = 16;
     private long _published, _created, _applied, _rejected, _failed;
 
     public ServiceRuntime(SchemaRegistry schemas, Func<long> clock, ServiceRuntimeOptions? options = null)
@@ -396,6 +402,15 @@ public sealed class ServiceRuntime
             return Require(requester, out var asker) == ServiceStatus.Ok && _services.TryGetValue(instance, out var target) &&
                 Require(target.Owner, out var owner) == ServiceStatus.Ok && Allows(target.Policy.Discover, asker!, owner!)
                 ? Descriptor(target) : null;
+    }
+
+    /// <summary>The node of a service the requester may discover, or null: hidden and missing look the same.</summary>
+    public NodeId? DiscoverableNode(EndpointKey requester, string instance)
+    {
+        lock (_gate)
+            return Require(requester, out var asker) == ServiceStatus.Ok && _services.TryGetValue(instance, out var target) &&
+                Require(target.Owner, out var owner) == ServiceStatus.Ok && Allows(target.Policy.Discover, asker!, owner!)
+                ? owner!.Node : null;
     }
 
     /// <summary>Resolves the original provider and checks the current invocation policy for a resident command.</summary>
@@ -780,6 +795,38 @@ public sealed class ServiceRuntime
     /// The initiator's own view of its operation: acceptance and outcome codes only.
     /// The result payload reaches the initiator exclusively by network delivery.
     /// </summary>
+    /// <summary>
+    /// Changes whenever an operation of the endpoint is created or gets its outcome: a change index for what
+    /// watches its jobs. -1 when the endpoint is not attached.
+    /// </summary>
+    public long OperationsRevisionOf(EndpointKey initiator)
+    {
+        lock (_gate)
+            return Require(initiator, out var record) == ServiceStatus.Ok ? record!.OperationsRevision : -1;
+    }
+
+    /// <summary>
+    /// The initiator's own latest operations, newest first: its jobs. Only operations of this endpoint
+    /// generation are listed; null when the endpoint is not attached.
+    /// </summary>
+    public IReadOnlyList<OperationView>? RecentOperations(EndpointKey initiator, int max)
+    {
+        lock (_gate)
+        {
+            if (Require(initiator, out var record) != ServiceStatus.Ok)
+                return null;
+            var views = new List<OperationView>(Math.Min(max, RecentOperationsPerEndpoint));
+            foreach (var id in record!.Recent.Reverse())
+            {
+                if (views.Count >= max)
+                    break;
+                if (_operations.TryGetValue(id, out var operation) && operation.Initiator == initiator)
+                    views.Add(View(operation));
+            }
+            return views;
+        }
+    }
+
     public (ServiceStatus Status, OperationView? Operation) Operation(EndpointKey initiator, long operationId)
     {
         lock (_gate)
@@ -1099,6 +1146,10 @@ public sealed class ServiceRuntime
             CountsTowardsInitiator = countsTowardsInitiator
         };
         _operations.Add(operation.Id, operation);
+        initiator.OperationsRevision++;
+        initiator.Recent.Enqueue(operation.Id);
+        if (initiator.Recent.Count > RecentOperationsPerEndpoint)
+            initiator.Recent.Dequeue();
         if (countsTowardsInitiator)
             initiator.ActiveOperations++;
         var request = Create(DeliveryKind.Command, provider, initiator, service.Instance, definition.Arguments,
@@ -1116,6 +1167,8 @@ public sealed class ServiceRuntime
             return;
         operation.Outcome = outcome;
         operation.OutcomeReason = reason;
+        if (_endpoints.TryGetValue(operation.Initiator.Id, out var asker) && asker.Key == operation.Initiator)
+            asker.OperationsRevision++;
         if (operation.CountsTowardsInitiator && _endpoints.TryGetValue(operation.Initiator.Id, out var initiator) &&
             initiator.Key == operation.Initiator)
             initiator.ActiveOperations--;
