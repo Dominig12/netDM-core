@@ -102,6 +102,10 @@ public static class ShellPrograms
         public string Name = "", Instance = "", State = "running", Reason = "", Resume = "running", ThrottledFrom = "running";
         public EndpointKey Owner, Provider;
         public string? Rule;
+        /// <summary>The text it was started from: a device that keeps it on its media starts it again with it.</summary>
+        public string? Source;
+        /// <summary>Kept on the device's media: it waits for its endpoint to come back like a restored program.</summary>
+        public bool Kept;
         public string[] Phases = [];
         public string? LastEvent;
         public int Phase, Runs;
@@ -132,7 +136,7 @@ public static class ShellPrograms
     private sealed record SavedProgram(int Id, string Name, string Instance, string OwnerId, ulong OwnerGeneration, string ProviderId,
         ulong ProviderGeneration, string? Rule, string[] Phases, string? LastEvent, int Phase, int Runs, string State, string Resume,
         string ThrottledFrom, string Reason, long Fuel, bool InPhase, List<Dictionary<string, JsonElement>> Sent,
-        List<Dictionary<string, JsonElement>> Event);
+        List<Dictionary<string, JsonElement>> Event, string? Source = null, bool Kept = false);
 
     private sealed record SavedFile(int Version, Guid Round, int NextId, List<SavedProgram> Programs);
 
@@ -195,7 +199,7 @@ public static class ShellPrograms
             Provider = new EndpointKey(saved.ProviderId, saved.ProviderGeneration), Rule = saved.Rule, Phases = saved.Phases,
             LastEvent = saved.LastEvent, Phase = saved.Phase, Runs = saved.Runs, State = saved.State, Resume = saved.Resume,
             ThrottledFrom = saved.ThrottledFrom, Reason = saved.Reason, Fuel = saved.Fuel, Sent = saved.Sent.Select(Record).ToArray(),
-            Event = saved.Event.Select(Record).ToArray(), Detached = true, SuspendedAt = now
+            Event = saved.Event.Select(Record).ToArray(), Source = saved.Source, Kept = saved.Kept, Detached = true, SuspendedAt = now
         };
         if (saved.InPhase)
         {
@@ -242,7 +246,7 @@ public static class ShellPrograms
         var file = new SavedFile(FileVersion, _round, _nextId, Programs.Where(program => !program.Finished).Select(program => new SavedProgram(
             program.Id, program.Name, program.Instance, program.Owner.Id, program.Owner.Generation, program.Provider.Id, program.Provider.Generation,
             program.Rule, program.Phases, program.LastEvent, program.Phase, program.Runs, program.State, program.Resume, program.ThrottledFrom,
-            program.Reason, program.Fuel, program.InPhase, Fields(program.Sent), Fields(program.Event))).ToList());
+            program.Reason, program.Fuel, program.InPhase, Fields(program.Sent), Fields(program.Event), program.Source, program.Kept)).ToList());
         var text = JsonSerializer.Serialize(file);
         // What "programs" shows, without fuel: a rule's own spending must not wake it again.
         var visible = string.Join(";", Programs.Select(program =>
@@ -310,8 +314,29 @@ public static class ShellPrograms
         object Refuse(string status, string error, int position = 0) => new { status, error = ShellHost.Printable(error), position };
         if (!ServiceNames.IsValid(name))
             return JsonSerializer.SerializeToElement(Refuse("invalid_argument", "a program needs a name of letters, digits, '.', '_' or '-'"));
-        if (Programs.Count(program => !program.Finished) >= MaxTotal ||
-            Programs.Count(program => !program.Finished && program.Instance == command.Instance) >= MaxPerDevice)
+
+        // A device that keeps the program on its media asks for it on every attach ("ensure"). The program of
+        // the same name it already runs is taken over by its current endpoint generation and keeps its state:
+        // phase, last observation, runs. Only the same endpoint may take it over, and never an older generation.
+        var ensure = arguments.TryGetProperty("ensure", out var ensureFlag) &&
+            (ensureFlag.ValueKind == JsonValueKind.True || (ensureFlag.ValueKind == JsonValueKind.Number && ensureFlag.TryGetInt32(out var one) && one == 1));
+        var kept = ensure ? Programs.Find(program => !program.Finished && program.Name == name && program.Instance == command.Instance &&
+            program.Owner.Id == command.InitiatorKey.Id && program.Provider.Id == command.ProviderKey.Id) : null;
+        if (kept is not null && (kept.Owner.Generation > command.InitiatorKey.Generation || kept.Provider.Generation > command.ProviderKey.Generation))
+            return JsonSerializer.SerializeToElement(Refuse("invalid_argument", "a newer endpoint of this device runs the program"));
+        if (kept is not null && kept.Source == text)
+        {
+            applied = () =>
+            {
+                kept.Owner = command.InitiatorKey;
+                kept.Provider = command.ProviderKey;
+                kept.Kept = true;
+                kept.DetachedSince = 0;
+            };
+            return JsonSerializer.SerializeToElement(new { status = "running", program = kept.Id });
+        }
+        if (Programs.Count(program => !program.Finished && program != kept) >= MaxTotal ||
+            Programs.Count(program => !program.Finished && program != kept && program.Instance == command.Instance) >= MaxPerDevice)
             return JsonSerializer.SerializeToElement(Refuse("limit_exceeded", $"a device holds at most {MaxPerDevice} programs"));
 
         // "on <pipeline>" is the first line; "wait" on a line of its own separates the phases.
@@ -367,11 +392,13 @@ public static class ShellPrograms
         var started = new Program
         {
             Id = ++_nextId, Name = name, Instance = command.Instance, Owner = command.InitiatorKey, Provider = command.ProviderKey,
-            Rule = rule, Phases = phases.Select(phase => phase.Source).ToArray(),
+            Rule = rule, Source = text, Kept = ensure, Phases = phases.Select(phase => phase.Source).ToArray(),
             State = rule is null ? "running" : "watching"
         };
         applied = () =>
         {
+            if (kept is not null)
+                Programs.Remove(kept); // The media holds a new text: it replaces the running one.
             Programs.RemoveAll(program => program.Finished && program.Instance == command.Instance && program.Owner == command.InitiatorKey);
             if (Programs.Count == MaxTotal)
                 Programs.RemoveAt(Programs.FindIndex(program => program.Finished));
@@ -430,7 +457,7 @@ public static class ShellPrograms
             if (session.Services.ResidentCommandNode(program.Owner, program.Provider, program.Instance) is not { } origin)
             {
                 // A program carried into a new runtime waits for its endpoints; any other leaves with them.
-                if (program.Detached && !program.Finished)
+                if ((program.Detached || program.Kept) && !program.Finished)
                 {
                     if (program.DetachedSince == 0)
                         program.DetachedSince = now;

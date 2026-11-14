@@ -404,15 +404,16 @@ public sealed class SchemaRegistry
         registry.Register(new SchemaDefinition("shell.program_request", 1, 0,
         [
             new SchemaField("name", SchemaFieldType.Text, true, MaxLength: 32),
-            new SchemaField("source", SchemaFieldType.MultilineText, true, MaxLength: NetShell.MaxScriptLength)
-        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["name", "source"] }, MaxPayloadBytes: 4096));
+            new SchemaField("source", SchemaFieldType.MultilineText, true, MaxLength: NetShell.MaxScriptLength),
+            new SchemaField("ensure", SchemaFieldType.Boolean, false)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["name", "source", "ensure"] }, MaxPayloadBytes: 4096));
         registry.Register(new SchemaDefinition("shell.stop_request", 1, 0,
             [new SchemaField("program", SchemaFieldType.Integer, true, 1, 1_000_000_000)],
             new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["program"] }, MaxPayloadBytes: 64));
         registry.Register(new SchemaDefinition("shell.program", 1, 0,
         [
             new SchemaField("status", SchemaFieldType.Enum, true, Values:
-                ["started", "stopped", "unknown_program", "parse_error", "unknown_command", "invalid_argument", "limit_exceeded"]),
+                ["started", "running", "stopped", "unknown_program", "parse_error", "unknown_command", "invalid_argument", "limit_exceeded"]),
             new SchemaField("program", SchemaFieldType.Integer, false, 0, 1_000_000_000),
             new SchemaField("error", SchemaFieldType.Text, false, MaxLength: 200),
             new SchemaField("position", SchemaFieldType.Integer, false, 0, 4096)

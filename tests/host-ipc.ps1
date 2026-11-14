@@ -1391,6 +1391,24 @@ end
     Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '2'
         changes = @(@{ op = 'node_state'; a = '3'; powered = 1; operational = 1 }) }).ok) 'APC 3 has power for the rest of the run'
 
+    # Programs kept on a device's media: the device asks for each of them with ensure on every attach. The
+    # program it already runs answers "running" and keeps its number, also for a new endpoint generation.
+    $keepSource = "on links | where state -ne up`ninvoke netdiag.apc2 link_state reason=keep"
+    $kept = Invoke-Program 'start' @{ name = 'keeper'; source = $keepSource; ensure = $true } '2'
+    Assert-True ($kept.status -ceq 'started') "a kept program starts: $($kept | ConvertTo-Json -Compress)"
+    $again = Invoke-Program 'start' @{ name = 'keeper'; source = $keepSource; ensure = $true } '2'
+    Assert-True ($again.status -ceq 'running' -and $again.program -eq $kept.program) "ensure does not start it twice: $($again | ConvertTo-Json -Compress)"
+    $engineer = @{ endpoint = 'eng-1'; generation = '3' }
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '1' } + $engineer)).ok) 'the console attaches with a new generation'
+    Start-Sleep -Milliseconds 600
+    $adopted = Invoke-Program 'start' @{ name = 'keeper'; source = $keepSource; ensure = $true } '2'
+    Assert-True ($adopted.status -ceq 'running' -and $adopted.program -eq $kept.program) "the new generation takes the kept program over: $($adopted | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Shell 'programs | select program name state' '2').rows -ceq "program=$($kept.program),name=keeper,state=watching") 'the kept program is listed for its new owner'
+    $changed = Invoke-Program 'start' @{ name = 'keeper'; source = "on self`ninvoke netdiag.apc2 link_state reason=kept2"; ensure = $true } '2'
+    Assert-True ($changed.status -ceq 'started' -and $changed.program -ne $kept.program) "a new text on the media replaces the program: $($changed | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Shell 'programs | select program name' '2').rows -ceq "program=$($changed.program),name=keeper") 'only the replacement is left'
+    Assert-True ((Invoke-Program 'stop' @{ program = $changed.program } '2').status -ceq 'stopped') 'the kept program is stopped by its owner'
+
     if ($IsLinux) {
         Assert-StartupRejected $socketPath
         Assert-True ((Invoke-Next @{ op = 'game_stats' }).game.nodes -eq 3) 'second Host does not unlink live socket'
