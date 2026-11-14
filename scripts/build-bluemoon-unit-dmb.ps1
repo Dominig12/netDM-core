@@ -17,6 +17,7 @@ $build = (Resolve-Path -LiteralPath $BuildDirectory).Path
 $files = @('tgstation.dme', 'code/game/world.dm', 'code/game/area/areas.dm', 'code/controllers/subsystem/netdm_observe.dm',
     'code/__DEFINES/netdm.dm', 'code/modules/netdm/netdm_bridge.dm', 'code/modules/netdm/apc_map.dm',
     'code/modules/netdm/netdm_node.dm', 'code/modules/netdm/topology_view.dm',
+    'code/modules/netdm/camera_access.dm', 'code/game/machinery/computer/camera.dm', 'code/modules/atmospherics/machinery/airalarm.dm',
     'code/modules/netdm/netdm_services.dm', 'code/modules/netdm/network_diagnostics.dm', 'code/modules/netdm/network_terminal.dm', 'code/modules/netdm/netdm_service_lane.dm', 'code/modules/netdm/atmos_telemetry.dm', 'code/modules/netdm/research_shadow.dm', 'code/modules/netdm/messenger_shadow.dm', 'code/modules/netdm/messenger_relay.dm', 'code/modules/netdm/radio_shadow.dm', 'code/modules/netdm/radio_uplink.dm', 'code/modules/netdm/door_control_shadow.dm', 'code/modules/research/techweb/netdm_research_hooks.dm', 'code/modules/admin/admin_verbs.dm',
     'code/modules/buildmode/submodes/area_edit.dm', 'code/modules/lighting/lighting_turf.dm',
     'code/modules/power/apc.dm', 'code/modules/shuttle/docking.dm', 'code/controllers/subsystem/mapping.dm',

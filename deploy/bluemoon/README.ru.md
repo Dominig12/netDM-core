@@ -29,3 +29,18 @@ MariaDB создаёт базовую схему, BlueMoon, whitelist и mentor 
 Чтобы собрать архив заново, выполните штатный `tools/build/build.bat build --warnings-as-errors` в отдельном checkout игры, соберите Win32 bridge (без Visual Studio: `scripts/build-bridge-mingw.ps1`) и выполните `dotnet publish src/NetDM.Host -c Release -r win-x64 --self-contained`. Передайте собранные каталоги, чистый экспорт исходников и `bin` BYOND 516.1688 в `Build-WindowsBundle.ps1`. MariaDB ZIP автоматически скачивается с архива вендора и проверяется по SHA-256. Подайте разрешённые VC++ redistributable DLL нужной архитектуры через `-VcRuntimeBin` и `-VcRuntime64Bin`. `Test-WindowsBundle.ps1` проверяет свежую распаковку с системным PATH, собственными портами, пустой базой, recovery и остановкой мира.
 
 Версии BYOND и Node соответствуют `dependencies.sh` игры. Linux BYOND поставляется из закреплённого OCI-образа. Windows сборка использует файлы BYOND из дистрибутива 516.1688. [Релиз rust-g 6.2.0](https://github.com/tgstation/rust-g/releases/tag/6.2.0) · [Portable MariaDB для Windows](https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/installing-mariadb/binary-packages/installing-mariadb-windows-zip-packages).
+
+## Стенд для ручной проверки на Windows
+
+Нужны Git, .NET 10 SDK, Node.js 24, Visual Studio с C++ (CMake входит в набор «Разработка классических приложений на C++») и BYOND 516.1688. Оба репозитория кладутся рядом по короткому пути, иначе DreamMaker упирается в длину пути:
+
+```powershell
+mkdir C:\netdm; cd C:\netdm
+git clone -b feature/byond-native-bridge https://github.com/Dominig12/netDM-core.git
+git clone -b net-feature-dmcore-new https://github.com/Dominig12/MOLOT-BlueMoon-Station.git
+cd netDM-core
+pwsh -File scripts\setup-bluemoon-stand.ps1
+pwsh -File scripts\play-bluemoon.ps1 -Map metastation -NetworkCameras
+```
+
+`setup-bluemoon-stand.ps1` проверяет инструменты, собирает Win32 bridge через Visual Studio, экспортирует исходники BlueMoon в `TestResults\p1\game-src` и ставит пакеты TGUI. Он нужен один раз на checkout. `play-bluemoon.ps1` собирает Host, TGUI и мир, запускает их и печатает адрес для DreamSeeker и список того, что проверить. Режимы: `-Mode shadow|authoritative` (исследования, мессенджер, радио), `-NetworkCameras` (охранные консоли через сеть), `-Map metastation|boxstation|runtime`, `-NoBuild` для повторного запуска без сборки. Остановка — Ctrl+C или файл `TestResults\p1\game-src\netdm-stand.stop`.

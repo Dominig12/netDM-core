@@ -375,6 +375,28 @@ try {
     $descriptor = Wait-Item 'console-1' 'result'
     Assert-True ($null -ne $descriptor -and $descriptor.command -ceq 'directory.describe' -and $descriptor.payload.instance -ceq 'pump-1' -and
         $descriptor.payload.commands -ceq 'set_power') 'descriptor returns over the network'
+    Assert-True ((Invoke-Next @{ op = 'delivery_ack'; acks = @(@{ deliveryId = $descriptor.deliveryId; applied = $true }) }).ok) 'console ACKs descriptor'
+
+    $camera = @{ endpoint = 'camera-provider'; generation = '1' }
+    $cameraConsole = @{ endpoint = 'camera-console'; generation = '1' }
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '3'; domain = 'camera' } + $camera)).ok) 'attach camera'
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '1'; domain = 'camera' } + $cameraConsole)).ok) 'attach camera console'
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'camera.test'; serviceType = 'camera.access'
+        schema = 'camera.access'; major = 1; minor = 0 } + $camera)).ok) 'register typed camera access'
+    $cameraScan = Invoke-Next (@{ op = 'discover'; serviceType = 'camera.access'; scanKey = 'scan-camera'; trafficClass = 1 } + $console)
+    Assert-True ($cameraScan.ok -and $cameraScan.result.value.probes -eq 0) 'station console cannot discover the camera'
+    $cameraInvoke = @{ op = 'invoke'; instance = 'camera.test'; command = 'acquire'; idempotencyKey = 'cam-console-1'
+        arguments = @{ request = 'cam-console-1' }; trafficClass = 1; timeoutTicks = 60 }
+    Assert-True ((Invoke-Next ($cameraInvoke + $console)).error -ceq 'unknown_service') 'station endpoint cannot request a camera feed'
+    Assert-True ((Invoke-Next ($cameraInvoke + $cameraConsole)).ok) 'camera console requests a feed'
+    $acquire = Wait-Item 'camera-provider' 'command'
+    Assert-True ($null -ne $acquire -and $acquire.producer -ceq 'camera-console' -and $acquire.payload.request -ceq 'cam-console-1') 'camera receives a typed request with the console identity'
+    Assert-True ((Invoke-Next @{ op = 'delivery_ack'; acks = @(@{ deliveryId = $acquire.deliveryId; applied = $true
+        result = @{ request = 'cam-console-1'; state = 'ready' } }) }).result.acks[0].state -ceq 'applied') 'camera replies with readiness'
+    $cameraResult = Wait-Item 'camera-console' 'result'
+    Assert-True ($null -ne $cameraResult -and $cameraResult.payload.state -ceq 'ready' -and
+        $cameraResult.operationId -ceq $acquire.operationId) 'camera readiness returns to the requesting console'
+    Assert-True ((Invoke-Next @{ op = 'delivery_ack'; acks = @(@{ deliveryId = $cameraResult.deliveryId; applied = $true }) }).ok) 'camera console ACKs result'
 
     # An area-only change cuts the cross-level leg while keeping the runtime, receipts and services.
     function Stage-Map([string] $UpdateId, [string] $Sequence, [string] $Facts, [int] $Count = $mapFacts.Count) {

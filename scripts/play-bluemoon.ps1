@@ -6,6 +6,7 @@
     [ValidateSet('', 'shadow', 'authoritative')] [string] $ResearchMode = '',
     [ValidateSet('', 'shadow', 'authoritative')] [string] $MessengerMode = '',
     [ValidateSet('', 'shadow', 'authoritative')] [string] $RadioMode = '',
+    [switch] $NetworkCameras,
     [int] $GamePort = 51515,
     [int] $Minutes = 240,
     # Skip the Host and DMB builds and start what was built last time.
@@ -33,6 +34,15 @@ if (-not $NoBuild) {
     Write-Host '== Building the netDM Host'
     dotnet build src/NetDM.Host -c Release -v quiet -nologo | Select-String -Pattern ' error |Build succeeded' | ForEach-Object { $_.Line }
     if ($LASTEXITCODE -ne 0) { throw 'The Host build failed.' }
+    Write-Host '== Building TGUI'
+    Push-Location (Join-Path $GameRepository 'tgui')
+    try {
+        $yarn = Get-ChildItem -LiteralPath '.yarn/releases' -Filter 'yarn-*.cjs' | Select-Object -First 1
+        if (!$yarn) { throw 'The pinned Yarn release is missing.' }
+        node $yarn.FullName run tgui:build
+        if ($LASTEXITCODE -ne 0) { throw 'The TGUI build failed.' }
+    }
+    finally { Pop-Location }
     # A playable world: no unit tests; the runtime station is forced by LOWMEMORYMODE, other maps by next_map.json.
     $defines = if ($Map -eq 'runtime') { 'CBT,LOWMEMORYMODE' } else { 'CBT' }
     Write-Host "== Building BlueMoon ($defines), a few minutes"
@@ -41,12 +51,25 @@ if (-not $NoBuild) {
     if ($LASTEXITCODE -ne 0) { throw 'The DMB build failed.' }
 }
 if ($Map -ne 'runtime') {
-    Copy-Item -LiteralPath (Join-Path $BuildDirectory "data/netdm-audit/$Map.json") -Destination (Join-Path $BuildDirectory 'data/next_map.json') -Force
+    # The station alone: no mining level or space ruins, as the map audit loads it. A fresh machine has no
+    # audit configs yet, so the config is made from the map's own one.
+    $config = Join-Path $BuildDirectory "data/netdm-audit/$Map.json"
+    if (-not (Test-Path -LiteralPath $config)) {
+        $source = Get-Content -LiteralPath (Join-Path $BuildDirectory "_maps/$Map.json") -Raw | ConvertFrom-Json -AsHashtable
+        $source.minetype = 'none'
+        $source.space_ruin_levels = 0
+        $source.space_empty_levels = 0
+        $source.Remove('map_variants')
+        $null = New-Item -ItemType Directory -Force -Path (Split-Path $config)
+        Set-Content -LiteralPath $config -Value ($source | ConvertTo-Json -Depth 8)
+    }
+    Copy-Item -LiteralPath $config -Destination (Join-Path $BuildDirectory 'data/next_map.json') -Force
 }
 
 Write-Host @"
 
 == Стенд netDM: карта=$Map исследования=$research мессенджер=$messenger радио=$radio
+Сетевые камеры: $($NetworkCameras.IsPresent)
 Подключение: DreamSeeker -> Open location -> byond://127.0.0.1:$GamePort
 Локальное подключение получает права админа. Раунд: в лобби Start Now (вкладка Server) или Ready.
 
@@ -63,10 +86,14 @@ Write-Host @"
     - Говорить в общий канал из разных отделов: слышат все.
     - Вдали от APC гарнитура не дотягивается до телекомма; обычная рация через 2 с шлёт резерв.
     - Выключить приёмники телекомма: речь по подпространству никто не слышит.
+  Камеры (-NetworkCameras)
+    - Открыть охранную консоль, выбрать камеру в другой зоне и дождаться изображения.
+    - Обесточить АПЦ камеры, дождаться помех, затем вернуть питание.
   Админ: вкладка Debug -> "netDM Topology" рисует сеть; строки состояния netDM в логе мира.
 
 Логи: $BuildDirectory\netdm-stand-*.log и $BuildDirectory\data\logs\
 Остановка: Ctrl+C или файл $BuildDirectory\netdm-stand.stop
 "@
 pwsh -NoProfile -File scripts\start-bluemoon-stand.ps1 -BuildDirectory $BuildDirectory -BridgeDll $BridgeDll -GamePort $GamePort `
-    -Minutes $Minutes -ResearchMode $research -MessengerMode $messenger -RadioMode $radio -DreamDaemon $dreamDaemon
+    -Minutes $Minutes -ResearchMode $research -MessengerMode $messenger -RadioMode $radio -DreamDaemon $dreamDaemon `
+    -NetworkCameras:$($NetworkCameras.IsPresent)

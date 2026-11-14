@@ -5,6 +5,8 @@
 /datum/unit_test/netdm_observe/area_map/power_state
 /datum/unit_test/netdm_observe/area_map/network_diagnostics
 /datum/unit_test/netdm_observe/area_map/network_terminal
+/datum/unit_test/netdm_observe/area_map/network_cameras
+/datum/unit_test/netdm_observe/area_map/network_air_alarm
 /datum/unit_test/netdm_observe/area_map/atmos_telemetry
 /datum/unit_test/netdm_observe/area_map/messenger_shadow
 /datum/unit_test/netdm_observe/area_map/messenger_authoritative

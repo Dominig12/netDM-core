@@ -15,6 +15,7 @@ param(
     [ValidateSet('shadow', 'authoritative')] [string] $MessengerMode = 'shadow',
     # 'authoritative': radio speech reaches telecomms receivers over netDM (P8).
     [ValidateSet('shadow', 'authoritative')] [string] $RadioMode = 'shadow',
+    [switch] $NetworkCameras,
     [string] $HostDll = 'src/NetDM.Host/bin/Release/net10.0/NetDM.Host.dll',
     [string] $DreamDaemon = (Join-Path ${env:ProgramFiles(x86)} 'BYOND/bin/dd.exe')
 )
@@ -46,6 +47,7 @@ try {
         -WorkingDirectory $build -Environment ($common + @{ NETDM_OBSERVE = '1'; NETDM_SERVER_ID = 'stand'; NETDM_RESEARCH_MODE = $ResearchMode
             NETDM_MESSENGER_MODE = $MessengerMode
             NETDM_RADIO_MODE = $RadioMode
+            NETDM_CAMERA_MODE = $(if ($NetworkCameras) { 'authoritative' } else { 'legacy' })
             NETDM_BRIDGE_WAIT = $BridgeWait; NETDM_BRIDGE_TRACE = $(if ($BridgeTrace) { '1' } else { '0' }) }) -NoNewWindow -PassThru `
         -RedirectStandardOutput (& $log 'dd') -RedirectStandardError (& $log 'dd-err')
     Write-Host "STAND_READY game=byond://127.0.0.1:$GamePort host=http://127.0.0.1:$httpPort stop=$stop"

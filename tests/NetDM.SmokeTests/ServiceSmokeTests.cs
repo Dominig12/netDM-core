@@ -18,12 +18,41 @@ static class ServiceSmokeTests
         CheckBounds();
         CheckOutboxBackpressure();
         CheckCommands();
+        CheckCameraOperationRetention();
         CheckPoliciesAndDiscovery();
         CheckTelemetrySnapshot();
         CheckHostProvidedCommands();
         CheckMessenger();
         CheckDirectoryQuery();
         Console.WriteLine("P2 service foundation, P4 telemetry snapshot, P7 messenger and P10 directory query checks passed.");
+    }
+
+    private static void CheckCameraOperationRetention()
+    {
+        var stand = new Stand(new ServiceRuntimeOptions(MaxOperations: 1));
+        var services = stand.Services;
+        var console = new EndpointKey("camera-console", 1);
+        var camera = new EndpointKey("camera-device", 1);
+        Check(services.AttachEndpoint(console, new NodeId(1), "camera") == ServiceStatus.Ok &&
+            services.AttachEndpoint(camera, new NodeId(3), "camera") == ServiceStatus.Ok, "attach the camera system");
+        Check(services.RegisterService(camera, "camera.front", "camera.access", "camera.access", 1, 0) == ServiceStatus.Ok,
+            "register camera access");
+        InvokeResult Acquire(string key) => services.Invoke(console, "camera.front", "acquire", key,
+            Json("""{"request":"feed"}"""), 35, PacketTrafficClass.Interactive);
+        var initial = Acquire("feed-1");
+        Check(initial.Status == ServiceStatus.Ok, "request the feed");
+        stand.Settle();
+        var request = Inbox(stand, "camera-device", "command").Single();
+        Check(services.Acknowledge(request.DeliveryId, true, null, Json("""{"request":"feed","state":"ready"}""")).Status == ServiceStatus.Ok,
+            "confirm the feed");
+        stand.Settle();
+        var result = Inbox(stand, "camera-console", "result").Single();
+        Check(services.Acknowledge(result.DeliveryId, true, null, null).Status == ServiceStatus.Ok, "acknowledge the confirmation");
+        Check(Acquire("feed-1").Status == ServiceStatus.Duplicate && Acquire("feed-2").Status == ServiceStatus.LimitExceeded,
+            "the completed operation keeps its idempotency key for retries");
+        stand.Advance(1_200);
+        Check(Acquire("feed-2").Status == ServiceStatus.Ok && services.Operation(console, initial.Operation!.OperationId).Status == ServiceStatus.Unknown,
+            "an old camera operation leaves room for a new lease");
     }
 
     /// <summary>

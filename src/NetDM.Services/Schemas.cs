@@ -56,7 +56,7 @@ public sealed class CanonicalPayload
 /// the request physically reaches the provider; DM never sees them.
 /// </summary>
 public sealed record CommandDefinition(string ServiceType, string Name, SchemaDefinition Arguments,
-    SchemaDefinition Result, bool HostHandled = false);
+    SchemaDefinition Result, bool HostHandled = false, bool Transient = false);
 
 public sealed class SchemaRegistry
 {
@@ -97,6 +97,19 @@ public sealed class SchemaRegistry
             new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["reason"] }, MaxPayloadBytes: 64));
         registry.RegisterCommand("atmos.telemetry", "sample", "atmos.sample_request", 1, "atmos.sample", 1);
 
+        registry.Register(new SchemaDefinition("atmos.alarm_read", 1, 0,
+            [new SchemaField("reason", SchemaFieldType.Enum, true, Values: ["inspect"])],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["reason"] }, MaxPayloadBytes: 64));
+        registry.Register(new SchemaDefinition("atmos.alarm_state", 1, 0,
+        [
+            new SchemaField("pressureKPa", SchemaFieldType.Number, true, 0, 1_000_000),
+            new SchemaField("temperatureK", SchemaFieldType.Number, true, 0, 1_000_000),
+            new SchemaField("danger", SchemaFieldType.Integer, true, 0, 2),
+            new SchemaField("alarm", SchemaFieldType.Boolean, true)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["pressureKPa", "temperatureK", "danger", "alarm"] },
+            MaxPayloadBytes: 160));
+        registry.RegisterCommand("atmos.alarm", "read", "atmos.alarm_read", 1, "atmos.alarm_state", 1);
+
         // machine.control: an idempotent set_state command, never a toggle.
         registry.Register(new SchemaDefinition("machine.power_state", 1, 0,
         [
@@ -131,6 +144,16 @@ public sealed class SchemaRegistry
         ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["press", "state", "bolted", "changed", "reason"] },
             MaxPayloadBytes: 256));
         registry.RegisterCommand("machine.door", "set_state", "machine.door_set", 1, "machine.door_state", 1);
+
+        registry.Register(new SchemaDefinition("camera.acquire", 1, 0,
+            [new SchemaField("request", SchemaFieldType.Text, true, MaxLength: 32)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["request"] }, MaxPayloadBytes: 64));
+        registry.Register(new SchemaDefinition("camera.access", 1, 0,
+        [
+            new SchemaField("request", SchemaFieldType.Text, true, MaxLength: 32),
+            new SchemaField("state", SchemaFieldType.Enum, true, Values: ["ready", "offline", "denied"])
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["request", "state"] }, MaxPayloadBytes: 96));
+        registry.RegisterCommand("camera.access", "acquire", "camera.acquire", 1, "camera.access", 1, transient: true);
 
         // research.server (P5): the Host runs the server's storage. Points on the wire are whole points;
         // the ledger keeps milli-points. A purchase quotes the price the user saw, so a changed price
@@ -544,7 +567,7 @@ public sealed class SchemaRegistry
     }
 
     public void RegisterCommand(string serviceType, string name, string argumentsSchema, int argumentsMajor,
-        string resultSchema, int resultMajor, bool hostHandled = false)
+        string resultSchema, int resultMajor, bool hostHandled = false, bool transient = false)
     {
         var arguments = Find(argumentsSchema, argumentsMajor);
         var result = Find(resultSchema, resultMajor);
@@ -552,7 +575,7 @@ public sealed class SchemaRegistry
             arguments is null || result is null || !arguments.Projections.ContainsKey("full") ||
             !result.Projections.ContainsKey("full"))
             throw new ArgumentException("Invalid command definition.");
-        if (!_commands.TryAdd((serviceType, name), new CommandDefinition(serviceType, name, arguments, result, hostHandled)))
+        if (!_commands.TryAdd((serviceType, name), new CommandDefinition(serviceType, name, arguments, result, hostHandled, transient)))
             throw new ArgumentException($"Command '{serviceType}/{name}' is already registered.");
         if (!_commandNames.TryGetValue(serviceType, out var names))
             _commandNames[serviceType] = names = [];

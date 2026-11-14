@@ -223,6 +223,7 @@ public sealed class ServiceRuntime
     private readonly Dictionary<long, DeliveryRecord> _deliveries = new();
     private readonly Dictionary<long, OperationRecord> _operations = new();
     private readonly Dictionary<(string Instance, string Key), long> _operationKeys = new();
+    private readonly Queue<(long Id, long Expires)> _transientOperations = new();
     private readonly Dictionary<(EndpointKey Requester, string Scan), (string ServiceType, long[] Operations)> _scans = new();
     private readonly Queue<long> _history = new();
     private readonly SortedDictionary<long, DeliveryRecord> _inbox = new();
@@ -238,6 +239,8 @@ public sealed class ServiceRuntime
     private long _directoryRevision;
     /// <summary>Operations an endpoint can list as its jobs (§14.5 job status).</summary>
     public const int RecentOperationsPerEndpoint = 16;
+    // Two minutes at 100 ms/tick, enough to recover a lost response before refreshing a read-only lease.
+    private const int TransientOperationTicks = 1200;
     private long _published, _created, _applied, _rejected, _failed;
 
     public ServiceRuntime(SchemaRegistry schemas, Func<long> clock, ServiceRuntimeOptions? options = null)
@@ -764,6 +767,7 @@ public sealed class ServiceRuntime
             status = _schemas.Validate(definition.Arguments, definition.Arguments.Minor, arguments, out var canonical);
             if (status != ServiceStatus.Ok)
                 return new InvokeResult(status, null);
+            ExpireTransientOperations();
             var digest = Hash($"{initiator.Id}\n{initiator.Generation}\n{command}\n{canonical!.Digest}");
             if (_operationKeys.TryGetValue((instance, idempotencyKey), out var existingId))
             {
@@ -781,6 +785,8 @@ public sealed class ServiceRuntime
             var operation = StartOperation(record, service, definition, canonical, digest, timeout, trafficClass, true);
             operation.IdempotencyKey = idempotencyKey;
             _operationKeys.Add((instance, idempotencyKey), operation.Id);
+            if (definition.Transient)
+                _transientOperations.Enqueue((operation.Id, _clock() + TransientOperationTicks));
             return new InvokeResult(ServiceStatus.Ok, View(operation));
         }
     }
@@ -968,6 +974,7 @@ public sealed class ServiceRuntime
         lock (_gate)
         {
             ExpireInbox();
+            ExpireTransientOperations();
             var items = new List<InboxItem>(limit);
             List<(DeliveryRecord Delivery, string Reason)>? revoked = null;
             var bytes = 0;
@@ -1167,6 +1174,23 @@ public sealed class ServiceRuntime
 
     private bool CanQueue(int count) => _activeDeliveries + count <= _options.MaxActiveDeliveries &&
         _outbox.Count + count <= _options.MaxActiveDeliveries;
+
+    private void ExpireTransientOperations()
+    {
+        var now = _clock();
+        while (_transientOperations.TryPeek(out var entry) && entry.Expires <= now)
+        {
+            _transientOperations.Dequeue();
+            var operation = _operations[entry.Id];
+            if (operation.Outcome == CommandOutcome.Pending || operation.ResultState == ResultLeg.InTransit)
+            {
+                _transientOperations.Enqueue((entry.Id, now + TransientOperationTicks));
+                continue;
+            }
+            _operations.Remove(entry.Id);
+            _operationKeys.Remove((operation.Instance, operation.IdempotencyKey));
+        }
+    }
 
     private OperationRecord StartOperation(EndpointRecord initiator, ServiceRecord service, CommandDefinition definition,
         CanonicalPayload arguments, string digest, int timeout, PacketTrafficClass trafficClass, bool countsTowardsInitiator)

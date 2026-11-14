@@ -9,6 +9,7 @@ param(
     # Map config JSON for UNIT_TESTS builds without LOWMEMORYMODE, relative to the build directory.
     [string] $Map,
     [switch] $NoObserve,
+    [switch] $NetworkCameras,
     # 'authoritative' lets the Host research ledger take over once the mirror is synchronized (P5 canary).
     [ValidateSet('shadow', 'authoritative')] [string] $ResearchMode = 'shadow',
     # 'authoritative' sends PDA messages through message servers over netDM instead of telecomms (P7).
@@ -59,6 +60,7 @@ try {
     $gameEnv.NETDM_RESEARCH_MODE = $ResearchMode
     $gameEnv.NETDM_MESSENGER_MODE = $MessengerMode
     $gameEnv.NETDM_RADIO_MODE = $RadioMode
+    if ($NetworkCameras) { $gameEnv.NETDM_CAMERA_MODE = 'authoritative' }
     $params = "log-directory=$LogDirectory&unit-test-list=$list"
     if ($Map) { $params += "&unit-test-map=$Map" }
     $started = Get-Date
