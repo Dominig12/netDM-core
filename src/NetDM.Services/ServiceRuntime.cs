@@ -298,6 +298,16 @@ public sealed class ServiceRuntime
     /// in ordinal instance order, at most <paramref name="max"/> of them. A service the requester may not
     /// discover is absent, exactly like one that does not exist. Null when the requester is unknown.
     /// </summary>
+    /// <summary>Changes whenever a service appears in or leaves the directory: a change index for watchers.</summary>
+    public long DirectoryRevision
+    {
+        get
+        {
+            lock (_gate)
+                return _directoryRevision;
+        }
+    }
+
     public DirectorySlice? QueryDirectory(string requester, string? serviceType, string? after, int max)
     {
         lock (_gate)

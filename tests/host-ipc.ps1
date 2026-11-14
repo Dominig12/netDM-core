@@ -1208,6 +1208,11 @@ try {
     Assert-True ($rule.status -ceq 'started') "a rule starts: $($rule | ConvertTo-Json -Compress)"
     Start-Sleep -Milliseconds 1600
     Assert-True ((Invoke-Shell 'programs | where name -eq port-watch | select state runs' '14').rows -ceq 'state=watching,runs=0') 'a rule does not run for what it first sees'
+    # Rules follow change indexes, not a clock: an unchanged network is not read again.
+    $fuelBefore = (Invoke-Shell 'programs | where name -eq port-watch | select fuel' '14').rows
+    Start-Sleep -Milliseconds 2600
+    $fuelAfter = (Invoke-Shell 'programs | where name -eq port-watch | select fuel' '14').rows
+    Assert-True ($fuelBefore -clike 'fuel=*' -and $fuelAfter -ceq $fuelBefore) "a rule is not evaluated while nothing it reads changes: $fuelBefore -> $fuelAfter"
     Clear-Results
     Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '15'
         changes = @(@{ op = 'node_state'; a = '3'; powered = 0; operational = 1 }) }).ok) 'APC 3 loses power under the rule'

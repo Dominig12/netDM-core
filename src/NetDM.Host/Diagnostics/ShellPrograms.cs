@@ -28,6 +28,22 @@ public static class ShellPrograms
     public const int MaxPerDevice = 4, MaxTotal = 64, MaxPhases = 4, MaxRuns = 100;
     public const int EvaluateEveryMs = 1000, PassEveryMs = 250, WaitDeadlineMs = 30_000;
     /// <summary>
+    /// A rule is evaluated again only when something it can read changed (§14.5): the world's version, the
+    /// wiring report, the directory revision or the programs themselves. <see cref="EvaluateEveryMs"/> is the
+    /// shortest spacing; <see cref="RefreshEveryMs"/> re-reads an unchanged network now and then, for what
+    /// no index covers (access granted or taken back).
+    /// </summary>
+    public const int RefreshEveryMs = 30_000;
+
+    private readonly record struct ChangeIndex(long World, object Wiring, long Directory, long Programs)
+    {
+        public bool Same(ChangeIndex other) => World == other.World && ReferenceEquals(Wiring, other.Wiring) &&
+            Directory == other.Directory && Programs == other.Programs;
+    }
+
+    private static long _programsRevision;
+    private static string? _programsText;
+    /// <summary>
     /// What all programs of one device may spend in a minute: fuel of rule evaluations and phases, and
     /// commands they try to send. A device over its budget holds its programs ("throttled") until the
     /// minute ends; nothing is dropped. A rule waits <see cref="RuleCooldownMs"/> after it fired, so changes
@@ -89,7 +105,9 @@ public static class ShellPrograms
         public string[] Phases = [];
         public string? LastEvent;
         public int Phase, Runs;
-        public long NextEvaluation, WaitUntil, SuspendedAt, Fuel;
+        public long NextEvaluation, WaitUntil, SuspendedAt, Fuel, RefreshAt;
+        /// <summary>What the rule last read; null until it has been evaluated in this runtime.</summary>
+        public ChangeIndex? Seen;
         public long[] Waiting = [];
         public IReadOnlyList<ShellRecord> Sent = [], Event = [], Result = [];
         public bool Finished => State is "done" or "faulted" or "stopped";
@@ -201,6 +219,7 @@ public static class ShellPrograms
         program.Waiting = program.Sent.Select(_ => 0L).ToArray();
         program.WaitUntil = 0;
         program.NextEvaluation = 0;
+        program.Seen = null;
         program.Detached = true;
         program.DetachedSince = 0;
     }
@@ -220,14 +239,20 @@ public static class ShellPrograms
     /// <summary>Writes the programs when they differ from what is on disk: temporary file, flush, rename.</summary>
     private static void Save()
     {
-        if (_path is null)
-            return;
         var file = new SavedFile(FileVersion, _round, _nextId, Programs.Where(program => !program.Finished).Select(program => new SavedProgram(
             program.Id, program.Name, program.Instance, program.Owner.Id, program.Owner.Generation, program.Provider.Id, program.Provider.Generation,
             program.Rule, program.Phases, program.LastEvent, program.Phase, program.Runs, program.State, program.Resume, program.ThrottledFrom,
             program.Reason, program.Fuel, program.InPhase, Fields(program.Sent), Fields(program.Event))).ToList());
         var text = JsonSerializer.Serialize(file);
-        if (text == _written)
+        // What "programs" shows, without fuel: a rule's own spending must not wake it again.
+        var visible = string.Join(";", Programs.Select(program =>
+            $"{program.Id}|{program.Instance}|{program.Name}|{program.State}|{program.Runs}|{program.Reason}"));
+        if (visible != _programsText)
+        {
+            _programsText = visible;
+            _programsRevision++; // Rules that read "programs" see the change.
+        }
+        if (_path is null || text == _written)
             return;
         try
         {
@@ -444,6 +469,10 @@ public static class ShellPrograms
                 program.State = program.ThrottledFrom;
                 program.Reason = "";
             }
+            var changes = new ChangeIndex(power.World.Version, power.Wiring, session.Services.DirectoryRevision, _programsRevision);
+            if (program.State == "watching" && now >= program.NextEvaluation && program.Seen is { } seenIndex && seenIndex.Same(changes) &&
+                now < program.RefreshAt)
+                continue; // Nothing it reads has changed.
             if ((program.State == "running" || (program.State == "watching" && now >= program.NextEvaluation)) && !Afford(program, now))
             {
                 Throttle(program, now);
@@ -455,6 +484,8 @@ public static class ShellPrograms
             {
                 case "watching" when now >= program.NextEvaluation:
                     program.NextEvaluation = now + EvaluateEveryMs;
+                    program.Seen = changes;
+                    program.RefreshAt = now + RefreshEveryMs;
                     var seen = NetShell.Run(program.Rule!, new ShellHost.Source(game, session, scope), ShellHost.ProgramLimits);
                     Charge(program, seen.FuelUsed, 0);
                     if (!seen.Ok)
