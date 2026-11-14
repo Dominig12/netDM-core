@@ -195,8 +195,16 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
                 background = new
                 {
                     commands = _commandsTimer.Snapshot(),
-                    linkWatch = new { watched = _diagnosticsWatch.LastWatched, publications = _diagnosticsWatch.Publications, timing = _linksTimer.Snapshot() },
-                    directoryWatch = new { watched = _directoryWatch.LastWatched, publications = _directoryWatch.Publications, timing = _directoryTimer.Snapshot() },
+                    linkWatch = new
+                    {
+                        watched = _diagnosticsWatch.LastWatched, publications = _diagnosticsWatch.Publications, reads = _diagnosticsWatch.Reads,
+                        skipped = _diagnosticsWatch.Skipped, timing = _linksTimer.Snapshot()
+                    },
+                    directoryWatch = new
+                    {
+                        watched = _directoryWatch.LastWatched, publications = _directoryWatch.Publications, reads = _directoryWatch.Reads,
+                        skipped = _directoryWatch.Skipped, timing = _directoryTimer.Snapshot()
+                    },
                     programs = new
                     {
                         count = Diagnostics.ShellPrograms.Count, passes = Diagnostics.ShellPrograms.Passes,

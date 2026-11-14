@@ -211,7 +211,8 @@ public static class QueryHost
     /// the device's own (what its endpoint may discover), and the default subscribe policy admits only its
     /// domain, so a watcher learns of nothing it could not list itself.
     /// </summary>
-    public static DiagnosticsHost.Watch DirectoryWatch() => new(ServiceType, DirectoryState, MaxWatched);
+    public static DiagnosticsHost.Watch DirectoryWatch() => new(ServiceType, DirectoryState, MaxWatched,
+        game => new DiagnosticsHost.WatchIndex(game.Snapshot.Version, game.Services.DirectoryRevision, game.Wiring));
 
     private static JsonElement DirectoryState(GameNetworkService game, WatchedService service)
     {

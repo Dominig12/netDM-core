@@ -62,15 +62,37 @@ public static class DiagnosticsHost
     /// <param name="serviceType">The host-provided type whose watched instances are published.</param>
     /// <param name="state">The state of one watched instance now, read from the published world.</param>
     /// <param name="maxWatched">Instances served at once; the rest wait in instance order.</param>
-    public sealed class Watch(string serviceType, Func<GameNetworkService, WatchedService, JsonElement> state, int maxWatched)
+    /// <param name="index">
+    /// What the states are read from (§14.5): while it, the watched devices and their nodes stay the same and
+    /// every difference was published, a pass reads no state at all. <see cref="RefreshEvery"/> reads them
+    /// anyway now and then, for what no index covers (access granted or taken back).
+    /// </param>
+    /// <summary>A change index of watched states: a version, a revision and an immutable report, compared by reference.</summary>
+    public readonly record struct WatchIndex(long Version, long Revision, object? Report)
     {
-        /// <summary>The watch of network.diagnostics: each watched device's own ports.</summary>
+        public bool Same(WatchIndex other) => Version == other.Version && Revision == other.Revision && ReferenceEquals(Report, other.Report);
+    }
+
+    public sealed class Watch(string serviceType, Func<GameNetworkService, WatchedService, JsonElement> state, int maxWatched,
+        Func<GameNetworkService, WatchIndex> index)
+    {
+        /// <summary>The watch of network.diagnostics: each watched device's own ports, read from the world and its wiring.</summary>
         public static Watch Links() => new(ServiceType,
-            (game, service) => LinkState(NetworkDiagnostics.LinkState(game.Snapshot, game.Wiring, service.Node)), MaxWatched);
+            (game, service) => LinkState(NetworkDiagnostics.LinkState(game.Snapshot, game.Wiring, service.Node)), MaxWatched,
+            game => new WatchIndex(game.Snapshot.Version, 0, game.Wiring));
+
+        public static readonly TimeSpan RefreshEvery = TimeSpan.FromSeconds(30);
 
         private readonly Dictionary<string, string> _published = new(StringComparer.Ordinal);
         private Guid _stream;
-        private long _next;
+        private long _next, _refreshAt;
+        private WatchIndex? _seen;
+        private string? _seenWatched;
+        private bool _behind;
+
+        /// <summary>Due passes that read every watched state, and those that read none because nothing changed.</summary>
+        public long Reads { get; private set; }
+        public long Skipped { get; private set; }
 
         public long Publications { get; private set; }
         /// <summary>Whether the last call was a due pass that read the watched states.</summary>
@@ -94,21 +116,38 @@ public static class DiagnosticsHost
             if (watched.Length == 0)
             {
                 _published.Clear();
+                _seen = null;
                 return 0;
             }
+            var current = index(game);
+            var watchedKey = string.Join(";", watched.Select(service => $"{service.Instance}|{service.Owner}|{service.Node.Value}"));
+            if (!_behind && _seen is { } seen && seen.Same(current) && watchedKey == _seenWatched && now < _refreshAt)
+            {
+                Skipped++;
+                Due = false; // Nothing was read: the pass costs no state.
+                return 0;
+            }
+            _seen = current;
+            _seenWatched = watchedKey;
+            _refreshAt = now + (long)RefreshEvery.TotalMilliseconds;
+            _behind = false;
+            Reads++;
             var sent = 0;
             var live = new HashSet<string>(StringComparer.Ordinal);
             foreach (var service in watched)
             {
                 live.Add(service.Instance);
-                var current = state(game, service);
-                var text = current.GetRawText();
+                var value = state(game, service);
+                var text = value.GetRawText();
                 if (_published.TryGetValue(service.Instance, out var last) && last == text)
                     continue;
-                var result = game.Publish(service.Owner, service.Instance, service.LastSequence + 1, current, null,
+                var result = game.Publish(service.Owner, service.Instance, service.LastSequence + 1, value, null,
                     PacketTrafficClass.Background);
                 if (result.Status is not (ServiceStatus.Ok or ServiceStatus.Duplicate))
-                    continue; // Busy or over the fan-out: the difference stays, and the next pass tries again.
+                {
+                    _behind = true; // Busy or over the fan-out: the difference stays, and the next pass reads again.
+                    continue;
+                }
                 _published[service.Instance] = text;
                 Publications++;
                 sent++;
