@@ -131,9 +131,26 @@ static void CheckAreaWiring()
     var sharedApc = new AreaApc(2, new NodeId(2), new NodePosition(8, 1, 2));
     links = AreaWiring.BuildLinks(spans, [.. apcs, sharedApc]);
     Check(links.Select(link => (link.A.Value, link.B.Value)).SequenceEqual(new[] { (1UL, 2UL), (2UL, 3UL), (2UL, 6UL) }));
-    Check(AreaWiring.BuildLinks(spans, apcs.Where(apc => apc.Area != 2).ToArray()).Length == 0);
+    // Area 2 without an APC is a passive duct: it joins the APCs of the areas that touch it (14.11.2026).
+    Check(AreaWiring.BuildLinks(spans, apcs.Where(apc => apc.Area != 2).ToArray())
+        .Select(link => (link.A.Value, link.B.Value)).SequenceEqual(new[] { (1UL, 3UL) }));
+    // A second APC of a segment serves the part nearest to it; the two parts are wired to each other.
+    links = AreaWiring.BuildLinks(spans, [.. apcs, new AreaApc(1, new NodeId(7), new NodePosition(3, 2, 1))]);
+    Check(links.Select(link => (link.A.Value, link.B.Value)).SequenceEqual(new[] { (1UL, 2UL), (1UL, 7UL), (2UL, 3UL), (2UL, 7UL) }));
+    // Touching ducts are one duct; four rooms along it get a spanning tree, not a link per pair.
+    AreaSpan[] corridor =
+    [
+        new(10, 1, 1, 1, 10), new(11, 1, 1, 11, 20), // Two corridor areas without APCs, side by side.
+        new(20, 1, 2, 1, 2), new(21, 1, 2, 5, 6), new(22, 1, 2, 12, 13), new(23, 1, 2, 18, 19)
+    ];
+    AreaApc[] rooms =
+    [
+        new(20, new(20), new(1, 2, 1)), new(21, new(21), new(5, 2, 1)), new(22, new(22), new(12, 2, 1)), new(23, new(23), new(18, 2, 1))
+    ];
+    var duct = AreaWiring.Build(corridor, rooms);
+    Check(duct.Links.Select(link => (link.A.Value, link.B.Value)).SequenceEqual(new[] { (20UL, 21UL), (21UL, 22UL), (22UL, 23UL) }));
+    Check(!duct.TryFindApc(new NodePosition(16, 1, 1), out _)); // A device in a duct has no APC: radio.
     Reject([.. spans, new AreaSpan(2, 1, 1, 2, 4)], apcs);
-    Reject(spans, [.. apcs, new AreaApc(1, new NodeId(7), new NodePosition(3, 2, 1))]);
     Reject(spans, [.. apcs, new AreaApc(1, new NodeId(7), new NodePosition(4, 1, 1))]);
     Reject(spans, [.. apcs, sharedApc with { Area = 5, ServedCell = new NodePosition(1, 1, 2) }]);
 
