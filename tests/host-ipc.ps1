@@ -1575,6 +1575,59 @@ end
     Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '4'
         changes = @(@{ op = 'node_state'; a = '3'; powered = 1; operational = 1 }) }).ok) 'APC 3 has power again'
 
+    # P12.2 presence: one per operator, on a device's shell; the operator acts and scans from where it stands.
+    # Р6: away suspends it, an unpowered host suspends it, a host that leaves ends it.
+    $entered = Invoke-ShellAt 'netshell.apc3' 'enter' @{} '4'
+    Assert-True ($entered.status -ceq 'entered' -and $entered.host -ceq 'netshell.apc3' -and $entered.generation -eq 1 -and $entered.state -ceq 'active') "the operator enters at APC 3: $($entered | ConvertTo-Json -Compress)"
+    $second = Invoke-ShellAt 'netshell.apc2' 'enter' @{} '4'
+    Assert-True ($second.status -ceq 'present' -and $second.presence -eq $entered.presence -and $second.host -ceq 'netshell.apc3') "one presence per operator: $($second | ConvertTo-Json -Compress)"
+    $acted = Invoke-ShellAt 'netshell.apc2' 'act' @{ line = 'self | select node' } '4'
+    Assert-True ($acted.status -ceq 'ok' -and $acted.rows -ceq 'node=3') "a line acts from the presence's host: $($acted | ConvertTo-Json -Compress)"
+    $fromPresence = $null
+    for ($try = 0; $try -lt 15; $try++) {
+        $fromPresence = Invoke-ShellAt 'netshell.apc2' 'scan' @{ radius = 1 } '4'
+        if ($fromPresence.status -cne 'busy') { break }
+        Start-Sleep -Seconds 1
+    }
+    # From APC 3 one hop reaches APC 2 and itself; from APC 2 it would be all three.
+    Assert-True ($fromPresence.status -ceq 'complete' -and $fromPresence.nodes -eq 2) "a scan starts where the presence stands: $($fromPresence | ConvertTo-Json -Compress)"
+    $away = Invoke-ShellAt 'netshell.apc2' 'detach' @{} '4'
+    Assert-True ($away.status -ceq 'suspended' -and $away.reason -ceq 'operator_away') "closing the window suspends the presence: $($away | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-ShellAt 'netshell.apc2' 'act' @{ line = 'self' } '4').status -ceq 'suspended') 'a suspended presence does not act'
+    $resumed = Invoke-ShellAt 'netshell.apc2' 'enter' @{} '4'
+    Assert-True ($resumed.status -ceq 'resumed' -and $resumed.state -ceq 'active' -and $resumed.presence -eq $entered.presence) "entering again resumes it: $($resumed | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '5'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 0; operational = 1 }) }).ok) 'the host APC loses power'
+    $dark = $null
+    for ($try = 0; $try -lt 20; $try++) {
+        $dark = Invoke-ShellAt 'netshell.apc2' 'presence' @{} '5'
+        if ($dark.reason -ceq 'host_unpowered') { break }
+        Start-Sleep -Milliseconds 200
+    }
+    Assert-True ($dark.state -ceq 'suspended' -and $dark.reason -ceq 'host_unpowered') "an unpowered host suspends the presence: $($dark | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '6'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 1; operational = 1 }) }).ok) 'the host APC has power again'
+    $lit = $null
+    for ($try = 0; $try -lt 20; $try++) {
+        $lit = Invoke-ShellAt 'netshell.apc2' 'presence' @{} '6'
+        if ($lit.state -ceq 'active') { break }
+        Start-Sleep -Milliseconds 200
+    }
+    Assert-True ($lit.state -ceq 'active') "power brings the presence back: $($lit | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_detach' } + $shell3)).ok) 'the host shell of APC 3 leaves'
+    $lost = $null
+    for ($try = 0; $try -lt 20; $try++) {
+        $lost = Invoke-ShellAt 'netshell.apc2' 'presence' @{} '6'
+        if ($lost.status -ceq 'ended') { break }
+        Start-Sleep -Milliseconds 200
+    }
+    Assert-True ($lost.status -ceq 'ended' -and $lost.reason -ceq 'host_lost') "a host that leaves ends the presence, with no copy: $($lost | ConvertTo-Json -Compress)"
+    $fresh = Invoke-ShellAt 'netshell.apc2' 'enter' @{} '6'
+    Assert-True ($fresh.status -ceq 'entered' -and $fresh.presence -gt $entered.presence -and $fresh.host -ceq 'netshell.apc2') "the operator can enter again as a new presence: $($fresh | ConvertTo-Json -Compress)"
+    $left = Invoke-ShellAt 'netshell.apc2' 'leave' @{} '6'
+    Assert-True ($left.status -ceq 'left' -and $left.state -ceq 'ended' -and $left.reason -ceq 'left') "the operator leaves: $($left | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-ShellAt 'netshell.apc2' 'act' @{ line = 'self' } '6').status -ceq 'no_presence') 'without a presence nothing acts'
+
     if ($IsLinux) {
         Assert-StartupRejected $socketPath
         Assert-True ((Invoke-Next @{ op = 'game_stats' }).game.nodes -eq 3) 'second Host does not unlink live socket'

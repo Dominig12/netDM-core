@@ -418,7 +418,8 @@ public sealed class SchemaRegistry
         registry.Register(new SchemaDefinition("shell.output", 1, 0,
         [
             new SchemaField("status", SchemaFieldType.Enum, true, Values:
-                ["ok", "parse_error", "unknown_command", "invalid_argument", "fuel_exhausted", "limit_exceeded", "source_failed"]),
+                ["ok", "parse_error", "unknown_command", "invalid_argument", "fuel_exhausted", "limit_exceeded", "source_failed",
+                 "no_presence", "suspended", "out_of_reach"]),
             new SchemaField("count", SchemaFieldType.Integer, true, 0, 4096),
             new SchemaField("fuel", SchemaFieldType.Integer, true, 0, 1_000_000),
             new SchemaField("rows", SchemaFieldType.Text, true, MaxLength: 4096),
@@ -464,7 +465,7 @@ public sealed class SchemaRegistry
             new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["radius"] }, MaxPayloadBytes: 64));
         registry.Register(new SchemaDefinition("shell.scan", 1, 0,
         [
-            new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "partial", "busy"]),
+            new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "partial", "busy", "suspended", "out_of_reach"]),
             new SchemaField("revision", SchemaFieldType.Integer, true, 0),
             new SchemaField("nodes", SchemaFieldType.Integer, true, 0, 4096),
             new SchemaField("links", SchemaFieldType.Integer, true, 0, 8192),
@@ -485,6 +486,24 @@ public sealed class SchemaRegistry
             new SchemaField("items", SchemaFieldType.Text, true, MaxLength: 3600)
         ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "revision", "count", "items"] }, MaxPayloadBytes: 4096));
         registry.RegisterCommand("network.shell", "scan", "shell.scan_request", 1, "shell.scan", 1);
+        // P12.2 presence: one network entity per operator, on a device's shell; "act" runs a line there.
+        registry.Register(new SchemaDefinition("shell.presence_request", 1, 0,
+            [new SchemaField("note", SchemaFieldType.Text, false, MaxLength: 32)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["note"] }, MaxPayloadBytes: 64));
+        registry.Register(new SchemaDefinition("shell.presence", 1, 0,
+        [
+            new SchemaField("status", SchemaFieldType.Enum, true, Values:
+                ["entered", "present", "resumed", "suspended", "left", "ended", "none", "limit_exceeded"]),
+            new SchemaField("presence", SchemaFieldType.Integer, false, 0, 1_000_000_000),
+            new SchemaField("host", SchemaFieldType.Text, false, MaxLength: 64),
+            new SchemaField("generation", SchemaFieldType.Integer, false, 1, 1_000_000),
+            new SchemaField("state", SchemaFieldType.Enum, false, Values: ["active", "suspended", "ended"]),
+            new SchemaField("reason", SchemaFieldType.Text, false, MaxLength: 64)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "presence", "host", "generation", "state", "reason"] },
+            MaxPayloadBytes: 384));
+        foreach (var presenceCommand in new[] { "enter", "detach", "leave", "presence" })
+            registry.RegisterCommand("network.shell", presenceCommand, "shell.presence_request", 1, "shell.presence", 1);
+        registry.RegisterCommand("network.shell", "act", "shell.run_request", 1, "shell.output", 1);
         registry.RegisterCommand("network.shell", "knowledge", "shell.knowledge_request", 1, "shell.knowledge", 1);
 
         // NetEntity migration (§14.4): the owner moves its program to another device's shell.

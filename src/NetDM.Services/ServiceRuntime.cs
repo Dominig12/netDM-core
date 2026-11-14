@@ -414,6 +414,13 @@ public sealed class ServiceRuntime
                 ? Descriptor(target) : null;
     }
 
+    /// <summary>Whether the endpoint is attached now with this generation.</summary>
+    public bool IsAttached(EndpointKey key)
+    {
+        lock (_gate)
+            return Require(key, out _) == ServiceStatus.Ok;
+    }
+
     /// <summary>The provider of a service the requester may discover, or null: hidden and missing look the same.</summary>
     public (EndpointKey Provider, NodeId Node, string ServiceType)? DiscoverableProvider(EndpointKey requester, string instance)
     {

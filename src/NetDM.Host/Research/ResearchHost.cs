@@ -430,6 +430,7 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
                 _directoryTimer.Record(started, _directoryWatch.Due && _directoryWatch.LastWatched > 0);
                 started = System.Diagnostics.Stopwatch.GetTimestamp();
                 Diagnostics.ShellPrograms.Tick(game);
+                Diagnostics.NetworkSpace.Tick(game);
                 _programsTimer.Record(started, Diagnostics.ShellPrograms.Due && Diagnostics.ShellPrograms.Count > 0);
             }
             catch (Exception exception)

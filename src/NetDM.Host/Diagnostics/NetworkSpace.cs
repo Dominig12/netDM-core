@@ -4,6 +4,7 @@ using System.Text.Json;
 using NetDM.Core;
 using NetDM.Host.Transport;
 using NetDM.Services;
+using NetDM.Services.Shell;
 
 namespace NetDM.Host.Diagnostics;
 
@@ -44,9 +45,211 @@ public static class NetworkSpace
     private static readonly Dictionary<EndpointKey, Knowledge> Operators = [];
     private static long _revision;
 
+    // ---- P12.2 · presence (decisions Р1, Р6) ---------------------------------------------------------
+    //
+    // An operator's presence is its one network entity: it stands on a device's shell (its host) and acts
+    // from there with the operator's rights, while the operator controls it over the network. The rules of
+    // Р6: an operator who closes the window leaves it suspended and ends it after 5 minutes away; a lost
+    // entry endpoint ends it after 60 s; an unpowered host suspends it; a host that leaves ends it. A new
+    // runtime gives both ends 60 s to come back. Presences live in this Host process.
+
+    public const int OperatorAwayMs = 300_000, EntryGraceMs = 60_000, PresencePassMs = 500, MaxPresences = 64, MaxPresencesPerHost = 4;
+
+    private sealed class Presence
+    {
+        public int Id, Generation = 1;
+        public EndpointKey Owner, Provider;
+        public string Instance = "", State = "active", Reason = "";
+        public NodeId Node;
+        public bool Away, Detached;
+        public long AwaySince, EntryLostSince, DetachedSince;
+        public bool Ended => State == "ended";
+    }
+
+    private static readonly Dictionary<EndpointKey, Presence> Presences = [];
+    private static int _nextPresence;
+    private static long _nextPresencePass, _actSerial;
+    private static Guid _presenceStream;
+
+    /// <summary>The presence pass: endpoints, power and the operator's absence decide its state (Р6).</summary>
+    public static void Tick(GameNetworkService game)
+    {
+        var now = Environment.TickCount64;
+        if (now < _nextPresencePass || Presences.Count == 0)
+            return;
+        _nextPresencePass = now + PresencePassMs;
+        var session = game.CaptureSession();
+        if (_presenceStream != session.Packets.ReceiptStreamId)
+        {
+            _presenceStream = session.Packets.ReceiptStreamId;
+            foreach (var presence in Presences.Values.Where(presence => !presence.Ended))
+            {
+                presence.Detached = true; // A new runtime: both ends get time to come back with the world's facts.
+                presence.DetachedSince = now;
+            }
+        }
+        var power = game.CapturePowerState(session);
+        foreach (var presence in Presences.Values.Where(presence => !presence.Ended))
+            Settle(session, power, presence, now);
+    }
+
+    private static void Settle(GameNetworkService.Session session, (SharedMediumSnapshot World, WiringReport Wiring)? power, Presence presence,
+        long now)
+    {
+        if (session.Services.DiscoverableProvider(presence.Provider, presence.Instance) is not { } host || host.Provider != presence.Provider)
+        {
+            if (presence.Detached && now - presence.DetachedSince < EntryGraceMs)
+                Suspend(presence, "host_unreachable");
+            else
+                End(presence, "host_lost"); // No copy anywhere: a host that is gone ends its presences.
+            return;
+        }
+        presence.Node = host.Node;
+        if (!session.Services.IsAttached(presence.Owner))
+        {
+            if (presence.EntryLostSince == 0)
+                presence.EntryLostSince = now;
+            if (now - presence.EntryLostSince >= EntryGraceMs)
+                End(presence, "entry_lost");
+            else
+                Suspend(presence, "entry_lost");
+            return;
+        }
+        presence.EntryLostSince = 0;
+        presence.Detached = false;
+        if (power is { } state && (!state.World.Physical.Nodes.ContainsKey(host.Node) || !state.Wiring.CanExecute(host.Node)))
+            Suspend(presence, "host_unpowered");
+        else if (presence.Away && now - presence.AwaySince >= OperatorAwayMs)
+            End(presence, "operator_gone");
+        else if (presence.Away)
+            Suspend(presence, "operator_away");
+        else
+        {
+            presence.State = "active";
+            presence.Reason = "";
+        }
+    }
+
+    private static void Suspend(Presence presence, string reason)
+    {
+        presence.State = "suspended";
+        presence.Reason = reason;
+    }
+
+    private static void End(Presence presence, string reason)
+    {
+        presence.State = "ended";
+        presence.Reason = reason;
+    }
+
+    private static object Describe(string status, Presence? presence) => presence is null
+        ? new { status }
+        : new
+        {
+            status, presence = presence.Id, host = presence.Instance, generation = presence.Generation, state = presence.State,
+            reason = presence.Reason
+        };
+
+    private static JsonElement PresenceCommand(GameNetworkService game, GameNetworkService.Session session, HostCommand command, long now)
+    {
+        Presences.TryGetValue(command.InitiatorKey, out var presence);
+        if (presence is not null && presence.Ended && command.Command is "enter")
+            presence = null; // An ended presence is reported until the operator enters again.
+        switch (command.Command)
+        {
+            case "presence":
+                if (presence is not null)
+                    Settle(session, game.CapturePowerState(session), presence, now);
+                return JsonSerializer.SerializeToElement(Describe(presence is null ? "none" : presence.Ended ? "ended" : "present", presence));
+            case "enter":
+                if (presence is not null)
+                {
+                    // One presence per operator: entering again resumes it where it stands.
+                    var resumed = presence.Away;
+                    presence.Away = false;
+                    Settle(session, game.CapturePowerState(session), presence, now);
+                    return JsonSerializer.SerializeToElement(Describe(resumed ? "resumed" : "present", presence));
+                }
+                if (Presences.Values.Count(other => !other.Ended) >= MaxPresences ||
+                    Presences.Values.Count(other => !other.Ended && other.Instance == command.Instance) >= MaxPresencesPerHost)
+                    return JsonSerializer.SerializeToElement(Describe("limit_exceeded", null));
+                foreach (var ended in Presences.Where(pair => pair.Value.Ended).Select(pair => pair.Key).ToArray())
+                    if (Presences.Count >= MaxPresences)
+                        Presences.Remove(ended);
+                presence = new Presence
+                {
+                    Id = ++_nextPresence, Owner = command.InitiatorKey, Provider = command.ProviderKey, Instance = command.Instance,
+                    Node = command.ProviderNode
+                };
+                Presences[command.InitiatorKey] = presence;
+                Settle(session, game.CapturePowerState(session), presence, now);
+                return JsonSerializer.SerializeToElement(Describe("entered", presence));
+            case "detach":
+                if (presence is null || presence.Ended)
+                    return JsonSerializer.SerializeToElement(Describe(presence is null ? "none" : "ended", presence));
+                if (!presence.Away)
+                {
+                    presence.Away = true;
+                    presence.AwaySince = now;
+                }
+                Settle(session, game.CapturePowerState(session), presence, now);
+                return JsonSerializer.SerializeToElement(Describe("suspended", presence));
+            default: // leave
+                if (presence is null || presence.Ended)
+                    return JsonSerializer.SerializeToElement(Describe(presence is null ? "none" : "ended", presence));
+                End(presence, "left");
+                return JsonSerializer.SerializeToElement(Describe("left", presence));
+        }
+    }
+
+    /// <summary>
+    /// The active presence the operator controls from the answering device, or why there is none: it must
+    /// be active, and the network must carry the operator's control from that device to the host.
+    /// </summary>
+    private static Presence? Controlled(GameNetworkService game, GameNetworkService.Session session, HostCommand command, long now,
+        out string? refusal)
+    {
+        refusal = null;
+        if (!Presences.TryGetValue(command.InitiatorKey, out var presence) || presence.Ended)
+        {
+            refusal = "no_presence";
+            return null;
+        }
+        Settle(session, game.CapturePowerState(session), presence, now);
+        if (presence.State != "active")
+        {
+            refusal = "suspended";
+            return null;
+        }
+        if (command.ProviderNode != presence.Node &&
+            NetworkDiagnostics.Trace(session.Medium.Snapshot, command.ProviderNode, presence.Node, QueryHost.ReachBudget).State != NetworkDiagnostics.Reachable)
+        {
+            refusal = "out_of_reach";
+            return null;
+        }
+        return presence;
+    }
+
+    /// <summary><c>act {line}</c>: the line runs at the presence's host, with the operator's rights.</summary>
+    private static JsonElement Act(GameNetworkService game, GameNetworkService.Session session, HostCommand command, JsonElement arguments, long now)
+    {
+        if (Controlled(game, session, command, now, out var refusal) is not { } presence)
+            return JsonSerializer.SerializeToElement(new { status = refusal, count = 0, fuel = 0, rows = "", error = refusal!.Replace('_', ' ') });
+        var scope = new ShellHost.Scope(presence.Owner, presence.Instance, presence.Node, null,
+            $"pr.{_presenceStream:N}.{presence.Id.ToString(CultureInfo.InvariantCulture)}.{(++_actSerial).ToString(CultureInfo.InvariantCulture)}",
+            presence.Owner == presence.Provider ? presence.Provider : null);
+        var result = NetShell.Run(arguments.GetProperty("line").GetString() ?? "", new ShellHost.Source(game, session, scope),
+            ShellHost.ProgramLimits, new ShellHost.Sink(session, scope));
+        return ShellHost.Output(result);
+    }
+
     internal static JsonElement Answer(GameNetworkService game, GameNetworkService.Session session, HostCommand command, JsonElement arguments)
     {
         var now = Environment.TickCount64;
+        if (command.Command is "enter" or "detach" or "leave" or "presence")
+            return PresenceCommand(game, session, command, now);
+        if (command.Command == "act")
+            return Act(game, session, command, arguments, now);
         var knowledge = KnowledgeOf(command.InitiatorKey, now);
         return command.Command == "scan"
             ? Scan(game, session, command, knowledge, arguments.TryGetProperty("radius", out var radius)
@@ -75,6 +278,15 @@ public static class NetworkSpace
     private static JsonElement Scan(GameNetworkService game, GameNetworkService.Session session, HostCommand command, Knowledge knowledge,
         int radius, long now)
     {
+        // With a presence the operator scans from where it stands; without one, from the answering device.
+        Presence? presence = null;
+        if (Presences.TryGetValue(command.InitiatorKey, out var standing) && !standing.Ended)
+        {
+            presence = Controlled(game, session, command, now, out var refusal);
+            if (presence is null)
+                return JsonSerializer.SerializeToElement(new { status = refusal == "suspended" ? "suspended" : "out_of_reach", revision = _revision,
+                    nodes = 0, links = 0, services = 0 });
+        }
         if (now < knowledge.NextScan)
             return JsonSerializer.SerializeToElement(new
             {
@@ -84,7 +296,7 @@ public static class NetworkSpace
         knowledge.NextScan = now + ScanEveryMs;
         var world = session.Medium.Snapshot;
         var wiring = game.Wiring;
-        var host = command.ProviderNode;
+        var host = presence?.Node ?? command.ProviderNode;
         knowledge.Host = host;
         var hood = SharedMediumNetwork.Neighborhood(world, host, radius, MaxScanNodes, out var truncated);
         var nodes = world.Physical.Nodes;
@@ -95,12 +307,16 @@ public static class NetworkSpace
         string? after = null;
         for (var page = 0; page < DirectoryPages; page++)
         {
-            if (session.Services.QueryDirectory(command.DeliveryId, null, after, 64) is not { } query || query.Origin != host)
+            // From a presence the directory is the operator's own; otherwise it is read through the delivery.
+            var slice = presence is not null
+                ? session.Services.QueryDirectory(presence.Owner, null, after, 64)
+                : session.Services.QueryDirectory(command.DeliveryId, null, after, 64) is { } query && query.Origin == host ? query.Slice : null;
+            if (slice is null)
                 break;
-            services.AddRange(query.Slice.Entries.Where(entry => hood.ContainsKey(entry.Node)));
-            if (!query.Slice.More || query.Slice.Entries.Count == 0)
+            services.AddRange(slice.Entries.Where(entry => hood.ContainsKey(entry.Node)));
+            if (!slice.More || slice.Entries.Count == 0)
                 break;
-            after = query.Slice.Entries[^1].Instance;
+            after = slice.Entries[^1].Instance;
         }
 
         void Node(NodeId id)

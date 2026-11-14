@@ -32,7 +32,7 @@ public static class ShellHost
     {
         applied = null;
         using var arguments = JsonDocument.Parse(command.Arguments);
-        if (command.Command is "scan" or "knowledge")
+        if (command.Command is "scan" or "knowledge" or "enter" or "detach" or "leave" or "presence" or "act")
             return NetworkSpace.Answer(game, session, command, arguments.RootElement);
         if (command.Command is "start" or "stop" or "migrate")
             return ShellPrograms.Answer(session, command, arguments.RootElement, out applied);
@@ -44,6 +44,12 @@ public static class ShellHost
         var result = command.Command == "run_script"
             ? NetShell.RunScript(arguments.RootElement.GetProperty("source").GetString()!, source, Limits, sink)
             : NetShell.Run(arguments.RootElement.GetProperty("line").GetString()!, source, Limits, sink);
+        return Output(result);
+    }
+
+    /// <summary>A line's result as <c>shell.output</c>.</summary>
+    internal static JsonElement Output(ShellResult result)
+    {
         var rows = result.Ok ? Format(result.Records) : "";
         if (rows.Length > MaxOutputChars)
             result = new ShellResult(ShellStatus.LimitExceeded, [], result.FuelUsed, "output too long: select fewer fields or records");
