@@ -44,6 +44,29 @@ if ($WithTgui) {
         Copy-Item -LiteralPath (Join-Path $repo "tgui/public/$asset") -Destination $target -Force
     }
 }
+if ($Defines -notcontains 'LOWMEMORYMODE') {
+    # Without LOWMEMORYMODE the world compiles in the NanoMap images. The game renders them
+    # (tools/nanomaps/render.cjs) and git ignores them, so an export has none: they come from the checkout,
+    # with the manifest they were rendered for.
+    $manifestFile = 'code/modules/asset_cache/assets/nanomaps.dm'
+    Copy-Item -LiteralPath (Join-Path $repo $manifestFile) -Destination (Join-Path $build $manifestFile) -Force
+    $missing = @()
+    foreach ($match in [regex]::Matches([IO.File]::ReadAllText((Join-Path $repo $manifestFile)), "'(icons/_nanomaps/[^']+\.png)'")) {
+        $image = $match.Groups[1].Value
+        $source = Join-Path $repo $image
+        if (-not (Test-Path -LiteralPath $source)) {
+            $missing += $image
+            continue
+        }
+        $target = Join-Path $build $image
+        $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
+        Copy-Item -LiteralPath $source -Destination $target -Force
+    }
+    if ($missing.Count) {
+        throw "$($missing.Count) NanoMap images are missing in $repo (for example $($missing[0])). " +
+            "Render them there: node tools/nanomaps/render.cjs --incremental (play-bluemoon.ps1 does it)."
+    }
+}
 if ($Defines -contains 'UNIT_TEST_PROFILE_HERMETIC') {
     # The hermetic unit-test profile loads CentCom_hermetic.dmm. The game's build.js generates it and git
     # ignores it, so a fresh checkout has none: then it is cut here the same way (the TGM map's z1 blocks).

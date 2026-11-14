@@ -12,7 +12,8 @@ try {
     git -C $repo archive --format=tar --output=$archive HEAD
     if ($LASTEXITCODE -ne 0) { throw 'git archive failed.' }
     if ($env:OS -eq 'Windows_NT') {
-        tar --options hdrcharset=UTF-8 -xf $archive -C $target
+        # Windows' own bsdtar: a GNU tar earlier in PATH (Git Bash) has no --options.
+        & (Join-Path $env:SystemRoot 'System32\tar.exe') --options hdrcharset=UTF-8 -xf $archive -C $target
     }
     else {
         tar -xf $archive -C $target

@@ -47,6 +47,21 @@ if (-not $NoBuild) {
     finally { Pop-Location }
     # A playable world: no unit tests; the runtime station is forced by LOWMEMORYMODE, other maps by next_map.json.
     $defines = if ($Map -eq 'runtime') { 'CBT,LOWMEMORYMODE' } else { 'CBT' }
+    if ($defines -notmatch 'LOWMEMORYMODE') {
+        # The station maps carry NanoMap images that the game renders and git does not keep. The first run
+        # downloads the pinned renderer and draws every map (a minute or two); later runs redraw only changes.
+        Write-Host '== NanoMap minimaps'
+        Push-Location $GameRepository
+        try {
+            $render = @(node tools/nanomaps/render.cjs --incremental 2>&1 | ForEach-Object { "$_" })
+            if ($LASTEXITCODE -ne 0) {
+                $render | Select-Object -Last 20 | ForEach-Object { Write-Host $_ }
+                throw 'The NanoMap render failed.'
+            }
+            $render | Select-Object -Last 1 | ForEach-Object { Write-Host $_ }
+        }
+        finally { Pop-Location }
+    }
     Write-Host "== Building BlueMoon ($defines), a few minutes"
     $dmb = @(pwsh -NoProfile -File scripts\build-bluemoon-unit-dmb.ps1 -GameRepository $GameRepository -BuildDirectory $BuildDirectory `
         -Defines $defines -WithTgui 2>&1 | ForEach-Object { "$_" })
