@@ -73,11 +73,15 @@ public static class DiagnosticsHost
         private long _next;
 
         public long Publications { get; private set; }
+        /// <summary>Whether the last call was a due pass that read the watched states.</summary>
+        public bool Due { get; private set; }
+        public int LastWatched { get; private set; }
 
         public int Publish(GameNetworkService game)
         {
             var now = Environment.TickCount64;
-            if (now < _next)
+            Due = now >= _next;
+            if (!Due)
                 return 0;
             _next = now + (long)WatchInterval.TotalMilliseconds;
             if (_stream != game.StreamId)
@@ -86,6 +90,7 @@ public static class DiagnosticsHost
                 _published.Clear();
             }
             var watched = game.Services.WatchedHostServices(serviceType, maxWatched);
+            LastWatched = watched.Length;
             if (watched.Length == 0)
             {
                 _published.Clear();

@@ -24,6 +24,12 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
     /// <summary>This loop serves every service the Host runs for a device; diagnostics publishes from it too.</summary>
     private readonly Diagnostics.DiagnosticsHost.Watch _diagnosticsWatch = Diagnostics.DiagnosticsHost.Watch.Links();
     private readonly Diagnostics.DiagnosticsHost.Watch _directoryWatch = Diagnostics.QueryHost.DirectoryWatch();
+    // P10: how long each stage of the background loop takes when it has work.
+    private readonly Diagnostics.StageTimer _commandsTimer = new(), _linksTimer = new(), _directoryTimer = new(), _programsTimer = new();
+    private volatile bool _resetBackground;
+
+    /// <summary>Starts a new background measurement at the next loop pass (load runs measure phase by phase).</summary>
+    public void ResetBackgroundTimers() => _resetBackground = true;
     private readonly object _gate = new();
     private readonly string _directory = Path.GetFullPath(configuration.GetValue("NetDM:ResearchDirectory", "research")!);
     private ResearchLedger? _ledger;
@@ -186,6 +192,19 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
                 effects = ledger?.EffectTotals() is { } effectTotals ? new { effectTotals.Pending, effectTotals.Settled } : null,
                 catalog = ledger?.CatalogHash,
                 catalogInstalled = ledger?.Catalog is not null,
+                background = new
+                {
+                    commands = _commandsTimer.Snapshot(),
+                    linkWatch = new { watched = _diagnosticsWatch.LastWatched, publications = _diagnosticsWatch.Publications, timing = _linksTimer.Snapshot() },
+                    directoryWatch = new { watched = _directoryWatch.LastWatched, publications = _directoryWatch.Publications, timing = _directoryTimer.Snapshot() },
+                    programs = new
+                    {
+                        count = Diagnostics.ShellPrograms.Count, passes = Diagnostics.ShellPrograms.Passes,
+                        evaluations = Diagnostics.ShellPrograms.Evaluations, unchanged = Diagnostics.ShellPrograms.Unchanged,
+                        fired = Diagnostics.ShellPrograms.Fired, phases = Diagnostics.ShellPrograms.PhasesRun, timing = _programsTimer.Snapshot(),
+                        writes = Diagnostics.ShellPrograms.Writes.Snapshot()
+                    }
+                },
                 commands = Interlocked.Read(ref _commands),
                 answered = Interlocked.Read(ref _answered),
                 lateAnswers = Interlocked.Read(ref _lateAnswers),
@@ -384,12 +403,26 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
         {
             try
             {
-                AnswerCommands();
+                if (_resetBackground)
+                {
+                    _resetBackground = false;
+                    foreach (var stage in new[] { _commandsTimer, _linksTimer, _directoryTimer, _programsTimer })
+                        stage.Reset();
+                    Diagnostics.ShellPrograms.ResetCounters();
+                }
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                _commandsTimer.Record(started, AnswerCommands() > 0);
                 ExpireTransfers();
                 RecoverStorage();
+                started = System.Diagnostics.Stopwatch.GetTimestamp();
                 _diagnosticsWatch.Publish(game);
+                _linksTimer.Record(started, _diagnosticsWatch.Due && _diagnosticsWatch.LastWatched > 0);
+                started = System.Diagnostics.Stopwatch.GetTimestamp();
                 _directoryWatch.Publish(game);
+                _directoryTimer.Record(started, _directoryWatch.Due && _directoryWatch.LastWatched > 0);
+                started = System.Diagnostics.Stopwatch.GetTimestamp();
                 Diagnostics.ShellPrograms.Tick(game);
+                _programsTimer.Record(started, Diagnostics.ShellPrograms.Due && Diagnostics.ShellPrograms.Count > 0);
             }
             catch (Exception exception)
             {

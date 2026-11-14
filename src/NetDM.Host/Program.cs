@@ -240,6 +240,12 @@ app.MapGet("/api/game/status", (GameNetworkService game) => Results.Ok(game.Stat
 
 // The round's research ledger: storages, wallets, conservation totals and journal recovery.
 app.MapGet("/api/research/status", (NetDM.Host.Research.ResearchHost research) => Results.Ok(research.Status()));
+// P10 load runs: background stage timings and program counters start over (loopback only, like the rest).
+app.MapPost("/api/research/background/reset", (NetDM.Host.Research.ResearchHost research) =>
+{
+    research.ResetBackgroundTimers();
+    return Results.Accepted();
+});
 
 app.MapGet("/api/game/map", (GameNetworkService game,
     int? minX, int? minY, int? maxX, int? maxY, int? z, int? limit) =>

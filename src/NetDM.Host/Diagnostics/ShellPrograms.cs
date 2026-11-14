@@ -42,6 +42,21 @@ public static class ShellPrograms
     }
 
     private static long _programsRevision;
+
+    /// <summary>P10 counters: due passes, rule evaluations, rules skipped as unchanged, rules that fired, phases run.</summary>
+    public static long Passes, Evaluations, Unchanged, Fired, PhasesRun;
+    /// <summary>Whether the last <see cref="Tick"/> was a due pass.</summary>
+    public static bool Due { get; private set; }
+    public static int Count => Programs.Count;
+
+    /// <summary>Durations of durable writes of the programs file.</summary>
+    public static readonly StageTimer Writes = new();
+
+    public static void ResetCounters()
+    {
+        Passes = Evaluations = Unchanged = Fired = PhasesRun = 0;
+        Writes.Reset();
+    }
     private static string? _programsText;
     /// <summary>
     /// What all programs of one device may spend in a minute: fuel of rule evaluations and phases, and
@@ -146,7 +161,14 @@ public static class ShellPrograms
     private static readonly object BindGate = new();
     private static string? _path;
     private static Guid _round;
-    private static string? _written;
+    private static string? _written, _writtenStructure;
+    private static long _lastWrite;
+    /// <summary>
+    /// What restoring depends on (programs, their state, phase, runs, the "phase runs" mark) is written at
+    /// once. Fuel, reasons and last observations only change what a restored program reports: they are
+    /// written at most this often, so a busy pass does not wait on the disk for them.
+    /// </summary>
+    public const int LazyWriteMs = 5_000;
 
     /// <summary>The last failure to write the programs file, or null; programs keep running in memory.</summary>
     public static string? SaveError { get; private set; }
@@ -173,7 +195,7 @@ public static class ShellPrograms
         Programs.Clear();
         Budgets.Clear();
         _nextId = 0;
-        _written = null;
+        _written = _writtenStructure = null;
         try
         {
             if (!File.Exists(_path))
@@ -243,14 +265,12 @@ public static class ShellPrograms
     private static List<Dictionary<string, JsonElement>> Fields(IReadOnlyList<ShellRecord> records) =>
         records.Select(record => record.Fields.ToDictionary(pair => pair.Key, pair => JsonSerializer.SerializeToElement(pair.Value), StringComparer.Ordinal)).ToList();
 
-    /// <summary>Writes the programs when they differ from what is on disk: temporary file, flush, rename.</summary>
-    private static void Save()
+    /// <summary>
+    /// Writes the programs when they differ from what is on disk: temporary file, then rename. A change
+    /// restoring depends on, or <paramref name="durable"/>, is written now; the rest waits for <see cref="LazyWriteMs"/>.
+    /// </summary>
+    private static void Save(bool durable = false)
     {
-        var file = new SavedFile(FileVersion, _round, _nextId, Programs.Where(program => !program.Finished).Select(program => new SavedProgram(
-            program.Id, program.Name, program.Instance, program.Owner.Id, program.Owner.Generation, program.Provider.Id, program.Provider.Generation,
-            program.Rule, program.Phases, program.LastEvent, program.Phase, program.Runs, program.State, program.Resume, program.ThrottledFrom,
-            program.Reason, program.Fuel, program.InPhase, Fields(program.Sent), Fields(program.Event), program.Source, program.Kept)).ToList());
-        var text = JsonSerializer.Serialize(file);
         // What "programs" shows, without fuel: a rule's own spending must not wake it again.
         var visible = string.Join(";", Programs.Select(program =>
             $"{program.Id}|{program.Instance}|{program.Name}|{program.State}|{program.Runs}|{program.Reason}"));
@@ -259,8 +279,24 @@ public static class ShellPrograms
             _programsText = visible;
             _programsRevision++; // Rules that read "programs" see the change.
         }
-        if (_path is null || text == _written)
+        if (_path is null)
             return;
+        var structure = string.Join(";", Programs.Where(program => !program.Finished).Select(program =>
+            $"{program.Id}|{program.Owner}|{program.Provider}|{program.State}|{program.Resume}|{program.Phase}|{program.Runs}|{program.InPhase}|{program.Kept}|{program.Source?.GetHashCode()}"));
+        var now = Environment.TickCount64;
+        if (!durable && structure == _writtenStructure && now - _lastWrite < LazyWriteMs)
+            return;
+        var file = new SavedFile(FileVersion, _round, _nextId, Programs.Where(program => !program.Finished).Select(program => new SavedProgram(
+            program.Id, program.Name, program.Instance, program.Owner.Id, program.Owner.Generation, program.Provider.Id, program.Provider.Generation,
+            program.Rule, program.Phases, program.LastEvent, program.Phase, program.Runs, program.State, program.Resume, program.ThrottledFrom,
+            program.Reason, program.Fuel, program.InPhase, Fields(program.Sent), Fields(program.Event), program.Source, program.Kept)).ToList());
+        var text = JsonSerializer.Serialize(file);
+        if (text == _written)
+        {
+            _writtenStructure = structure;
+            return;
+        }
+        var writeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
@@ -269,11 +305,17 @@ public static class ShellPrograms
             {
                 var bytes = System.Text.Encoding.UTF8.GetBytes(text);
                 stream.Write(bytes);
-                stream.Flush(true);
+                // No flush to the device: the rename makes the file whole for a Host that dies, and the OS keeps
+                // what was written. A machine that dies loses the round with DreamDaemon; waiting on the disk here
+                // cost a busy pass 40 ms (P10 load).
+                stream.Flush(false);
             }
             File.Move(temporary, _path, true);
             _written = text;
+            _writtenStructure = structure;
+            _lastWrite = now;
             SaveError = null;
+            Writes.Record(writeStarted, true);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -443,9 +485,11 @@ public static class ShellPrograms
     public static void Tick(GameNetworkService game)
     {
         var now = Environment.TickCount64;
-        if (now < _nextPass)
+        Due = now >= _nextPass;
+        if (!Due)
             return;
         _nextPass = now + PassEveryMs;
+        Passes++;
         var session = game.CaptureSession();
         Sync(session);
         if (Programs.Count == 0)
@@ -454,6 +498,7 @@ public static class ShellPrograms
             return;
         }
         var sent = false;
+        var due = new List<(Program Program, ShellHost.Scope Scope)>();
         for (var index = Programs.Count - 1; index >= 0; index--)
         {
             var program = Programs[index];
@@ -506,7 +551,10 @@ public static class ShellPrograms
                 Reads("jobs") ? session.Services.OperationsRevisionOf(program.Owner) : 0);
             if (program.State == "watching" && now >= program.NextEvaluation && program.Seen is { } seenIndex && seenIndex.Same(changes) &&
                 now < program.RefreshAt)
+            {
+                Unchanged++;
                 continue; // Nothing it reads has changed.
+            }
             if ((program.State == "running" || (program.State == "watching" && now >= program.NextEvaluation)) && !Afford(program, now))
             {
                 Throttle(program, now);
@@ -520,6 +568,7 @@ public static class ShellPrograms
                     program.NextEvaluation = now + EvaluateEveryMs;
                     program.Seen = changes;
                     program.RefreshAt = now + RefreshEveryMs;
+                    Evaluations++;
                     var ruleSource = new ShellHost.Source(game, session, scope);
                     var seen = NetShell.Run(program.Rule!, ruleSource, ShellHost.ProgramLimits);
                     program.Reads = ruleSource.Names;
@@ -542,13 +591,14 @@ public static class ShellPrograms
                         Finish(program, "faulted", "run budget spent");
                         break;
                     }
+                    Fired++;
                     program.Event = seen.Records;
                     program.Result = [];
                     program.Phase = 0;
-                    sent |= RunPhase(game, session, program, scope);
+                    due.Add((program, scope));
                     break;
                 case "running":
-                    sent |= RunPhase(game, session, program, scope);
+                    due.Add((program, scope));
                     break;
                 case "waiting":
                     var outcomes = program.Waiting.Select(id => session.Services.Operation(program.Owner, id)).ToArray();
@@ -570,9 +620,24 @@ public static class ShellPrograms
                     }).ToArray();
                     program.Phase++;
                     program.State = "running";
-                    sent |= RunPhase(game, session, program, scope with { KeyPrefix = scope.KeyPrefix + "w" });
+                    due.Add((program, scope with { KeyPrefix = scope.KeyPrefix + "w" }));
                     break;
             }
+        }
+        if (due.Count > 0)
+        {
+            // Every phase of this pass is marked on disk with one durable write before any of them runs: a
+            // crash in between runs none of them twice (at most once), and the pass waits on the disk once.
+            foreach (var (program, _) in due)
+            {
+                if (program.Phase == 0)
+                    program.Runs++;
+                program.InPhase = true;
+                PhasesRun++;
+            }
+            Save(durable: true);
+            foreach (var (program, scope) in due)
+                sent |= RunPhase(game, session, program, scope);
         }
         if (sent)
             game.DrainSubmissions();
@@ -582,12 +647,8 @@ public static class ShellPrograms
     /// <summary>Runs the current phase; returns whether it sent commands. Then the program waits, finishes or watches again.</summary>
     private static bool RunPhase(GameNetworkService game, GameNetworkService.Session session, Program program, ShellHost.Scope scope)
     {
-        if (program.Phase == 0)
-            program.Runs++;
         var presets = new Dictionary<string, IReadOnlyList<ShellRecord>>(StringComparer.Ordinal) { ["event"] = program.Event, ["result"] = program.Result };
         var sink = new ShellHost.Sink(session, scope);
-        program.InPhase = true;
-        Save();
         var result = NetShell.RunScript(program.Phases[program.Phase], new ShellHost.Source(game, session, scope), ShellHost.ProgramLimits, sink, presets);
         program.InPhase = false;
         var sent = sink.Results.Any(record => record["status"] as string == "sent");
