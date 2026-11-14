@@ -1500,6 +1500,51 @@ end
     }
     Assert-True ($heavyState -clike 'state=faulted,reason=program state * over 1200 bytes') "a program over its state budget is faulted: $heavyState"
 
+    # §14.4 NetEntity: a program moves to another device's shell. The source copy is fenced in the same step,
+    # the target continues with the state, and a device that still names the old copy gets "moved".
+    $shell3 = @{ endpoint = 'apc-3s'; generation = '1' }
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '3' } + $shell3)).ok) 'the shell endpoint of APC 3 attaches'
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'netshell.apc3'; serviceType = 'network.shell'; schema = 'shell.output'
+        major = 1; minor = 0 } + $shell3)).ok) 'APC 3 offers its shell'
+    $script:atCall = 0
+    function Invoke-ShellAt([string] $Instance, [string] $Command, [hashtable] $Arguments) {
+        $script:atCall++
+        Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = '2' }).ok) "heartbeat before $Command at $Instance"
+        Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = $Instance; command = $Command; idempotencyKey = "at-$script:atCall"
+            arguments = $Arguments; trafficClass = 1; timeoutTicks = 60 } + $engineer)).ok) "$Command sent to $Instance"
+        $answer = Wait-Result 'eng-1' $Command
+        Assert-True ($null -ne $answer) "$Command answered at $Instance"
+        return $answer.payload
+    }
+    $nomadSource = "every 10`n`$state = self | select node"
+    $nomad = Invoke-Program 'start' @{ name = 'nomad'; source = $nomadSource } '2'
+    Assert-True ($nomad.status -ceq 'started') "the entity starts on APC 2: $($nomad | ConvertTo-Json -Compress)"
+    $before = $null
+    for ($poll = 0; $poll -lt 30; $poll++) {
+        $before = (Invoke-Shell 'programs | where name -eq nomad | select generation revision memory' '2').rows
+        if ($before -clike 'generation=1,revision=1,*') { break }
+        Start-Sleep -Milliseconds 200
+    }
+    Assert-True ($before -ceq 'generation=1,revision=1,memory=6') "it ran once and keeps its state: $before"
+    $migrated = Invoke-Program 'migrate' @{ program = $nomad.program; to = 'netshell.apc3' } '2'
+    Assert-True ($migrated.status -ceq 'migrated' -and $migrated.program -eq $nomad.program -and $migrated.to -ceq 'netshell.apc3' -and $migrated.generation -eq 2) "the entity migrates: $($migrated | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Shell 'programs | where name -eq nomad | select state reason' '2').rows -ceq 'state=migrated,reason=moved to netshell.apc3') 'the source copy is fenced'
+    $there = (Invoke-ShellAt 'netshell.apc3' 'run' @{ line = 'programs | select program name generation revision memory' }).rows
+    # A moved timer runs at once on arrival, so the revision may already have grown here.
+    Assert-True ($there -clike "program=$($nomad.program),name=nomad,generation=2,revision=*,memory=6") "the target holds the same entity with its state: $there"
+    $arrived = [int](($there -split 'revision=')[1] -split ',')[0]
+    $ran = $arrived
+    for ($poll = 0; $poll -lt 100 -and $ran -le $arrived; $poll++) {
+        $ran = [int]((Invoke-ShellAt 'netshell.apc3' 'run' @{ line = 'programs | select revision' }).rows -replace 'revision=', '')
+        Start-Sleep -Milliseconds 200
+    }
+    Assert-True ($ran -gt $arrived) "the entity keeps running at the target: $arrived -> $ran"
+    $stale = Invoke-Program 'start' @{ name = 'nomad'; source = $nomadSource; ensure = $true } '2'
+    Assert-True ($stale.status -ceq 'moved' -and $stale.to -ceq 'netshell.apc3' -and $stale.program -eq $nomad.program) "a device that still names the old copy gets moved: $($stale | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Program 'migrate' @{ program = $nomad.program; to = 'netshell.apc3' } '2').status -ceq 'unknown_program') 'the fenced copy cannot move again'
+    Assert-True ((Invoke-ShellAt 'netshell.apc3' 'migrate' @{ program = $nomad.program; to = 'netshell.nowhere' }).status -ceq 'forbidden') 'a target the owner cannot use is refused'
+    Assert-True ((Invoke-ShellAt 'netshell.apc3' 'stop' @{ program = $nomad.program }).status -ceq 'stopped') 'the owner stops the entity where it runs'
+
     if ($IsLinux) {
         Assert-StartupRejected $socketPath
         Assert-True ((Invoke-Next @{ op = 'game_stats' }).game.nodes -eq 3) 'second Host does not unlink live socket'

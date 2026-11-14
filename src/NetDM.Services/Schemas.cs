@@ -435,21 +435,34 @@ public sealed class SchemaRegistry
         [
             new SchemaField("name", SchemaFieldType.Text, true, MaxLength: 32),
             new SchemaField("source", SchemaFieldType.MultilineText, true, MaxLength: NetShell.MaxScriptLength),
-            new SchemaField("ensure", SchemaFieldType.Boolean, false)
-        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["name", "source", "ensure"] }, MaxPayloadBytes: 4096));
+            new SchemaField("ensure", SchemaFieldType.Boolean, false),
+            // The program a device's media last knew it as: a copy of an entity that moved is refused ("moved").
+            new SchemaField("entity", SchemaFieldType.Integer, false, 1, 1_000_000_000)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["name", "source", "ensure", "entity"] }, MaxPayloadBytes: 4096));
         registry.Register(new SchemaDefinition("shell.stop_request", 1, 0,
             [new SchemaField("program", SchemaFieldType.Integer, true, 1, 1_000_000_000)],
             new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["program"] }, MaxPayloadBytes: 64));
         registry.Register(new SchemaDefinition("shell.program", 1, 0,
         [
             new SchemaField("status", SchemaFieldType.Enum, true, Values:
-                ["started", "running", "stopped", "unknown_program", "parse_error", "unknown_command", "invalid_argument", "limit_exceeded"]),
+                ["started", "running", "stopped", "unknown_program", "parse_error", "unknown_command", "invalid_argument", "limit_exceeded",
+                 "migrated", "moved", "busy", "unreachable", "forbidden"]),
             new SchemaField("program", SchemaFieldType.Integer, false, 0, 1_000_000_000),
             new SchemaField("error", SchemaFieldType.Text, false, MaxLength: 200),
-            new SchemaField("position", SchemaFieldType.Integer, false, 0, 4096)
-        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "program", "error", "position"] }, MaxPayloadBytes: 512));
+            new SchemaField("position", SchemaFieldType.Integer, false, 0, 4096),
+            // Where an entity now runs ("migrated", "moved") and its generation there.
+            new SchemaField("to", SchemaFieldType.Text, false, MaxLength: 64),
+            new SchemaField("generation", SchemaFieldType.Integer, false, 1, 1_000_000)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "program", "error", "position", "to", "generation"] }, MaxPayloadBytes: 512));
         registry.RegisterCommand("network.shell", "start", "shell.program_request", 1, "shell.program", 1);
         registry.RegisterCommand("network.shell", "stop", "shell.stop_request", 1, "shell.program", 1);
+        // NetEntity migration (§14.4): the owner moves its program to another device's shell.
+        registry.Register(new SchemaDefinition("shell.migrate_request", 1, 0,
+        [
+            new SchemaField("program", SchemaFieldType.Integer, true, 1, 1_000_000_000),
+            new SchemaField("to", SchemaFieldType.Text, true, MaxLength: 64)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["program", "to"] }, MaxPayloadBytes: 160));
+        registry.RegisterCommand("network.shell", "migrate", "shell.migrate_request", 1, "shell.program", 1);
 
         // Discovery is a network round trip answered by the provider's descriptor.
         registry.Register(new SchemaDefinition("directory.probe", 1, 0,

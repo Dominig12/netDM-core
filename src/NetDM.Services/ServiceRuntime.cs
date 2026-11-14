@@ -414,6 +414,15 @@ public sealed class ServiceRuntime
                 ? Descriptor(target) : null;
     }
 
+    /// <summary>The provider of a service the requester may discover, or null: hidden and missing look the same.</summary>
+    public (EndpointKey Provider, NodeId Node, string ServiceType)? DiscoverableProvider(EndpointKey requester, string instance)
+    {
+        lock (_gate)
+            return Require(requester, out var asker) == ServiceStatus.Ok && _services.TryGetValue(instance, out var target) &&
+                Require(target.Owner, out var owner) == ServiceStatus.Ok && Allows(target.Policy.Discover, asker!, owner!)
+                ? (target.Owner, owner!.Node, target.ServiceType) : null;
+    }
+
     /// <summary>The node of a service the requester may discover, or null: hidden and missing look the same.</summary>
     public NodeId? DiscoverableNode(EndpointKey requester, string instance)
     {

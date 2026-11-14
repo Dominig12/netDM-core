@@ -121,9 +121,17 @@ public static class ShellPrograms
         program.Reason = $"device budget spent: {budget.Fuel} fuel, {budget.Actions} commands this minute";
     }
 
+    /// <summary>
+    /// A program is a network entity (§14.4): its ID is its identity for the round, its generation grows with
+    /// every migration, its revision with every phase it completed. One copy executes: a migration fences the
+    /// source in the same step that activates the target, and a device's media that still names the old copy
+    /// gets "moved" instead of a second one.
+    /// </summary>
     private sealed class Program
     {
         public int Id;
+        public int Generation = 1;
+        public long Revision;
         public string Name = "", Instance = "", State = "running", Reason = "", Resume = "running", ThrottledFrom = "running";
         public EndpointKey Owner, Provider;
         public string? Rule;
@@ -145,7 +153,8 @@ public static class ShellPrograms
         public HashSet<string>? Reads;
         public long[] Waiting = [];
         public IReadOnlyList<ShellRecord> Sent = [], Event = [], Result = [];
-        public bool Finished => State is "done" or "faulted" or "stopped";
+        public bool Finished => State is "done" or "faulted" or "stopped" or "migrated";
+        public Program Copy() => (Program)MemberwiseClone();
         /// <summary>Restored or carried over a new runtime: its endpoints may still be on their way back.</summary>
         public bool Detached;
         public long DetachedSince;
@@ -168,9 +177,15 @@ public static class ShellPrograms
         ulong ProviderGeneration, string? Rule, string[] Phases, string? LastEvent, int Phase, int Runs, string State, string Resume,
         string ThrottledFrom, string Reason, long Fuel, bool InPhase, List<Dictionary<string, JsonElement>> Sent,
         List<Dictionary<string, JsonElement>> Event, string? Source = null, bool Kept = false, int Every = 0,
-        List<Dictionary<string, JsonElement>>? Memory = null);
+        List<Dictionary<string, JsonElement>>? Memory = null, int Generation = 1, long Revision = 0);
 
-    private sealed record SavedFile(int Version, Guid Round, int NextId, List<SavedProgram> Programs);
+    /// <summary>Where an entity went: a device's media may still name it under its old device.</summary>
+    private sealed record Moved(int Id, string From, string Name, string OwnerId, string? Source, string To, int Generation);
+
+    private sealed record SavedFile(int Version, Guid Round, int NextId, List<SavedProgram> Programs, List<Moved>? Moves = null);
+
+    /// <summary>Recent migrations, oldest first, at most <see cref="MaxTotal"/>.</summary>
+    private static readonly List<Moved> Moves = [];
 
     private static (string Directory, Guid Round)? _pendingBind;
     private static readonly object BindGate = new();
@@ -209,6 +224,7 @@ public static class ShellPrograms
         _path = Path.Combine(target.Directory, $"programs-{target.Round:N}.json");
         Programs.Clear();
         Budgets.Clear();
+        Moves.Clear();
         _nextId = 0;
         _written = _writtenStructure = null;
         try
@@ -222,6 +238,7 @@ public static class ShellPrograms
             var now = Environment.TickCount64;
             foreach (var entry in saved.Programs.Take(MaxTotal))
                 Programs.Add(Restore(entry, now));
+            Moves.AddRange((saved.Moves ?? []).TakeLast(MaxTotal));
             _written = File.ReadAllText(_path);
         }
         catch (Exception exception) when (exception is IOException or JsonException or UnauthorizedAccessException or InvalidOperationException)
@@ -239,7 +256,8 @@ public static class ShellPrograms
             LastEvent = saved.LastEvent, Phase = saved.Phase, Runs = saved.Runs, State = saved.State, Resume = saved.Resume,
             ThrottledFrom = saved.ThrottledFrom, Reason = saved.Reason, Fuel = saved.Fuel, Sent = saved.Sent.Select(Record).ToArray(),
             Event = saved.Event.Select(Record).ToArray(), Source = saved.Source, Kept = saved.Kept, Every = saved.Every,
-            Memory = saved.Memory?.Select(Record).ToArray() ?? [], Detached = true, SuspendedAt = now
+            Memory = saved.Memory?.Select(Record).ToArray() ?? [], Generation = saved.Generation, Revision = saved.Revision,
+            Detached = true, SuspendedAt = now
         };
         if (saved.InPhase)
         {
@@ -298,14 +316,16 @@ public static class ShellPrograms
         if (_path is null)
             return;
         var structure = string.Join(";", Programs.Where(program => !program.Finished).Select(program =>
-            $"{program.Id}|{program.Owner}|{program.Provider}|{program.State}|{program.Resume}|{program.Phase}|{program.Runs}|{program.InPhase}|{program.Kept}|{program.Source?.GetHashCode()}"));
+            $"{program.Id}|{program.Owner}|{program.Provider}|{program.State}|{program.Resume}|{program.Phase}|{program.Runs}|{program.InPhase}|{program.Kept}|{program.Source?.GetHashCode()}|{program.Generation}"))
+            + "#" + Moves.Count.ToString(CultureInfo.InvariantCulture);
         var now = Environment.TickCount64;
         if (!durable && structure == _writtenStructure && now - _lastWrite < LazyWriteMs)
             return;
         var file = new SavedFile(FileVersion, _round, _nextId, Programs.Where(program => !program.Finished).Select(program => new SavedProgram(
             program.Id, program.Name, program.Instance, program.Owner.Id, program.Owner.Generation, program.Provider.Id, program.Provider.Generation,
             program.Rule, program.Phases, program.LastEvent, program.Phase, program.Runs, program.State, program.Resume, program.ThrottledFrom,
-            program.Reason, program.Fuel, program.InPhase, Fields(program.Sent), Fields(program.Event), program.Source, program.Kept, program.Every, Fields(program.Memory))).ToList());
+            program.Reason, program.Fuel, program.InPhase, Fields(program.Sent), Fields(program.Event), program.Source, program.Kept, program.Every, Fields(program.Memory), program.Generation,
+            program.Revision)).ToList(), Moves.ToList());
         var text = JsonSerializer.Serialize(file);
         if (text == _written)
         {
@@ -370,6 +390,8 @@ public static class ShellPrograms
             applied = () => Programs.Remove(found);
             return JsonSerializer.SerializeToElement(new { status = "stopped", program = id });
         }
+        if (command.Command == "migrate")
+            return Migrate(session, command, arguments, out applied);
         var name = arguments.GetProperty("name").GetString() ?? "";
         var text = arguments.GetProperty("source").GetString() ?? "";
         object Refuse(string status, string error, int position = 0) => new { status, error = ShellHost.Printable(error), position };
@@ -383,6 +405,15 @@ public static class ShellPrograms
             (ensureFlag.ValueKind == JsonValueKind.True || (ensureFlag.ValueKind == JsonValueKind.Number && ensureFlag.TryGetInt32(out var one) && one == 1));
         var kept = ensure ? Programs.Find(program => !program.Finished && program.Name == name && program.Instance == command.Instance &&
             program.Owner.Id == command.InitiatorKey.Id && program.Provider.Id == command.ProviderKey.Id) : null;
+        // The media names an entity that moved to another device: that copy is fenced, not started again.
+        var entity = arguments.TryGetProperty("entity", out var entityValue) && entityValue.ValueKind == JsonValueKind.Number &&
+            entityValue.TryGetInt32(out var entityId) ? entityId : 0;
+        // Media that names the entity is matched by it (the device may be back with a new endpoint); media
+        // that does not yet is matched by device, owner and text.
+        var moved = ensure && kept is null ? Moves.LastOrDefault(move => move.Name == name && (entity != 0 ? move.Id == entity
+            : move.From == command.Instance && move.OwnerId == command.InitiatorKey.Id && move.Source == text)) : null;
+        if (moved is not null)
+            return JsonSerializer.SerializeToElement(new { status = "moved", program = moved.Id, to = moved.To, generation = moved.Generation });
         if (kept is not null && (kept.Owner.Generation > command.InitiatorKey.Generation || kept.Provider.Generation > command.ProviderKey.Generation))
             return JsonSerializer.SerializeToElement(Refuse("invalid_argument", "a newer endpoint of this device runs the program"));
         if (kept is not null && kept.Source == text)
@@ -477,6 +508,61 @@ public static class ShellPrograms
         return JsonSerializer.SerializeToElement(new { status = "started", program = started.Id });
     }
 
+    /// <summary>
+    /// Migration of an entity (§14.4): prepare (the owner's program here, idle, a target the owner may reach and
+    /// call), snapshot (its state, memory and position), fence (this copy becomes "migrated" and never runs
+    /// again) and activate (the copy at the target, generation + 1) happen in one step of the one loop that runs
+    /// programs, so at no moment two copies run. The owner's rights stay its own: a new device lends nothing.
+    /// </summary>
+    private static JsonElement Migrate(GameNetworkService.Session session, HostCommand command, JsonElement arguments, out Action? applied)
+    {
+        applied = null;
+        object Answer(string status, string? error = null, int program = 0) =>
+            error is null ? new { status, program } : new { status, program, error = ShellHost.Printable(error) };
+        var id = (int)arguments.GetProperty("program").GetDouble();
+        var to = arguments.GetProperty("to").GetString() ?? "";
+        var found = Programs.Find(program => program.Id == id && program.Instance == command.Instance &&
+            program.Owner == command.InitiatorKey && program.Provider == command.ProviderKey && !program.Finished);
+        if (found is null)
+            return JsonSerializer.SerializeToElement(Answer("unknown_program", program: id));
+        if (!ServiceNames.IsValid(to) || to == command.Instance)
+            return JsonSerializer.SerializeToElement(Answer("invalid_argument", "migrate <program> <shell instance of another device>", id));
+        if (found.State is "waiting" || found.InPhase)
+            return JsonSerializer.SerializeToElement(Answer("busy", "the program waits for its commands: migrate it after", id));
+        // The target is a shell the owner may see and call, as it could itself; hidden and missing look the same.
+        if (session.Services.DiscoverableProvider(found.Owner, to) is not { ServiceType: ShellHost.ServiceType } target ||
+            session.Services.ResidentCommandNode(found.Owner, target.Provider, to) is null)
+            return JsonSerializer.SerializeToElement(Answer("forbidden", "no shell the owner may use there", id));
+        if (NetworkDiagnostics.Trace(session.Medium.Snapshot, command.ProviderNode, target.Node, QueryHost.ReachBudget).State !=
+            NetworkDiagnostics.Reachable)
+            return JsonSerializer.SerializeToElement(Answer("unreachable", "the target device is out of reach from here", id));
+        if (Programs.Count(program => !program.Finished && program.Instance == to) >= MaxPerDevice)
+            return JsonSerializer.SerializeToElement(Answer("limit_exceeded", $"a device holds at most {MaxPerDevice} programs", id));
+        var generation = found.Generation + 1;
+        applied = () =>
+        {
+            var moved = found.Copy();
+            moved.Instance = to;
+            moved.Provider = target.Provider;
+            moved.Generation = generation;
+            moved.Kept = false; // The target's media does not hold it; the round's file does.
+            moved.Detached = false;
+            moved.DetachedSince = 0;
+            moved.Seen = null;
+            moved.Reads = null;
+            moved.NextEvaluation = 0;
+            found.State = "migrated";
+            found.Reason = ShellHost.Printable($"moved to {to}");
+            found.Waiting = [];
+            Programs.Add(moved);
+            Moves.Add(new Moved(found.Id, command.Instance, found.Name, found.Owner.Id, found.Source, to, generation));
+            if (Moves.Count > MaxTotal)
+                Moves.RemoveAt(0);
+            Save(durable: true);
+        };
+        return JsonSerializer.SerializeToElement(new { status = "migrated", program = id, to, generation });
+    }
+
     private static string Code(ShellStatus status) => status switch
     {
         ShellStatus.UnknownCommand => "unknown_command",
@@ -503,7 +589,8 @@ public static class ShellPrograms
         Sync(session);
         return Programs.Where(program => program.Instance == scope.Instance && program.Owner == scope.Initiator)
             .Select(program => ShellHost.Record(("program", (long)program.Id), ("name", program.Name), ("state", program.State),
-                ("runs", (long)program.Runs), ("fuel", program.Fuel), ("memory", (long)StateBytes(program)), ("reason", program.Reason))).ToArray();
+                ("runs", (long)program.Runs), ("fuel", program.Fuel), ("memory", (long)StateBytes(program)),
+                ("generation", (long)program.Generation), ("revision", program.Revision), ("reason", program.Reason))).ToArray();
     }
 
     /// <summary>What a program holds now, counted as the formatted text of its records.</summary>
@@ -719,6 +806,7 @@ public static class ShellPrograms
         }
         if (result.Variables?.TryGetValue("state", out var kept) == true)
             program.Memory = kept; // "$state = …" in a phase: kept for the next phase and the next run.
+        program.Revision++;
         if (program.Phase + 1 < program.Phases.Length)
         {
             // "wait": the commands of this phase, sent or not, are what the next phase finds in $result.
