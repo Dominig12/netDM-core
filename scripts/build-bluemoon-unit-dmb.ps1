@@ -22,6 +22,10 @@ $files = @('tgstation.dme', 'code/game/world.dm', 'code/game/area/areas.dm', 'co
     'code/modules/power/apc.dm', 'code/modules/shuttle/docking.dm', 'code/controllers/subsystem/mapping.dm',
     'code/modules/modular_computers/computers/item/computer.dm', 'code/modules/modular_computers/computers/item/computer_ui.dm',
     'code/modules/research/techweb/nodes/robotics_nodes.dm',
+    # ResearchEvidence call sites (14.11.2026): the points carry their source machine.
+    'code/modules/research/techweb/_techweb.dm', 'code/modules/research/destructive_analyzer.dm', 'code/modules/research/experimentor.dm',
+    'code/game/machinery/doppler_array.dm', 'code/modules/power/tesla/coil.dm', 'code/modules/power/singularity/collector.dm',
+    'code/modules/surgery/experimental_dissection.dm', 'code/modules/netdm/network_space.dm',
     'code/__DEFINES/dcs/signals.dm', 'code/game/machinery/_machinery.dm',
     'code/modules/mapping/space_management/space_reservation.dm', 'code/modules/unit_tests/_unit_tests.dm',
     'code/modules/unit_tests/netdm_observe.dm', '_maps/map_files/generic/CentCom_hermetic.dmm')
