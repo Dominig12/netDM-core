@@ -21,6 +21,7 @@
 # Stop with Ctrl+C, by creating <BuildDirectory>\netdm-stand.stop, or after -Minutes.
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot)
+. "$PSScriptRoot\tgui-tools.ps1"
 foreach ($path in $BuildDirectory, $BridgeDll, $GameRepository) {
     if (-not (Test-Path -LiteralPath $path)) { throw "Not found: $path. Run from the netDM-core root after the BlueMoon export." }
 }
@@ -35,10 +36,11 @@ if (-not $NoBuild) {
     dotnet build src/NetDM.Host -c Release -v quiet -nologo | Select-String -Pattern ' error |Build succeeded' | ForEach-Object { $_.Line }
     if ($LASTEXITCODE -ne 0) { throw 'The Host build failed.' }
     Write-Host '== Building TGUI'
+    Assert-NodeForTgui
+    Install-TguiPackages $GameRepository
     Push-Location (Join-Path $GameRepository 'tgui')
     try {
         $yarn = Get-ChildItem -LiteralPath '.yarn/releases' -Filter 'yarn-*.cjs' | Select-Object -First 1
-        if (!$yarn) { throw 'The pinned Yarn release is missing.' }
         node $yarn.FullName run tgui:build
         if ($LASTEXITCODE -ne 0) { throw 'The TGUI build failed.' }
     }

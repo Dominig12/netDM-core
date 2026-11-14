@@ -14,6 +14,7 @@ param(
 # Keep both checkouts on a short path (for example C:\netdm): DreamMaker fails on long paths.
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot)
+. "$PSScriptRoot\tgui-tools.ps1"
 
 function Require([string] $Command, [string] $Hint) {
     if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) { throw "Not found: $Command. $Hint" }
@@ -21,6 +22,7 @@ function Require([string] $Command, [string] $Hint) {
 Require git 'Install Git.'
 Require dotnet 'Install the .NET 10 SDK.'
 Require node 'Install Node.js 24.'
+Assert-NodeForTgui
 Require cmake 'Install CMake 3.21+ (the Visual Studio workload "Desktop development with C++" includes it).'
 $dotnetMajor = [int](((dotnet --version) -split '\.')[0])
 if ($dotnetMajor -lt 10) { throw "The .NET 10 SDK is required; dotnet --version is $(dotnet --version)." }
@@ -54,16 +56,7 @@ else {
 }
 
 Write-Host '== TGUI packages'
-Push-Location (Join-Path $GameRepository 'tgui')
-try {
-    if ($Rebuild -or -not (Test-Path -LiteralPath '.pnp.cjs')) {
-        $yarn = Get-ChildItem -LiteralPath '.yarn/releases' -Filter 'yarn-*.cjs' | Select-Object -First 1
-        if (!$yarn) { throw 'The pinned Yarn release is missing in tgui/.yarn/releases.' }
-        node $yarn.FullName install
-        if ($LASTEXITCODE -ne 0) { throw 'yarn install failed.' }
-    }
-}
-finally { Pop-Location }
+Install-TguiPackages $GameRepository
 
 Write-Host @"
 
