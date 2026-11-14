@@ -1507,9 +1507,9 @@ end
     Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'netshell.apc3'; serviceType = 'network.shell'; schema = 'shell.output'
         major = 1; minor = 0 } + $shell3)).ok) 'APC 3 offers its shell'
     $script:atCall = 0
-    function Invoke-ShellAt([string] $Instance, [string] $Command, [hashtable] $Arguments) {
+    function Invoke-ShellAt([string] $Instance, [string] $Command, [hashtable] $Arguments, [string] $Sequence = '2') {
         $script:atCall++
-        Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = '2' }).ok) "heartbeat before $Command at $Instance"
+        Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = $Sequence }).ok) "heartbeat before $Command at $Instance"
         Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = $Instance; command = $Command; idempotencyKey = "at-$script:atCall"
             arguments = $Arguments; trafficClass = 1; timeoutTicks = 60 } + $engineer)).ok) "$Command sent to $Instance"
         $answer = Wait-Result 'eng-1' $Command
@@ -1544,6 +1544,36 @@ end
     Assert-True ((Invoke-Program 'migrate' @{ program = $nomad.program; to = 'netshell.apc3' } '2').status -ceq 'unknown_program') 'the fenced copy cannot move again'
     Assert-True ((Invoke-ShellAt 'netshell.apc3' 'migrate' @{ program = $nomad.program; to = 'netshell.nowhere' }).status -ceq 'forbidden') 'a target the owner cannot use is refused'
     Assert-True ((Invoke-ShellAt 'netshell.apc3' 'stop' @{ program = $nomad.program }).status -ceq 'stopped') 'the owner stops the entity where it runs'
+
+    # P12.1 network space: the operator learns the network by scanning from a device's shell. Hidden services are
+    # never recorded; a scan is allowed once in 10 s; a broken route makes what lies behind it stale at once.
+    $secret = @{ endpoint = 'hidden-9'; generation = '1' }
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '3'; domain = 'syndicate' } + $secret)).ok) 'a device of another domain attaches behind APC 3'
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'secret.door'; serviceType = 'machine.door'; schema = 'machine.door_state'
+        major = 1; discoverScope = 'domain' } + $secret)).ok) 'it offers a service hidden from the station'
+    $scan = Invoke-ShellAt 'netshell.apc2' 'scan' @{ radius = 1 }
+    Assert-True ($scan.status -ceq 'complete' -and $scan.nodes -eq 3 -and $scan.links -eq 2 -and $scan.services -ge 4) "a scan from APC 2 finds its neighbourhood: $($scan | ConvertTo-Json -Compress)"
+    $known = Invoke-ShellAt 'netshell.apc2' 'knowledge' @{ since = 0 }
+    $items = "$($known.items)" -split ','
+    Assert-True ($known.status -ceq 'complete' -and $known.count -eq $items.Count) "knowledge is read in one page: $($known | ConvertTo-Json -Compress)"
+    Assert-True (@($items | Where-Object { $_ -clike 'n|2|relay|2|1|1|*|fresh' }).Count -eq 1 -and
+        @($items | Where-Object { $_ -clike 'n|3|relay|3|1|2|*|fresh' }).Count -eq 1 -and
+        @($items | Where-Object { $_ -clike 'l|2|3|up|*|fresh' }).Count -eq 1 -and
+        @($items | Where-Object { $_ -clike 's|door.a|machine.door|3|*|fresh' }).Count -eq 1) "the operator knows the relays, the cable and the door: $($known.items)"
+    Assert-True (-not ("$($known.items)" -clike '*secret.door*')) 'a hidden service is never in the knowledge'
+    $again = Invoke-ShellAt 'netshell.apc2' 'scan' @{ radius = 1 }
+    Assert-True ($again.status -ceq 'busy' -and $again.retryAfter -gt 0) "a second scan waits: $($again | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '3'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 0; operational = 1 }) }).ok) 'APC 3 loses power behind the operator'
+    $changed = Invoke-ShellAt 'netshell.apc2' 'knowledge' @{ since = $known.revision } '3'
+    $changes = "$($changed.items)" -split ','
+    Assert-True (@($changes | Where-Object { $_ -clike 'n|3|relay|*|stale' }).Count -eq 1 -and
+        @($changes | Where-Object { $_ -clike 's|door.a|*|stale' }).Count -eq 1 -and
+        @($changes | Where-Object { $_ -clike 'l|2|3|*|stale' }).Count -eq 1 -and
+        -not ($changes | Where-Object { $_ -clike 'n|2|*' -or $_ -clike 'n|1|*' })) "what lies behind the cut turns stale at once, nothing else changes: $($changed.items)"
+    Assert-True ([long]$changed.revision -gt [long]$known.revision) 'the change has a newer revision'
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '4'
+        changes = @(@{ op = 'node_state'; a = '3'; powered = 1; operational = 1 }) }).ok) 'APC 3 has power again'
 
     if ($IsLinux) {
         Assert-StartupRejected $socketPath

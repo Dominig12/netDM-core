@@ -32,6 +32,8 @@ public static class ShellHost
     {
         applied = null;
         using var arguments = JsonDocument.Parse(command.Arguments);
+        if (command.Command is "scan" or "knowledge")
+            return NetworkSpace.Answer(game, session, command, arguments.RootElement);
         if (command.Command is "start" or "stop" or "migrate")
             return ShellPrograms.Answer(session, command, arguments.RootElement, out applied);
         var scope = new Scope(command.InitiatorKey, command.Instance, command.ProviderNode, command.DeliveryId,

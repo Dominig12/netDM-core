@@ -456,6 +456,37 @@ public sealed class SchemaRegistry
         ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "program", "error", "position", "to", "generation"] }, MaxPayloadBytes: 512));
         registry.RegisterCommand("network.shell", "start", "shell.program_request", 1, "shell.program", 1);
         registry.RegisterCommand("network.shell", "stop", "shell.stop_request", 1, "shell.program", 1);
+        // P12.1 network space: an operator scans from a device's shell and reads what it knows as pages of
+        // changes. Items are "n|id|role|x|y|z", "l|a|b|state", "s|instance|type|node" with "|age|fresh" or
+        // "|age|stale" appended, and "r|<key>" for an item the operator forgot.
+        registry.Register(new SchemaDefinition("shell.scan_request", 1, 0,
+            [new SchemaField("radius", SchemaFieldType.Integer, false, 1, 8)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["radius"] }, MaxPayloadBytes: 64));
+        registry.Register(new SchemaDefinition("shell.scan", 1, 0,
+        [
+            new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "partial", "busy"]),
+            new SchemaField("revision", SchemaFieldType.Integer, true, 0),
+            new SchemaField("nodes", SchemaFieldType.Integer, true, 0, 4096),
+            new SchemaField("links", SchemaFieldType.Integer, true, 0, 8192),
+            new SchemaField("services", SchemaFieldType.Integer, true, 0, 4096),
+            new SchemaField("retryAfter", SchemaFieldType.Integer, false, 0, 3600)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "revision", "nodes", "links", "services", "retryAfter"] },
+            MaxPayloadBytes: 256));
+        registry.Register(new SchemaDefinition("shell.knowledge_request", 1, 0,
+        [
+            new SchemaField("since", SchemaFieldType.Integer, false, 0),
+            new SchemaField("limit", SchemaFieldType.Integer, false, 1, 64)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["since", "limit"] }, MaxPayloadBytes: 96));
+        registry.Register(new SchemaDefinition("shell.knowledge", 1, 0,
+        [
+            new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "partial", "reset"]),
+            new SchemaField("revision", SchemaFieldType.Integer, true, 0),
+            new SchemaField("count", SchemaFieldType.Integer, true, 0, 64),
+            new SchemaField("items", SchemaFieldType.Text, true, MaxLength: 3600)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "revision", "count", "items"] }, MaxPayloadBytes: 4096));
+        registry.RegisterCommand("network.shell", "scan", "shell.scan_request", 1, "shell.scan", 1);
+        registry.RegisterCommand("network.shell", "knowledge", "shell.knowledge_request", 1, "shell.knowledge", 1);
+
         // NetEntity migration (§14.4): the owner moves its program to another device's shell.
         registry.Register(new SchemaDefinition("shell.migrate_request", 1, 0,
         [

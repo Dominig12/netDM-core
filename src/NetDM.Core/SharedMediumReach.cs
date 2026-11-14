@@ -51,6 +51,49 @@ public sealed partial class SharedMediumNetwork
         int cableHopsPerTick = 16) => ReachAll(snapshot, sources, targets, maxExplored, cableHopsPerTick, out _);
 
     /// <summary>
+    /// Nodes within <paramref name="maxHops"/> hops of a node over the links that carry traffic now, wired
+    /// and radio, each with its hop count, as one bounded breadth-first walk. As in <see cref="ReachAll"/>,
+    /// only the origin and forwarding nodes pass traffic on. At most <paramref name="maxNodes"/> nodes are
+    /// returned; <paramref name="truncated"/> says the walk stopped there.
+    /// </summary>
+    public static IReadOnlyDictionary<NodeId, int> Neighborhood(SharedMediumSnapshot snapshot, NodeId origin, int maxHops,
+        int maxNodes, out bool truncated)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxHops);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxNodes);
+        var nodes = snapshot.Physical.Nodes;
+        var hops = new Dictionary<NodeId, int>();
+        truncated = false;
+        if (!nodes.ContainsKey(origin))
+            return hops;
+        hops[origin] = 0;
+        var frontier = new List<NodeId> { origin };
+        for (var depth = 1; depth <= maxHops && frontier.Count > 0; depth++)
+        {
+            var next = new List<NodeId>();
+            foreach (var node in frontier)
+            {
+                if (node != origin && !nodes[node].CanForward)
+                    continue;
+                foreach (var to in nodes[node].Links.Values.Select(link => link.To).Concat(RadioNeighbors(snapshot, node).Select(edge => edge.To)))
+                {
+                    if (hops.ContainsKey(to))
+                        continue;
+                    if (hops.Count >= maxNodes)
+                    {
+                        truncated = true;
+                        return hops;
+                    }
+                    hops[to] = depth;
+                    next.Add(to);
+                }
+            }
+            frontier = next;
+        }
+        return hops;
+    }
+
+    /// <summary>
     /// The cheapest route from one node to another as its nodes, the source first, each with whether it was
     /// reached over radio. Null when the target is not reached within <paramref name="maxExplored"/> nodes.
     /// </summary>

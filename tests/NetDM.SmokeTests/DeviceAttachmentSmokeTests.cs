@@ -51,6 +51,12 @@ static class DeviceAttachmentSmokeTests
             cableRoute.Nodes.SequenceEqual([(new NodeId(50), false), (Apc2, false), (Apc3, false)]) &&
             NetworkDiagnostics.Route(medium.Snapshot, Apc1, Apc1).Nodes.SequenceEqual([(Apc1, false)]) &&
             NetworkDiagnostics.Route(medium.Snapshot, Apc1, new NodeId(99)).State == "unknown", "a route lists its nodes from the device");
+        var near = SharedMediumNetwork.Neighborhood(medium.Snapshot, Apc1, 1, 16, out var nearCut);
+        var around = SharedMediumNetwork.Neighborhood(medium.Snapshot, new NodeId(50), 3, 16, out _);
+        var cut = SharedMediumNetwork.Neighborhood(medium.Snapshot, Apc1, 3, 2, out var cutShort);
+        Check(!nearCut && near.Count == 2 && near[Apc1] == 0 && near[Apc2] == 1 &&
+            around.Count == 4 && around[new NodeId(50)] == 0 && around[Apc2] == 1 && around[Apc1] == 2 && around[Apc3] == 2 &&
+            cutShort && cut.Count == 2, "a neighbourhood counts hops over live links and stops at its bounds");
         var radioWorld = new SharedMediumNetwork(new NetworkRuntime(), searchMode: SharedRadioSearchMode.AStarDense);
         radioWorld.ApplyExternalTopology([Node(60, 1, true), Node(61, 4, true), Node(62, 5, true), Wire(61, 62)],
             [new RadioNodeUpdate(new NodeId(60), Profile: new RadioProfile(6, 1), ChangeProfile: true),
