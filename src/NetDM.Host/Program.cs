@@ -247,8 +247,9 @@ app.MapPost("/api/research/background/reset", (NetDM.Host.Research.ResearchHost 
     return Results.Accepted();
 });
 
+// outer=true also lists edges to nodes outside the viewport, such as an APC link to another level.
 app.MapGet("/api/game/map", (GameNetworkService game,
-    int? minX, int? minY, int? maxX, int? maxY, int? z, int? limit) =>
+    int? minX, int? minY, int? maxX, int? maxY, int? z, int? limit, bool? outer) =>
 {
     var (streamId, snapshot) = game.CaptureTopology();
     var physical = snapshot.Physical;
@@ -264,7 +265,7 @@ app.MapGet("/api/game/map", (GameNetworkService game,
         left, top, right, bottom, layer, maxNodes);
     var ids = nodes.Select(node => node.Id).ToHashSet();
     var edges = nodes.SelectMany(node => node.Links.Values
-        .Where(edge => node.Id.Value < edge.To.Value && ids.Contains(edge.To))
+        .Where(edge => outer == true ? node.Id.Value < edge.To.Value || !ids.Contains(edge.To) : node.Id.Value < edge.To.Value && ids.Contains(edge.To))
         .Select(edge => new { a = node.Id.ToString(), b = edge.To.ToString(), cost = edge.Cost }))
         .Take(maxNodes * 8).ToArray();
     return Results.Ok(new

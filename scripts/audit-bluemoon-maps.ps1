@@ -48,13 +48,14 @@ $rows = foreach ($file in Get-ChildItem -LiteralPath $out -Filter '*.json' | Sor
     $largest = if ($r.component_sizes.Count) { $r.component_sizes[0] } else { 0 }
     $island_tiles = ($r.islands | Measure-Object -Property tiles -Sum).Sum
     $stationWithout = @($r.without_apc | Where-Object { $_.station })
-    '| {0} | {1} | {2} | {3} | {4} | {5} ({6}) | {7} | {8} ({9}) | {10} ({11}) | {12} | {13} | {14} |' -f $r.map,
+    '| {0} | {1} | {2} | {3} | {4} | {5} ({6}) | {7} | {8} ({9}) | {10} ({11}) | {12} | {13} | {14} | {15} ({16}) | {17} | {18} | {19} | {20} |' -f $r.map,
         ($r.station_levels -join ','), $r.apcs, $r.zones, $r.links, $r.components, $largest, $r.isolated.Count,
         $r.islands.Count, [int]$island_tiles, $stationWithout.Count, $r.without_apc_tiles, $r.unexported.Count,
-        $r.multiple_apcs.Count, $r.mismatched_apcs.Count
+        $r.multiple_apcs.Count, $r.mismatched_apcs.Count, $r.host_components,
+        ($r.host_component_sizes.Count ? $r.host_component_sizes[0] : 0), $r.host_isolated, $r.host_groups, $r.host_wires, $r.host_bridges
 }
 $header = @(
-    '| Карта | Z станции | APC | Зоны | Рёбра | Компоненты (крупнейшая) | Изолированные APC | Острова (клетки) | Зоны без APC (клетки) | Невыгруженные части | Зоны с несколькими APC | APC вне своей зоны |',
-    '|---|---|---|---|---|---|---|---|---|---|---|---|')
+    '| Карта | Z станции | APC | Зоны | Рёбра | Компоненты (крупнейшая) | Изолированные APC | Острова (клетки) | Зоны без APC (клетки) | Невыгруженные части | Зоны с несколькими APC | APC вне своей зоны | Host: компоненты (крупнейшая) | Host: изолированные | Host: группы с мостами | Host: провода | Host: мосты |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
 Set-Content -LiteralPath (Join-Path $out 'summary.md') -Value ($header + $rows)
 Write-Host "MAP_AUDIT_SUMMARY $(Join-Path $out 'summary.md')"
