@@ -48,9 +48,14 @@ if (-not $NoBuild) {
     # A playable world: no unit tests; the runtime station is forced by LOWMEMORYMODE, other maps by next_map.json.
     $defines = if ($Map -eq 'runtime') { 'CBT,LOWMEMORYMODE' } else { 'CBT' }
     Write-Host "== Building BlueMoon ($defines), a few minutes"
-    pwsh -NoProfile -File scripts\build-bluemoon-unit-dmb.ps1 -GameRepository $GameRepository -BuildDirectory $BuildDirectory `
-        -Defines $defines -WithTgui 2>&1 | Select-String -Pattern 'errors|DreamMaker failed' | ForEach-Object { $_.Line }
-    if ($LASTEXITCODE -ne 0) { throw 'The DMB build failed.' }
+    $dmb = @(pwsh -NoProfile -File scripts\build-bluemoon-unit-dmb.ps1 -GameRepository $GameRepository -BuildDirectory $BuildDirectory `
+        -Defines $defines -WithTgui 2>&1 | ForEach-Object { "$_" })
+    if ($LASTEXITCODE -ne 0) {
+        # Whatever stopped the build, DreamMaker or the file refresh before it, is in its last lines.
+        $dmb | Select-Object -Last 30 | ForEach-Object { Write-Host $_ }
+        throw 'The DMB build failed.'
+    }
+    $dmb | Where-Object { $_ -match ' errors, ' } | ForEach-Object { Write-Host $_ }
 }
 if ($Map -ne 'runtime') {
     # The station alone: no mining level or space ruins, as the map audit loads it. A fresh machine has no

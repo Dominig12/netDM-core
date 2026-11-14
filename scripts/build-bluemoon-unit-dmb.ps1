@@ -29,7 +29,9 @@ $files = @('tgstation.dme', 'code/game/world.dm', 'code/game/area/areas.dm', 'co
     'code/modules/surgery/experimental_dissection.dm', 'code/modules/netdm/network_space.dm',
     'code/__DEFINES/dcs/signals.dm', 'code/game/machinery/_machinery.dm',
     'code/modules/mapping/space_management/space_reservation.dm', 'code/modules/unit_tests/_unit_tests.dm',
-    'code/modules/unit_tests/netdm_observe.dm', '_maps/map_files/generic/CentCom_hermetic.dmm')
+    'code/modules/unit_tests/netdm_observe.dm')
+# `pwsh -File` passes a list as one comma-separated string.
+$Defines = @($Defines | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 foreach ($file in $files) {
     $target = Join-Path $build $file
     $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
@@ -42,8 +44,24 @@ if ($WithTgui) {
         Copy-Item -LiteralPath (Join-Path $repo "tgui/public/$asset") -Destination $target -Force
     }
 }
-# `pwsh -File` passes a list as one comma-separated string.
-$Defines = @($Defines | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($Defines -contains 'UNIT_TEST_PROFILE_HERMETIC') {
+    # The hermetic unit-test profile loads CentCom_hermetic.dmm. The game's build.js generates it and git
+    # ignores it, so a fresh checkout has none: then it is cut here the same way (the TGM map's z1 blocks).
+    $hermetic = Join-Path $build '_maps/map_files/generic/CentCom_hermetic.dmm'
+    $generated = Join-Path $repo '_maps/map_files/generic/CentCom_hermetic.dmm'
+    if (Test-Path -LiteralPath $generated) {
+        Copy-Item -LiteralPath $generated -Destination $hermetic -Force
+    }
+    else {
+        $map = [IO.File]::ReadAllText((Join-Path $build '_maps/map_files/generic/CentCom.dmm'))
+        $first = [regex]::Match($map, '(?m)^\(\d+,\d+,\d+\) = \{"')
+        if (-not $first.Success) { throw 'CentCom.dmm is not in TGM format; cannot cut z1 out of it.' }
+        $blocks = [regex]::Split($map.Substring($first.Index), '(?m)^(?=\(\d+,\d+,\d+\) = \{")')
+        $kept = @($blocks | Where-Object { $_ -match '^\(\d+,\d+,1\) = \{"' })
+        if ($kept.Count -eq 0) { throw 'CentCom.dmm has no z1 blocks.' }
+        [IO.File]::WriteAllText($hermetic, $map.Substring(0, $first.Index) + ($kept -join ''))
+    }
+}
 $header = ($Defines | ForEach-Object { "#define $_`n" }) -join ''
 $dme = Join-Path $build 'tgstation.m.dme'
 [IO.File]::WriteAllText($dme, $header + [IO.File]::ReadAllText((Join-Path $build 'tgstation.dme')))
