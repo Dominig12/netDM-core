@@ -54,6 +54,8 @@ public static class NetworkSpace
     // runtime gives both ends 60 s to come back. Presences live in this Host process.
 
     public const int OperatorAwayMs = 300_000, EntryGraceMs = 60_000, PresencePassMs = 500, MaxPresences = 64, MaxPresencesPerHost = 4;
+    /// <summary>Р4: a move takes this long per hop of its route, at least one hop's time and at most <see cref="MaxTravelMs"/>.</summary>
+    public const int TravelMsPerHop = 1000, MaxTravelMs = 15_000;
 
     private sealed class Presence
     {
@@ -64,6 +66,14 @@ public static class NetworkSpace
         public bool Away, Detached;
         public long AwaySince, EntryLostSince, DetachedSince;
         public bool Ended => State == "ended";
+        /// <summary>P12.3: on its way to another host. It runs nowhere: the source is fenced, the target not yet active.</summary>
+        public bool Moving;
+        public string ToInstance = "";
+        public EndpointKey ToProvider;
+        public NodeId ToNode;
+        public long ArriveAt;
+        /// <summary>What the last move ended in, shown as the reason while nothing else is.</summary>
+        public string Notice = "";
     }
 
     private static readonly Dictionary<EndpointKey, Presence> Presences = [];
@@ -96,6 +106,8 @@ public static class NetworkSpace
     private static void Settle(GameNetworkService.Session session, (SharedMediumSnapshot World, WiringReport Wiring)? power, Presence presence,
         long now)
     {
+        if (presence.Moving && !Travel(session, presence, now))
+            return;
         if (session.Services.DiscoverableProvider(presence.Provider, presence.Instance) is not { } host || host.Provider != presence.Provider)
         {
             if (presence.Detached && now - presence.DetachedSince < EntryGraceMs)
@@ -126,8 +138,78 @@ public static class NetworkSpace
         else
         {
             presence.State = "active";
-            presence.Reason = "";
+            presence.Reason = presence.Notice;
         }
+    }
+
+    /// <summary>
+    /// Р4 in transit: the route from the source to the target must hold all the way. A broken route, or a target
+    /// that left, sends the presence back to its source if the source is still there; otherwise it is lost. On
+    /// arrival the target becomes its host with the next generation. False while it is still on its way.
+    /// </summary>
+    private static bool Travel(GameNetworkService.Session session, Presence presence, long now)
+    {
+        var target = session.Services.DiscoverableProvider(presence.ToProvider, presence.ToInstance);
+        var holds = target is { } there && there.Provider == presence.ToProvider && (presence.Node == there.Node ||
+            NetworkDiagnostics.Trace(session.Medium.Snapshot, presence.Node, there.Node, QueryHost.ReachBudget).State == NetworkDiagnostics.Reachable);
+        if (holds && now < presence.ArriveAt)
+        {
+            presence.State = "moving";
+            presence.Reason = "";
+            return false;
+        }
+        presence.Moving = false;
+        if (holds)
+        {
+            presence.Instance = presence.ToInstance;
+            presence.Provider = presence.ToProvider;
+            presence.Node = target!.Value.Node;
+            presence.Generation++;
+            presence.Notice = "";
+            return true;
+        }
+        if (session.Services.DiscoverableProvider(presence.Provider, presence.Instance) is { } source && source.Provider == presence.Provider)
+        {
+            presence.Notice = "returned: route_lost";
+            return true; // Back where it left; the rest of the pass decides whether it may act there.
+        }
+        End(presence, "lost_in_transit");
+        return false;
+    }
+
+    /// <summary>
+    /// <c>move {to}</c> (Р4): the presence leaves its host for another device's shell that the operator may
+    /// see and call, over a route that exists now. It is on its way for one second per hop, at most 15 s.
+    /// </summary>
+    private static JsonElement Move(GameNetworkService game, GameNetworkService.Session session, HostCommand command, JsonElement arguments,
+        long now)
+    {
+        if (Controlled(game, session, command, now, out var refusal) is not { } presence)
+        {
+            Presences.TryGetValue(command.InitiatorKey, out var current);
+            return JsonSerializer.SerializeToElement(Describe(refusal!, current is { Ended: false } ? current : null));
+        }
+        var to = arguments.GetProperty("to").GetString() ?? "";
+        if (!ServiceNames.IsValid(to) || to == presence.Instance)
+            return JsonSerializer.SerializeToElement(Describe("invalid_argument", presence));
+        if (session.Services.DiscoverableProvider(presence.Owner, to) is not { ServiceType: ShellHost.ServiceType } target ||
+            session.Services.ResidentCommandNode(presence.Owner, target.Provider, to) is null)
+            return JsonSerializer.SerializeToElement(Describe("forbidden", presence));
+        var route = NetworkDiagnostics.Trace(session.Medium.Snapshot, presence.Node, target.Node, QueryHost.ReachBudget);
+        if (route.State != NetworkDiagnostics.Reachable)
+            return JsonSerializer.SerializeToElement(Describe("unreachable", presence));
+        if (Presences.Values.Count(other => !other.Ended && (other.Moving ? other.ToInstance : other.Instance) == to) >= MaxPresencesPerHost)
+            return JsonSerializer.SerializeToElement(Describe("limit_exceeded", presence));
+        var travel = Math.Clamp(route.Hops * TravelMsPerHop, TravelMsPerHop, MaxTravelMs);
+        presence.Moving = true;
+        presence.ToInstance = to;
+        presence.ToProvider = target.Provider;
+        presence.ToNode = target.Node;
+        presence.ArriveAt = now + travel;
+        presence.Notice = "";
+        presence.State = "moving";
+        presence.Reason = "";
+        return JsonSerializer.SerializeToElement(Describe("moving", presence));
     }
 
     private static void Suspend(Presence presence, string reason)
@@ -144,11 +226,17 @@ public static class NetworkSpace
 
     private static object Describe(string status, Presence? presence) => presence is null
         ? new { status }
-        : new
-        {
-            status, presence = presence.Id, host = presence.Instance, generation = presence.Generation, state = presence.State,
-            reason = presence.Reason
-        };
+        : presence.Moving
+            ? new
+            {
+                status, presence = presence.Id, host = "", generation = presence.Generation, state = presence.State, reason = presence.Reason,
+                to = presence.ToInstance, arriveIn = (int)Math.Max(0, Math.Ceiling((presence.ArriveAt - Environment.TickCount64) / 1000.0))
+            }
+            : (object)new
+            {
+                status, presence = presence.Id, host = presence.Instance, generation = presence.Generation, state = presence.State,
+                reason = presence.Reason
+            };
 
     private static JsonElement PresenceCommand(GameNetworkService game, GameNetworkService.Session session, HostCommand command, long now)
     {
@@ -218,7 +306,7 @@ public static class NetworkSpace
         Settle(session, game.CapturePowerState(session), presence, now);
         if (presence.State != "active")
         {
-            refusal = "suspended";
+            refusal = presence.Moving ? "moving" : "suspended";
             return null;
         }
         if (command.ProviderNode != presence.Node &&
@@ -250,6 +338,8 @@ public static class NetworkSpace
             return PresenceCommand(game, session, command, now);
         if (command.Command == "act")
             return Act(game, session, command, arguments, now);
+        if (command.Command == "move")
+            return Move(game, session, command, arguments, now);
         var knowledge = KnowledgeOf(command.InitiatorKey, now);
         return command.Command == "scan"
             ? Scan(game, session, command, knowledge, arguments.TryGetProperty("radius", out var radius)
@@ -284,8 +374,7 @@ public static class NetworkSpace
         {
             presence = Controlled(game, session, command, now, out var refusal);
             if (presence is null)
-                return JsonSerializer.SerializeToElement(new { status = refusal == "suspended" ? "suspended" : "out_of_reach", revision = _revision,
-                    nodes = 0, links = 0, services = 0 });
+                return JsonSerializer.SerializeToElement(new { status = refusal, revision = _revision, nodes = 0, links = 0, services = 0 });
         }
         if (now < knowledge.NextScan)
             return JsonSerializer.SerializeToElement(new

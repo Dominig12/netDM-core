@@ -1628,6 +1628,47 @@ end
     Assert-True ($left.status -ceq 'left' -and $left.state -ceq 'ended' -and $left.reason -ceq 'left') "the operator leaves: $($left | ConvertTo-Json -Compress)"
     Assert-True ((Invoke-ShellAt 'netshell.apc2' 'act' @{ line = 'self' } '6').status -ceq 'no_presence') 'without a presence nothing acts'
 
+    # P12.3 move (Р4): a presence travels one second per hop, runs nowhere on its way, arrives with the next
+    # generation, and goes back to its source when the route breaks under it.
+    $shell1 = @{ endpoint = 'apc-1s'; generation = '1' }
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '1' } + $shell1)).ok) 'the shell endpoint of APC 1 attaches'
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'netshell.apc1'; serviceType = 'network.shell'; schema = 'shell.output'
+        major = 1; minor = 0 } + $shell1)).ok) 'APC 1 offers its shell'
+    $shell3b = @{ endpoint = 'apc-3s'; generation = '2' }
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '3' } + $shell3b)).ok) 'the shell endpoint of APC 3 comes back'
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'netshell.apc3'; serviceType = 'network.shell'; schema = 'shell.output'
+        major = 1; minor = 0 } + $shell3b)).ok) 'APC 3 offers its shell again'
+    $start = Invoke-ShellAt 'netshell.apc1' 'enter' @{} '6'
+    Assert-True ($start.status -ceq 'entered' -and $start.host -ceq 'netshell.apc1') "the operator enters at APC 1: $($start | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-ShellAt 'netshell.apc1' 'move' @{ to = 'netshell.apc1' } '6').status -ceq 'invalid_argument') 'a presence does not move to where it stands'
+    Assert-True ((Invoke-ShellAt 'netshell.apc1' 'move' @{ to = 'netshell.nowhere' } '6').status -ceq 'forbidden') 'a shell the operator cannot use is refused'
+    $leaving = Invoke-ShellAt 'netshell.apc1' 'move' @{ to = 'netshell.apc3' } '6'
+    Assert-True ($leaving.status -ceq 'moving' -and $leaving.to -ceq 'netshell.apc3' -and $leaving.arriveIn -ge 1 -and $leaving.arriveIn -le 2 -and $leaving.host -ceq '') "the presence sets off over two hops: $($leaving | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-ShellAt 'netshell.apc1' 'act' @{ line = 'self' } '6').status -ceq 'moving') 'a presence on its way does not act'
+    $arrived = $null
+    for ($try = 0; $try -lt 30; $try++) {
+        $arrived = Invoke-ShellAt 'netshell.apc1' 'presence' @{} '6'
+        if ($arrived.state -ceq 'active') { break }
+        Start-Sleep -Milliseconds 200
+    }
+    Assert-True ($arrived.state -ceq 'active' -and $arrived.host -ceq 'netshell.apc3' -and $arrived.generation -eq 2) "it arrives with the next generation: $($arrived | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-ShellAt 'netshell.apc1' 'act' @{ line = 'self | select node' } '6').rows -ceq 'node=3') 'it acts from where it arrived'
+    $back = Invoke-ShellAt 'netshell.apc1' 'move' @{ to = 'netshell.apc1' } '6'
+    Assert-True ($back.status -ceq 'moving') "it sets off back: $($back | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '7'
+        changes = @(@{ op = 'node_state'; a = '2'; powered = 0; operational = 1 }) }).ok) 'APC 2 on its route loses power'
+    $returned = $null
+    for ($try = 0; $try -lt 30; $try++) {
+        $returned = Invoke-ShellAt 'netshell.apc1' 'presence' @{} '7'
+        if ($returned.state -cne 'moving') { break }
+        Start-Sleep -Milliseconds 200
+    }
+    Assert-True ($returned.state -ceq 'active' -and $returned.host -ceq 'netshell.apc3' -and $returned.generation -eq 2 -and
+        $returned.reason -ceq 'returned: route_lost') "a broken route sends it back to its source: $($returned | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '8'
+        changes = @(@{ op = 'node_state'; a = '2'; powered = 1; operational = 1 }) }).ok) 'APC 2 has power again'
+    Assert-True ((Invoke-ShellAt 'netshell.apc1' 'leave' @{} '8').status -ceq 'left') 'the operator leaves'
+
     if ($IsLinux) {
         Assert-StartupRejected $socketPath
         Assert-True ((Invoke-Next @{ op = 'game_stats' }).game.nodes -eq 3) 'second Host does not unlink live socket'

@@ -419,7 +419,7 @@ public sealed class SchemaRegistry
         [
             new SchemaField("status", SchemaFieldType.Enum, true, Values:
                 ["ok", "parse_error", "unknown_command", "invalid_argument", "fuel_exhausted", "limit_exceeded", "source_failed",
-                 "no_presence", "suspended", "out_of_reach"]),
+                 "no_presence", "suspended", "out_of_reach", "moving"]),
             new SchemaField("count", SchemaFieldType.Integer, true, 0, 4096),
             new SchemaField("fuel", SchemaFieldType.Integer, true, 0, 1_000_000),
             new SchemaField("rows", SchemaFieldType.Text, true, MaxLength: 4096),
@@ -465,7 +465,7 @@ public sealed class SchemaRegistry
             new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["radius"] }, MaxPayloadBytes: 64));
         registry.Register(new SchemaDefinition("shell.scan", 1, 0,
         [
-            new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "partial", "busy", "suspended", "out_of_reach"]),
+            new SchemaField("status", SchemaFieldType.Enum, true, Values: ["complete", "partial", "busy", "suspended", "out_of_reach", "moving"]),
             new SchemaField("revision", SchemaFieldType.Integer, true, 0),
             new SchemaField("nodes", SchemaFieldType.Integer, true, 0, 4096),
             new SchemaField("links", SchemaFieldType.Integer, true, 0, 8192),
@@ -493,14 +493,24 @@ public sealed class SchemaRegistry
         registry.Register(new SchemaDefinition("shell.presence", 1, 0,
         [
             new SchemaField("status", SchemaFieldType.Enum, true, Values:
-                ["entered", "present", "resumed", "suspended", "left", "ended", "none", "limit_exceeded"]),
+                ["entered", "present", "resumed", "suspended", "left", "ended", "none", "limit_exceeded",
+                 "moving", "no_presence", "out_of_reach", "forbidden", "unreachable", "invalid_argument"]),
             new SchemaField("presence", SchemaFieldType.Integer, false, 0, 1_000_000_000),
             new SchemaField("host", SchemaFieldType.Text, false, MaxLength: 64),
             new SchemaField("generation", SchemaFieldType.Integer, false, 1, 1_000_000),
-            new SchemaField("state", SchemaFieldType.Enum, false, Values: ["active", "suspended", "ended"]),
-            new SchemaField("reason", SchemaFieldType.Text, false, MaxLength: 64)
-        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "presence", "host", "generation", "state", "reason"] },
-            MaxPayloadBytes: 384));
+            new SchemaField("state", SchemaFieldType.Enum, false, Values: ["active", "suspended", "ended", "moving"]),
+            new SchemaField("reason", SchemaFieldType.Text, false, MaxLength: 64),
+            // P12.3: where a moving presence goes and in how many seconds it arrives.
+            new SchemaField("to", SchemaFieldType.Text, false, MaxLength: 64),
+            new SchemaField("arriveIn", SchemaFieldType.Integer, false, 0, 60)
+        ], new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["full"] = ["status", "presence", "host", "generation", "state", "reason", "to", "arriveIn"]
+        }, MaxPayloadBytes: 512));
+        registry.Register(new SchemaDefinition("shell.move_request", 1, 0,
+            [new SchemaField("to", SchemaFieldType.Text, true, MaxLength: 64)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["to"] }, MaxPayloadBytes: 128));
+        registry.RegisterCommand("network.shell", "move", "shell.move_request", 1, "shell.presence", 1);
         foreach (var presenceCommand in new[] { "enter", "detach", "leave", "presence" })
             registry.RegisterCommand("network.shell", presenceCommand, "shell.presence_request", 1, "shell.presence", 1);
         registry.RegisterCommand("network.shell", "act", "shell.run_request", 1, "shell.output", 1);

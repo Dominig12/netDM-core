@@ -32,7 +32,7 @@ public static class ShellHost
     {
         applied = null;
         using var arguments = JsonDocument.Parse(command.Arguments);
-        if (command.Command is "scan" or "knowledge" or "enter" or "detach" or "leave" or "presence" or "act")
+        if (command.Command is "scan" or "knowledge" or "enter" or "detach" or "leave" or "presence" or "act" or "move")
             return NetworkSpace.Answer(game, session, command, arguments.RootElement);
         if (command.Command is "start" or "stop" or "migrate")
             return ShellPrograms.Answer(session, command, arguments.RootElement, out applied);
