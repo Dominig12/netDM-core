@@ -44,3 +44,5 @@ pwsh -File scripts\play-bluemoon.ps1 -Map metastation -NetworkCameras
 ```
 
 `setup-bluemoon-stand.ps1` проверяет инструменты, собирает Win32 bridge через Visual Studio, экспортирует исходники BlueMoon в `TestResults\p1\game-src` и ставит пакеты TGUI. Он нужен один раз на checkout. `play-bluemoon.ps1` собирает Host, TGUI и мир, запускает их и печатает адрес для DreamSeeker и список того, что проверить. Режимы: `-Mode shadow|authoritative` (исследования, мессенджер, радио), `-NetworkCameras` (охранные консоли через сеть), `-Map metastation|boxstation|runtime`, `-NoBuild` для повторного запуска без сборки. Остановка — Ctrl+C или файл `TestResults\p1\game-src\netdm-stand.stop`.
+
+Все автоматические проверки одной командой: `pwsh -File scripts\check-all.ps1 -Only all`. Состояние запущенного стенда: `pwsh -File scripts\stand-status.ps1`. Полный справочник команд, тестов и ручных сценариев в игре: [docs/testing-guide.ru.md](../../docs/testing-guide.ru.md).

@@ -25,10 +25,10 @@
     return stored
 
 /// Returns a new endpoint ID with generation 1, or null when the round budget is spent.
-/datum/netdm_endpoint_registry/proc/register(datum/thing)
+/datum/netdm_endpoint_registry/proc/register(datum/thing, id_prefix)
     if(!thing || next_id >= limit)
         return null
-    var/id = "[prefix][++next_id]"
+    var/id = "[id_prefix || prefix][++next_id]"
     refs[id] = make_ref(thing)
     generations[id] = 1
     return id

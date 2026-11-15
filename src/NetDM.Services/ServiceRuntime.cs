@@ -136,6 +136,7 @@ public sealed record ServiceRuntimeCounters(int Endpoints, int Services, int Sub
 public sealed class ServiceRuntime
 {
     public const string RequestIdPrefix = "svc:";
+    private const string NetworkShellService = "network.shell";
     private const int InboxItemOverheadBytes = 512;
 
     private sealed class EndpointRecord(EndpointKey key, NodeId node, string domain)
@@ -177,11 +178,14 @@ public sealed class ServiceRuntime
         public int Pending;
     }
 
+    private readonly record struct InvocationOrigin(EndpointKey Provider, string Instance, NodeId Node);
+
     private sealed class OperationRecord
     {
         public long Id;
         public string Instance = "", ServiceType = "", Digest = "", IdempotencyKey = "";
         public EndpointKey Initiator, Provider;
+        public InvocationOrigin? Origin;
         public CommandDefinition Definition = null!;
         public byte[]? Result;
         public CommandOutcome Outcome;
@@ -275,6 +279,11 @@ public sealed class ServiceRuntime
                     continue;
                 }
                 var operation = _operations[delivery.OperationId];
+                if (operation.Origin is not null && AccessFailure(delivery, _endpoints[operation.Provider.Id]) is { } reason)
+                {
+                    Finish(delivery, DeliveryState.Cancelled, reason);
+                    continue;
+                }
                 taken.Add(new HostCommand(delivery.Id, operation.Instance, operation.ServiceType, operation.Definition.Name,
                     operation.IdempotencyKey, operation.Initiator.Id, operation.Provider.Id, delivery.Payload ?? [])
                     { InitiatorKey = operation.Initiator, ProviderKey = operation.Provider, ProviderNode = _endpoints[operation.Provider.Id].Node });
@@ -329,6 +338,36 @@ public sealed class ServiceRuntime
         lock (_gate)
             return Require(requester, out var record) == ServiceStatus.Ok && max > 0
                 ? ReadDirectory(record!, serviceType, after, max, prefix) : null;
+    }
+
+    /// <summary>Services known to the requester on a bounded set of nearby nodes, in the caller's node order.</summary>
+    public DirectorySlice? QueryNearbyDirectory(EndpointKey requester, IEnumerable<NodeId> nearby, int max)
+    {
+        lock (_gate)
+        {
+            if (Require(requester, out var record) != ServiceStatus.Ok || max < 1)
+                return null;
+            var entries = new List<DirectoryEntry>(Math.Min(max, 64));
+            foreach (var node in nearby)
+            {
+                if (!_nodeEndpoints.TryGetValue(node, out var endpoints))
+                    continue;
+                foreach (var id in endpoints)
+                {
+                    var owner = _endpoints[id];
+                    foreach (var instance in owner.Services)
+                    {
+                        var service = _services[instance];
+                        if (!Allows(service.Policy.Discover, record!, owner))
+                            continue;
+                        if (entries.Count == max)
+                            return new DirectorySlice(_directoryRevision, entries, true);
+                        entries.Add(new DirectoryEntry(instance, service.ServiceType, node));
+                    }
+                }
+            }
+            return new DirectorySlice(_directoryRevision, entries, false);
+        }
     }
 
     /// <param name="prefix">Only instances that start with it; the index ranges begin and end at it.</param>
@@ -446,12 +485,13 @@ public sealed class ServiceRuntime
     public NodeId? ResidentCommandNode(EndpointKey initiator, EndpointKey provider, string instance)
     {
         lock (_gate)
-            return Require(initiator, out var asker) == ServiceStatus.Ok &&
-                _services.TryGetValue(instance, out var service) && service.Owner == provider &&
-                Require(provider, out var owner) == ServiceStatus.Ok &&
-                Allows(service.Policy.Discover, asker!, owner!) && Allows(service.Policy.Invoke, asker!, owner!)
-                ? owner!.Node : null;
+            return Require(initiator, out var asker) == ServiceStatus.Ok ? ResidentCommandNode(asker!, provider, instance) : null;
     }
+
+    private NodeId? ResidentCommandNode(EndpointRecord asker, EndpointKey provider, string instance, string? serviceType = null) =>
+        _services.TryGetValue(instance, out var service) && service.Owner == provider && (serviceType is null || service.ServiceType == serviceType) &&
+        Require(provider, out var owner) == ServiceStatus.Ok &&
+        Allows(service.Policy.Discover, asker, owner!) && Allows(service.Policy.Invoke, asker, owner!) ? owner!.Node : null;
 
     /// <summary>Reads a single service as the original, generation-fenced initiator of a Host command.</summary>
     public (NodeId Origin, NodeId Target, ServiceDescriptor Descriptor, long Sequence)? QueryService(
@@ -746,18 +786,34 @@ public sealed class ServiceRuntime
     /// never cause a second effect, other content under the key is a conflict.
     /// </summary>
     public InvokeResult Invoke(EndpointKey initiator, string instance, string command, string idempotencyKey,
-        JsonElement arguments, int? timeoutTicks, PacketTrafficClass trafficClass)
+        JsonElement arguments, int? timeoutTicks, PacketTrafficClass trafficClass) =>
+        Invoke(initiator, instance, command, idempotencyKey, arguments, timeoutTicks, trafficClass, null);
+
+    /// <summary>
+    /// Sends from a shell that the Host has selected for a resident operator. The initiator still owns the
+    /// operation, supplies its authorization and receives the result on its own endpoint. The origin is
+    /// rechecked on presentation so losing the shell before delivery can prevent an effect.
+    /// </summary>
+    public InvokeResult InvokeFrom(EndpointKey initiator, EndpointKey originProvider, string originInstance, NodeId originNode,
+        string instance, string command, string idempotencyKey, JsonElement arguments, int? timeoutTicks, PacketTrafficClass trafficClass) =>
+        Invoke(initiator, instance, command, idempotencyKey, arguments, timeoutTicks, trafficClass,
+            new InvocationOrigin(originProvider, originInstance, originNode));
+
+    private InvokeResult Invoke(EndpointKey initiator, string instance, string command, string idempotencyKey,
+        JsonElement arguments, int? timeoutTicks, PacketTrafficClass trafficClass, InvocationOrigin? origin)
     {
         var timeout = timeoutTicks ?? _options.DefaultTimeoutTicks;
         if (!ServiceNames.IsValid(instance) || !ServiceNames.IsValid(command) || !ServiceNames.IsValid(idempotencyKey) ||
             command == SchemaRegistry.DescribeCommand || timeout < 1 || timeout > _options.MaxTimeoutTicks ||
-            !Enum.IsDefined(trafficClass))
+            !Enum.IsDefined(trafficClass) || (origin is { } requested && !ServiceNames.IsValid(requested.Instance)))
             return new InvokeResult(ServiceStatus.InvalidRequest, null);
         lock (_gate)
         {
             var status = Require(initiator, out var record);
             if (status != ServiceStatus.Ok)
                 return new InvokeResult(status, null);
+            if (origin is { } shell && ResidentCommandNode(record!, shell.Provider, shell.Instance, NetworkShellService) != shell.Node)
+                return new InvokeResult(ServiceStatus.Forbidden, null);
             status = Authorize(record!, instance, service => service.Policy.Invoke, out var service);
             if (status != ServiceStatus.Ok)
                 return new InvokeResult(status, null);
@@ -768,7 +824,10 @@ public sealed class ServiceRuntime
             if (status != ServiceStatus.Ok)
                 return new InvokeResult(status, null);
             ExpireTransientOperations();
-            var digest = Hash($"{initiator.Id}\n{initiator.Generation}\n{command}\n{canonical!.Digest}");
+            var content = $"{initiator.Id}\n{initiator.Generation}\n{command}\n{canonical!.Digest}";
+            if (origin is { } originKey)
+                content += $"\n{originKey.Provider.Id}\n{originKey.Provider.Generation}\n{originKey.Instance}\n{originKey.Node.Value}";
+            var digest = Hash(content);
             if (_operationKeys.TryGetValue((instance, idempotencyKey), out var existingId))
             {
                 var existing = _operations[existingId];
@@ -782,7 +841,7 @@ public sealed class ServiceRuntime
                 return new InvokeResult(ServiceStatus.Busy, null);
             if (_operations.Count >= _options.MaxOperations)
                 return new InvokeResult(ServiceStatus.LimitExceeded, null);
-            var operation = StartOperation(record, service, definition, canonical, digest, timeout, trafficClass, true);
+            var operation = StartOperation(record, service, definition, canonical, digest, timeout, trafficClass, true, origin);
             operation.IdempotencyKey = idempotencyKey;
             _operationKeys.Add((instance, idempotencyKey), operation.Id);
             if (definition.Transient)
@@ -875,6 +934,20 @@ public sealed class ServiceRuntime
                 return (status, null);
             return _operations.TryGetValue(operationId, out var operation) && operation.Initiator == initiator
                 ? (ServiceStatus.Ok, View(operation)) : (ServiceStatus.Unknown, null);
+        }
+    }
+
+    /// <summary>Only explicitly exposed results that the requesting endpoint received and accepted.</summary>
+    public JsonElement? ShellResultPayload(EndpointKey initiator, long operationId)
+    {
+        lock (_gate)
+        {
+            if (Require(initiator, out _) != ServiceStatus.Ok || !_operations.TryGetValue(operationId, out var operation) ||
+                operation.Initiator != initiator || !operation.Definition.ShellReadableResult || operation.Outcome != CommandOutcome.Applied ||
+                operation.ResultState != ResultLeg.Delivered || operation.ResultReason is not null || operation.Result is null)
+                return null;
+            using var result = JsonDocument.Parse(operation.Result);
+            return result.RootElement.Clone();
         }
     }
 
@@ -1193,14 +1266,15 @@ public sealed class ServiceRuntime
     }
 
     private OperationRecord StartOperation(EndpointRecord initiator, ServiceRecord service, CommandDefinition definition,
-        CanonicalPayload arguments, string digest, int timeout, PacketTrafficClass trafficClass, bool countsTowardsInitiator)
+        CanonicalPayload arguments, string digest, int timeout, PacketTrafficClass trafficClass, bool countsTowardsInitiator,
+        InvocationOrigin? origin = null)
     {
         var provider = _endpoints[service.Owner.Id];
         var operation = new OperationRecord
         {
             Id = ++_nextOperation, Instance = service.Instance, ServiceType = service.ServiceType, Digest = digest,
             Initiator = initiator.Key, Provider = provider.Key, Definition = definition, TrafficClass = trafficClass,
-            CountsTowardsInitiator = countsTowardsInitiator
+            CountsTowardsInitiator = countsTowardsInitiator, Origin = origin
         };
         _operations.Add(operation.Id, operation);
         initiator.OperationsRevision++;
@@ -1214,7 +1288,7 @@ public sealed class ServiceRuntime
         request.OperationId = operation.Id;
         request.Command = definition.Name;
         request.Projection = "full";
-        Submit(request, initiator.Node, provider.Node, trafficClass, timeout);
+        Submit(request, origin?.Node ?? initiator.Node, provider.Node, trafficClass, timeout);
         return operation;
     }
 
@@ -1436,8 +1510,12 @@ public sealed class ServiceRuntime
         var owner = _endpoints[provider.Id];
         if (delivery.Kind == DeliveryKind.Event)
             return CanSubscribe(service, requester, owner) ? null : "access_revoked";
+        var operation = _operations[delivery.OperationId];
+        if (delivery.Kind == DeliveryKind.Command && operation.Origin is { } origin &&
+            ResidentCommandNode(requester, origin.Provider, origin.Instance, NetworkShellService) != origin.Node)
+            return "origin_unavailable";
         return Allows(service.Policy.Discover, requester, owner) &&
-            (_operations[delivery.OperationId].Definition.HostHandled || Allows(service.Policy.Invoke, requester, owner))
+            (operation.Definition.HostHandled || Allows(service.Policy.Invoke, requester, owner))
                 ? null : "access_revoked";
     }
 
@@ -1526,6 +1604,8 @@ public sealed class ServiceRuntime
             operation.ResultState = ResultLeg.Failed;
             operation.ResultReason = reason;
         }
+        if (_endpoints.TryGetValue(operation.Initiator.Id, out var initiator) && initiator.Key == operation.Initiator)
+            initiator.OperationsRevision++;
     }
 
     private InboxItem Item(long sequence, DeliveryRecord delivery)

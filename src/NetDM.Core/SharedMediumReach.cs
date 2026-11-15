@@ -123,6 +123,12 @@ public sealed partial class SharedMediumNetwork
         return path;
     }
 
+    /// <summary>Whether this leg of an established route still carries traffic on its selected medium.</summary>
+    public static bool IsRouteHopAvailable(SharedMediumSnapshot snapshot, NodeId from, NodeId to, bool radio,
+        bool first, bool last) => snapshot.Physical.Nodes.TryGetValue(from, out var source) &&
+        snapshot.Physical.Nodes.TryGetValue(to, out var destination) && (first || source.CanForward) &&
+        (last || destination.CanForward) && (radio ? RadioCost(snapshot, from, to, out _) is not null : source.Links.ContainsKey(to));
+
     private static Dictionary<NodeId, BroadcastReach> ReachAll(SharedMediumSnapshot snapshot,
         IReadOnlyDictionary<NodeId, BroadcastReach> sources, IReadOnlySet<NodeId> targets, int maxExplored,
         int cableHopsPerTick, out bool exhausted, Dictionary<NodeId, BroadcastReach>? bestOut = null)

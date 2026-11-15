@@ -25,15 +25,19 @@ public static class ShellHost
     /// </summary>
     /// <param name="Publisher">The device's own endpoint when the device runs its own line or program: only then
     /// may <c>publish</c> speak for the device's shell service. Null for a line another endpoint asked for.</param>
+    /// <param name="InvocationHost">A resident presence's shell endpoint for the physical origin of commands.</param>
     internal sealed record Scope(EndpointKey Initiator, string Instance, NodeId Origin, long? DeliveryId, string KeyPrefix,
-        EndpointKey? Publisher = null);
+        EndpointKey? Publisher = null, EndpointKey? InvocationHost = null);
 
     internal static JsonElement Answer(GameNetworkService game, GameNetworkService.Session session, HostCommand command, out Action? applied)
     {
         applied = null;
         using var arguments = JsonDocument.Parse(command.Arguments);
-        if (command.Command is "scan" or "knowledge" or "enter" or "detach" or "leave" or "presence" or "act" or "move")
+        if (command.Command is "scan" or "knowledge" or "enter" or "detach" or "leave" or "presence" or "act" or "move"
+            or "preview_move" or "abort_move" or "poll_alarm" or "alarm_action")
             return NetworkSpace.Answer(game, session, command, arguments.RootElement);
+        if (command.Command is "chat_read" or "chat_send")
+            return NetworkSpace.Chat(game, session, command, arguments.RootElement, out applied);
         if (command.Command is "start" or "stop" or "migrate")
             return ShellPrograms.Answer(session, command, arguments.RootElement, out applied);
         var scope = new Scope(command.InitiatorKey, command.Instance, command.ProviderNode, command.DeliveryId,
@@ -110,8 +114,8 @@ public static class ShellHost
     }
 
     /// <summary>
-    /// <c>invoke</c>: the one command that acts. It sends an ordinary service command as the asker, from the
-    /// asker's node, under the asker's rights and quotas; the device that runs the line lends it nothing.
+    /// <c>invoke</c>: sends a service command under the asker's rights and quotas. Its transport starts at a
+    /// resident presence's shell if there is one, or at the asker's endpoint for an ordinary command.
     /// The line does not wait: each command answers with its operation, and the result returns to the asker
     /// over the network like the result of any command. Alone: <c>invoke instance command name=value…</c>;
     /// after a pipeline: <c>… | invoke command name=value…</c> for the <c>instance</c> of each record.
@@ -166,8 +170,10 @@ public static class ShellHost
                 else
                 {
                     var key = $"{_keyPrefix}.{(_ordinal++).ToString(CultureInfo.InvariantCulture)}";
-                    var result = session.Services.Invoke(command.Initiator, instance, verb, key, payload,
-                        null, PacketTrafficClass.Interactive);
+                    var result = command.InvocationHost is { } host
+                        ? session.Services.InvokeFrom(command.Initiator, host, command.Instance, command.Origin, instance,
+                            verb, key, payload, null, PacketTrafficClass.Interactive)
+                        : session.Services.Invoke(command.Initiator, instance, verb, key, payload, null, PacketTrafficClass.Interactive);
                     status = result.Status == ServiceStatus.Ok ? "sent" : ServiceNames.Code(result.Status);
                     operation = result.Operation?.OperationId.ToString(CultureInfo.InvariantCulture) ?? "";
                 }
@@ -212,6 +218,41 @@ public static class ShellHost
 
     internal sealed class Source(GameNetworkService game, GameNetworkService.Session session, Scope command) : IShellSource
     {
+        private const int DirectoryCandidates = 2048;
+        private static readonly IReadOnlyDictionary<string, ShellRecord[]> Help = new Dictionary<string, ShellRecord[]>(StringComparer.Ordinal)
+        {
+            ["basics"] =
+            [
+                HelpRow("basics", "self | select node state", "Проверьте свой сетевой узел и питание.", "self | select node state"),
+                HelpRow("basics", "links | where state -eq up", "Посмотрите рабочие порты. Оператор | передаёт записи следующей команде.", "links | where state -eq up"),
+                HelpRow("basics", "trace <node>", "Проверьте путь до известного номера узла. ticks — задержка в десятых секунды.")
+            ],
+            ["services"] =
+            [
+                HelpRow("services", "services [-type T] [-prefix P] [-hops N]", "Найдите достижимые сервисы. Сначала показаны ближайшие.", "services -type atmos.alarm -hops 4 | first 3"),
+                HelpRow("services", "route <instance>", "Посмотрите узлы и типы связей на пути до сервиса."),
+                HelpRow("services", "invoke <instance> <command> [параметры]", "Отправьте команду. Для чтения атмосферы добавьте аргумент reason со значением inspect."),
+                HelpRow("services", "jobs | first 5", "Проверьте исход операции по полям outcome и result.", "jobs | first 5"),
+                HelpRow("services", "result <operation>", "Получите доставленные показания атмосферной сигнализации по номеру своей операции.")
+            ],
+            ["scripts"] =
+            [
+                HelpRow("scripts", "where | select | sort | first | last | count", "Фильтруйте записи оператором where. Выбирайте поля с select.", "links | where state -eq up | count"),
+                HelpRow("scripts", "$имя ← конвейер", "Чтобы присвоить переменной записи используйте знак равенства. Имя задаётся латиницей."),
+                HelpRow("scripts", "if строка … end", "Блок выполняется если условие вернуло хотя бы одну запись.")
+            ],
+            ["programs"] =
+            [
+                HelpRow("programs", "programs", "Просмотрите состояние фоновых программ на устройстве.", "programs"),
+                HelpRow("programs", "every <секунды>", "Первая строка фонового скрипта задаёт таймер от 10 секунд. Запуск и остановка доступны в редакторе."),
+                HelpRow("programs", "on строка … end", "Правило срабатывает когда источник меняется и условие даёт записи."),
+                HelpRow("programs", "wait <секунды> / $state", "Приостановите программу или сохраните записи между её проходами.")
+            ]
+        };
+
+        private static ShellRecord HelpRow(string topic, string syntax, string description, string example = "") =>
+            Record(("topic", topic), ("syntax", syntax), ("description", description), ("example", example));
+
         private int _graphQueriesRemaining = 2;
         /// <summary>Sources a line has read: a rule is evaluated again only when one of them changed.</summary>
         public HashSet<string> Names { get; } = new(StringComparer.Ordinal);
@@ -220,6 +261,11 @@ public static class ShellHost
         {
             if (variable)
                 return args.Positional.Count + args.Named.Count == 0 ? null : "a variable takes no arguments";
+            if (name == "help")
+                return args.Named.Count == 0 && (args.Positional.Count == 0 || args.Positional is [string topic] && Help.ContainsKey(topic))
+                    ? null : "help [basics|services|scripts|programs]";
+            if (name == "result")
+                return args.Named.Count == 0 && args.Positional is [long and > 0] ? null : "result <operation>";
             if (name == "services")
                 return args.Positional.Count == 0 && args.Named.All(pair => pair switch
                 {
@@ -247,10 +293,30 @@ public static class ShellHost
                 return null;
             }
             Names.Add(name);
+            if (name == "help")
+                return arguments.Positional is [string topic] ? Help[topic] :
+                [
+                    HelpRow("basics", "help basics", "Узел и его соединения", "help basics"),
+                    HelpRow("services", "help services", "Поиск сервисов и результаты команд", "help services"),
+                    HelpRow("scripts", "help scripts", "Конвейеры и условия", "help scripts"),
+                    HelpRow("programs", "help programs", "Таймеры и фоновые правила", "help programs")
+                ];
             var world = session.Medium.Snapshot;
             var origin = command.Origin;
             switch (name)
             {
+                case "result":
+                    var id = (long)arguments.Positional[0];
+                    if (session.Services.ShellResultPayload(command.Initiator, id) is not { } result)
+                        return Fail("Нет доставленного результата. Проверьте jobs и номер операции.", out error);
+                    return [new ShellRecord(result.EnumerateObject().ToDictionary(field => field.Name, field => field.Value.ValueKind switch
+                    {
+                        JsonValueKind.True => (object)true,
+                        JsonValueKind.False => false,
+                        JsonValueKind.Number when field.Value.TryGetInt64(out var integer) => integer,
+                        JsonValueKind.Number => field.Value.GetDouble(),
+                        _ => field.Value.GetString() ?? ""
+                    }))];
                 case "programs":
                     return ShellPrograms.List(session, command);
                 case "jobs":
@@ -278,8 +344,8 @@ public static class ShellHost
                     if (_graphQueriesRemaining-- <= 0)
                         return Fail("network search budget exceeded (services and trace share two searches)", out error);
                     var slice = command.DeliveryId is { } delivery
-                        ? session.Services.QueryDirectory(delivery, type, null, maxRecords, prefix)?.Slice
-                        : session.Services.QueryDirectory(command.Initiator, type, null, maxRecords, prefix);
+                        ? session.Services.QueryDirectory(delivery, type, null, DirectoryCandidates, prefix)?.Slice
+                        : session.Services.QueryDirectory(command.Initiator, type, null, DirectoryCandidates, prefix);
                     if (slice is null)
                         return [];
                     var query = (Slice: slice, Origin: origin);
@@ -291,8 +357,11 @@ public static class ShellHost
                         return Fail("the network is too large to search from here", out error);
                     return query.Slice.Entries
                         .Where(entry => entry.Node == origin || (reached.TryGetValue(entry.Node, out var near) && near.Hops <= maxHops))
-                        .Select(entry => Record(("instance", entry.Instance), ("type", entry.ServiceType),
-                            ("hops", (long)(entry.Node == origin ? 0 : reached[entry.Node].Hops)))).ToArray();
+                        .Select(entry => (Entry: entry, Hops: entry.Node == origin ? 0 : reached[entry.Node].Hops))
+                        .OrderBy(entry => entry.Hops)
+                        .Take(maxRecords)
+                        .Select(entry => Record(("instance", entry.Entry.Instance), ("type", entry.Entry.ServiceType),
+                            ("hops", (long)entry.Hops))).ToArray();
                 case "links":
                     return NetworkDiagnostics.LinkState(world, game.Wiring, origin) is { } ports
                         ? ports.Neighbors.Select(link => Record(("node", link.Node.Value.ToString(CultureInfo.InvariantCulture)), ("state", link.State))).ToArray()

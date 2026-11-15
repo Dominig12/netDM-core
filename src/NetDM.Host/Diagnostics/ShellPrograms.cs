@@ -674,7 +674,7 @@ public static class ShellPrograms
             bool Reads(params string[] sources) => program.Reads is null || sources.Any(program.Reads.Contains);
             var changes = new ChangeIndex(power.World.Version, power.Wiring,
                 Reads("services", "route") ? session.Services.DirectoryRevision : 0, Reads("programs") ? _programsRevision : 0,
-                Reads("jobs") ? session.Services.OperationsRevisionOf(program.Owner) : 0);
+                Reads("jobs") || Reads("result") ? session.Services.OperationsRevisionOf(program.Owner) : 0);
             if (program.State == "watching" && program.Rule is not null && now >= program.NextEvaluation && program.Seen is { } seenIndex &&
                 seenIndex.Same(changes) && now < program.RefreshAt)
             {

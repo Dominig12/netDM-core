@@ -485,6 +485,10 @@ static class ServiceSmokeTests
         var next = services.QueryDirectory(console, "machine.door", visible.Entries[^1].Instance, 64)!;
         Check(visible.Entries.Count == 64 && visible.More && next.Entries.Count == 16 && !next.More &&
             next.Entries[0].Instance == "open-64", "the bounded range advances without gaps or duplicates");
+        Check(services.QueryNearbyDirectory(console, [new NodeId(1), new NodeId(3)], 2) is { More: true } nearby &&
+            nearby.Entries[0].Instance == "own-pump" && nearby.Entries[1].Instance.StartsWith("open-", StringComparison.Ordinal) &&
+            services.QueryNearbyDirectory(console, [new NodeId(2)], 2) is { Entries.Count: 0, More: false },
+            "nearby discovery starts with services at the closest scanned node and respects the requester's visibility");
         var moved = new EndpointKey("bulk-00", 1);
         services.AttachEndpoint(moved, new NodeId(2), "station");
         var changed = services.QueryDirectory(console, "machine.control", null, 8)!;

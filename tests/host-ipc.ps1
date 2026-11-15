@@ -1103,6 +1103,27 @@ try {
         Assert-True ($null -ne $answer -and $answer.producer -ceq 'apc-2s') "shell line answered: $Line"
         return $answer.payload
     }
+    $help = Invoke-Shell 'help'
+    Assert-True ($help.status -ceq 'ok' -and $help.count -eq 4 -and $help.rows -clike '*example=help services*') 'shell help lists navigable topics'
+    $help = Invoke-Shell 'help services'
+    Assert-True ($help.status -ceq 'ok' -and $help.rows -clike '*syntax=result <operation>*') 'service help shows result syntax'
+    $help = Invoke-Shell 'help missing'
+    Assert-True ($help.status -ceq 'source_failed' -and $help.error -clike 'help *') 'unknown help topic is reported with valid alternatives'
+
+    $alarm = @{ endpoint = 'netdm-test-alarm'; generation = '1' }
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '3' } + $alarm)).ok) 'attach a test alarm'
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'atmos.alarm.test'; serviceType = 'atmos.alarm'
+        schema = 'atmos.alarm_state'; major = 1; minor = 0 } + $alarm)).ok) 'register a test alarm'
+    $alarmRequest = Invoke-Shell 'services -type atmos.alarm | first 1 | invoke read reason=inspect'
+    $alarmCommand = Wait-Item $alarm.endpoint 'command'
+    Assert-True ($null -ne $alarmCommand -and $alarmRequest.rows -clike "*operation=$($alarmCommand.operationId)") 'a shell script reaches the alarm'
+    $alarmLine = "result $($alarmCommand.operationId)"
+    Assert-True ((Invoke-Shell $alarmLine).status -ceq 'source_failed') 'pending alarms have no reading'
+    Assert-True ((Invoke-Next @{ op = 'delivery_ack'; acks = @(@{ deliveryId = $alarmCommand.deliveryId; applied = $true
+        result = @{ pressureKPa = 101.25; temperatureK = 294.5; danger = 0; alarm = $false } }) }).ok) 'alarm returns a typed reading'
+    $reading = Wait-Result $engineer.endpoint 'read'
+    Assert-True ($null -ne $reading -and (Invoke-Shell "$alarmLine | select pressureKPa temperatureK alarm").rows -ceq
+        'pressureKPa=101.25,temperatureK=294.5,alarm=false') 'the shell returns only the delivered reading'
     $out = Invoke-Shell 'services -type machine.door | sort instance | first 1'
     Assert-True ($out.status -ceq 'ok' -and $out.count -eq 1 -and $out.rows -ceq 'instance=door.a,type=machine.door,hops=1' -and $out.fuel -gt 0) "a pipeline runs on the device: $($out | ConvertTo-Json -Compress)"
     $out = Invoke-Shell 'services | where hops -eq 0 | where instance -like netshell.* | select instance'
@@ -1664,8 +1685,13 @@ end
     Assert-True ($start.status -ceq 'entered' -and $start.host -ceq 'netshell.apc1') "the operator enters at APC 1: $($start | ConvertTo-Json -Compress)"
     Assert-True ((Invoke-ShellAt 'netshell.apc1' 'move' @{ to = 'netshell.apc1' } '6').status -ceq 'invalid_argument') 'a presence does not move to where it stands'
     Assert-True ((Invoke-ShellAt 'netshell.apc1' 'move' @{ to = 'netshell.nowhere' } '6').status -ceq 'forbidden') 'a shell the operator cannot use is refused'
+    $preview = Invoke-ShellAt 'netshell.apc1' 'preview_move' @{ to = 'netshell.apc3' } '6'
+    Assert-True ($preview.status -ceq 'ready' -and $preview.target -ceq 'netshell.apc3' -and $preview.path -ceq '1|2|3' -and
+        $preview.seconds -eq 2 -and $preview.hops -eq 2 -and $preview.radioHops -eq 0) 'preview reports the physical route and its estimated time'
+    Assert-True ((Invoke-ShellAt 'netshell.apc1' 'presence' @{} '6').state -ceq 'active') 'preview does not start a move'
     $leaving = Invoke-ShellAt 'netshell.apc1' 'move' @{ to = 'netshell.apc3' } '6'
-    Assert-True ($leaving.status -ceq 'moving' -and $leaving.to -ceq 'netshell.apc3' -and $leaving.arriveIn -ge 1 -and $leaving.arriveIn -le 2 -and $leaving.host -ceq '') "the presence sets off over two hops: $($leaving | ConvertTo-Json -Compress)"
+    Assert-True ($leaving.status -ceq 'moving' -and $leaving.to -ceq 'netshell.apc3' -and $leaving.arriveIn -ge 1 -and $leaving.arriveIn -le 2 -and
+        $leaving.host -ceq '' -and $leaving.route -ceq $preview.path) "the presence sets off over two hops: $($leaving | ConvertTo-Json -Compress)"
     Assert-True ((Invoke-ShellAt 'netshell.apc1' 'act' @{ line = 'self' } '6').status -ceq 'moving') 'a presence on its way does not act'
     $arrived = $null
     for ($try = 0; $try -lt 30; $try++) {
@@ -1675,6 +1701,10 @@ end
     }
     Assert-True ($arrived.state -ceq 'active' -and $arrived.host -ceq 'netshell.apc3' -and $arrived.generation -eq 2) "it arrives with the next generation: $($arrived | ConvertTo-Json -Compress)"
     Assert-True ((Invoke-ShellAt 'netshell.apc1' 'act' @{ line = 'self | select node' } '6').rows -ceq 'node=3') 'it acts from where it arrived'
+    Assert-True ((Invoke-ShellAt 'netshell.apc1' 'move' @{ to = 'netshell.apc1' } '6').status -ceq 'moving') 'start a cancellable return'
+    $cancelled = Invoke-ShellAt 'netshell.apc1' 'abort_move' @{} '6'
+    Assert-True ($cancelled.status -ceq 'cancelled' -and $cancelled.state -ceq 'active' -and $cancelled.host -ceq 'netshell.apc3' -and
+        $cancelled.generation -eq 2 -and $cancelled.reason -ceq 'returned: cancelled') 'cancelling leaves one presence at the source'
     $back = Invoke-ShellAt 'netshell.apc1' 'move' @{ to = 'netshell.apc1' } '6'
     Assert-True ($back.status -ceq 'moving') "it sets off back: $($back | ConvertTo-Json -Compress)"
     Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '7'
@@ -1686,7 +1716,8 @@ end
         Start-Sleep -Milliseconds 200
     }
     Assert-True ($returned.state -ceq 'active' -and $returned.host -ceq 'netshell.apc3' -and $returned.generation -eq 2 -and
-        $returned.reason -ceq 'returned: route_lost') "a broken route sends it back to its source: $($returned | ConvertTo-Json -Compress)"
+        $returned.reason -ceq 'returned: route_lost' -and $returned.breakKind -ceq 'cable' -and
+        $returned.breakFrom -ceq '3' -and $returned.breakTo -ceq '2') "a broken route returns to its source and names the first known failed leg: $($returned | ConvertTo-Json -Compress)"
     Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '8'
         changes = @(@{ op = 'node_state'; a = '2'; powered = 1; operational = 1 }) }).ok) 'APC 2 has power again'
     Assert-True ((Invoke-ShellAt 'netshell.apc1' 'leave' @{} '8').status -ceq 'left') 'the operator leaves'

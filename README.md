@@ -18,6 +18,8 @@ dotnet run --project src/NetDM.Host -c Release
 
 Open **http://127.0.0.1:5087/** to use **Network Observatory**.
 
+Testing catalogue (automated checks, the BlueMoon stand, in-game scenarios): [docs/testing-guide.ru.md](docs/testing-guide.ru.md). All automated checks: `pwsh -File scripts/check-all.ps1 -Only all`.
+
 The host runs a local HTTP dashboard and an independent local named-pipe server
 (`netdm-core`). The HTTP server is **loopback-only** and unauthenticated;
 do not expose it to external clients or production players.

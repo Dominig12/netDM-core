@@ -56,11 +56,12 @@ public sealed class CanonicalPayload
 /// the request physically reaches the provider; DM never sees them.
 /// </summary>
 public sealed record CommandDefinition(string ServiceType, string Name, SchemaDefinition Arguments,
-    SchemaDefinition Result, bool HostHandled = false, bool Transient = false);
+    SchemaDefinition Result, bool HostHandled = false, bool Transient = false, bool ShellReadableResult = false);
 
 public sealed class SchemaRegistry
 {
     public const int AbsoluteMaxPayloadBytes = 8 * 1024;
+    public const int ChatTextMaxLength = 160, ChatSnapshotMaxLength = 4096;
     public const string DescribeCommand = "directory.describe";
     /// <summary>Outcomes of research.server/research, in the wire spelling.</summary>
     public static readonly string[] ResearchOutcomes =
@@ -108,7 +109,21 @@ public sealed class SchemaRegistry
             new SchemaField("alarm", SchemaFieldType.Boolean, true)
         ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["pressureKPa", "temperatureK", "danger", "alarm"] },
             MaxPayloadBytes: 160));
-        registry.RegisterCommand("atmos.alarm", "read", "atmos.alarm_read", 1, "atmos.alarm_state", 1);
+        registry.RegisterCommand("atmos.alarm", "read", "atmos.alarm_read", 1, "atmos.alarm_state", 1,
+            transient: true, shellReadableResult: true);
+        registry.Register(new SchemaDefinition("atmos.alert_request", 1, 0,
+        [
+            new SchemaField("ticket", SchemaFieldType.Text, true, MaxLength: 40),
+            new SchemaField("enabled", SchemaFieldType.Boolean, true)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["ticket", "enabled"] }, MaxPayloadBytes: 128));
+        registry.Register(new SchemaDefinition("atmos.alert_result", 1, 0,
+        [
+            new SchemaField("ticket", SchemaFieldType.Text, true, MaxLength: 40),
+            new SchemaField("sourceActive", SchemaFieldType.Boolean, true),
+            new SchemaField("zoneAlarm", SchemaFieldType.Boolean, true),
+            new SchemaField("changed", SchemaFieldType.Boolean, true)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["ticket", "sourceActive", "zoneAlarm", "changed"] }, MaxPayloadBytes: 192));
+        registry.RegisterCommand("atmos.alarm", "set_alert", "atmos.alert_request", 1, "atmos.alert_result", 1);
 
         // machine.control: an idempotent set_state command, never a toggle.
         registry.Register(new SchemaDefinition("machine.power_state", 1, 0,
@@ -511,13 +526,13 @@ public sealed class SchemaRegistry
         registry.RegisterCommand("network.shell", "scan", "shell.scan_request", 1, "shell.scan", 1);
         // P12.2 presence: one network entity per operator, on a device's shell; "act" runs a line there.
         registry.Register(new SchemaDefinition("shell.presence_request", 1, 0,
-            [new SchemaField("note", SchemaFieldType.Text, false, MaxLength: 32)],
-            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["note"] }, MaxPayloadBytes: 64));
+            [new SchemaField("note", SchemaFieldType.Text, false, MaxLength: 32), new SchemaField("others", SchemaFieldType.Boolean, false)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["note", "others"] }, MaxPayloadBytes: 96));
         registry.Register(new SchemaDefinition("shell.presence", 1, 0,
         [
             new SchemaField("status", SchemaFieldType.Enum, true, Values:
                 ["entered", "present", "resumed", "suspended", "left", "ended", "none", "limit_exceeded",
-                 "moving", "no_presence", "out_of_reach", "forbidden", "unreachable", "invalid_argument"]),
+                 "moving", "no_presence", "out_of_reach", "forbidden", "unreachable", "invalid_argument", "cancelled", "not_moving"]),
             new SchemaField("presence", SchemaFieldType.Integer, false, 0, 1_000_000_000),
             new SchemaField("host", SchemaFieldType.Text, false, MaxLength: 64),
             new SchemaField("generation", SchemaFieldType.Integer, false, 1, 1_000_000),
@@ -525,19 +540,78 @@ public sealed class SchemaRegistry
             new SchemaField("reason", SchemaFieldType.Text, false, MaxLength: 64),
             // P12.3: where a moving presence goes and in how many seconds it arrives.
             new SchemaField("to", SchemaFieldType.Text, false, MaxLength: 64),
-            new SchemaField("arriveIn", SchemaFieldType.Integer, false, 0, 60)
+            new SchemaField("arriveIn", SchemaFieldType.Integer, false, 0, 60),
+            new SchemaField("travelSeconds", SchemaFieldType.Integer, false, 1, 15),
+            new SchemaField("route", SchemaFieldType.Text, false, MaxLength: 672),
+            new SchemaField("radioLegs", SchemaFieldType.Text, false, MaxLength: 128),
+            new SchemaField("limited", SchemaFieldType.Boolean, false),
+            new SchemaField("breakKind", SchemaFieldType.Enum, false, Values: ["cable", "radio", "endpoint"]),
+            new SchemaField("breakFrom", SchemaFieldType.Text, false, MaxLength: 20),
+            new SchemaField("breakTo", SchemaFieldType.Text, false, MaxLength: 20),
+            // Up to 64 occupied nodes, each as a 20-digit node ID, a separator and a count.
+            new SchemaField("others", SchemaFieldType.Text, false, MaxLength: 1472)
         ], new Dictionary<string, IReadOnlyList<string>>
         {
-            ["full"] = ["status", "presence", "host", "generation", "state", "reason", "to", "arriveIn"]
-        }, MaxPayloadBytes: 512));
+            ["full"] = ["status", "presence", "host", "generation", "state", "reason", "to", "arriveIn", "travelSeconds",
+                "route", "radioLegs", "limited", "breakKind", "breakFrom", "breakTo", "others"]
+        }, MaxPayloadBytes: 3072));
         registry.Register(new SchemaDefinition("shell.move_request", 1, 0,
             [new SchemaField("to", SchemaFieldType.Text, true, MaxLength: 64)],
             new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["to"] }, MaxPayloadBytes: 128));
         registry.RegisterCommand("network.shell", "move", "shell.move_request", 1, "shell.presence", 1);
-        foreach (var presenceCommand in new[] { "enter", "detach", "leave", "presence" })
-            registry.RegisterCommand("network.shell", presenceCommand, "shell.presence_request", 1, "shell.presence", 1);
+        registry.Register(new SchemaDefinition("shell.move_preview", 1, 0,
+        [
+            new SchemaField("status", SchemaFieldType.Enum, true, Values:
+                ["ready", "no_presence", "suspended", "moving", "out_of_reach", "invalid_argument", "forbidden", "unreachable", "limit_exceeded"]),
+            new SchemaField("target", SchemaFieldType.Text, true, MaxLength: 64),
+            new SchemaField("path", SchemaFieldType.Text, false, MaxLength: 672),
+            new SchemaField("radioLegs", SchemaFieldType.Text, false, MaxLength: 128),
+            new SchemaField("limited", SchemaFieldType.Boolean, false),
+            new SchemaField("seconds", SchemaFieldType.Integer, false, 1, 15),
+            new SchemaField("hops", SchemaFieldType.Integer, false, 0),
+            new SchemaField("radioHops", SchemaFieldType.Integer, false, 0)
+        ], new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["full"] = ["status", "target", "path", "radioLegs", "limited", "seconds", "hops", "radioHops"]
+        }, MaxPayloadBytes: 1280));
+        registry.RegisterCommand("network.shell", "preview_move", "shell.move_request", 1, "shell.move_preview", 1, transient: true);
+        foreach (var presenceCommand in new[] { "enter", "detach", "leave", "presence", "abort_move" })
+            registry.RegisterCommand("network.shell", presenceCommand, "shell.presence_request", 1, "shell.presence", 1,
+                transient: presenceCommand == "presence");
         registry.RegisterCommand("network.shell", "act", "shell.run_request", 1, "shell.output", 1);
-        registry.RegisterCommand("network.shell", "knowledge", "shell.knowledge_request", 1, "shell.knowledge", 1);
+        registry.Register(new SchemaDefinition("shell.chat_read", 1, 0,
+        [
+            new SchemaField("presence", SchemaFieldType.Integer, true, 1, 1_000_000_000),
+            new SchemaField("generation", SchemaFieldType.Integer, true, 1, 1_000_000)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["presence", "generation"] }, MaxPayloadBytes: 96));
+        registry.Register(new SchemaDefinition("shell.chat_send", 1, 0,
+        [
+            new SchemaField("scope", SchemaFieldType.Text, true, MaxLength: 32),
+            new SchemaField("text", SchemaFieldType.Text, true, MaxLength: ChatTextMaxLength)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["scope", "text"] }, MaxPayloadBytes: 1152));
+        registry.Register(new SchemaDefinition("shell.chat", 1, 0,
+        [
+            new SchemaField("status", SchemaFieldType.Enum, true, Values:
+                ["ok", "sent", "no_presence", "suspended", "moving", "out_of_reach", "stale_chat", "rate_limited", "invalid_text"]),
+            new SchemaField("node", SchemaFieldType.Text, false, MaxLength: 20),
+            new SchemaField("scope", SchemaFieldType.Text, false, MaxLength: 32),
+            new SchemaField("received", SchemaFieldType.Integer, false, 0),
+            new SchemaField("messages", SchemaFieldType.Text, false, MaxLength: ChatSnapshotMaxLength)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "node", "scope", "received", "messages"] }, MaxPayloadBytes: AbsoluteMaxPayloadBytes));
+        registry.RegisterCommand("network.shell", "chat_read", "shell.chat_read", 1, "shell.chat", 1, transient: true);
+        registry.RegisterCommand("network.shell", "chat_send", "shell.chat_send", 1, "shell.chat", 1);
+        registry.Register(new SchemaDefinition("shell.alarm_poll", 1, 0,
+            [new SchemaField("instance", SchemaFieldType.Text, true, MaxLength: 64)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["instance"] }, MaxPayloadBytes: 128));
+        registry.Register(new SchemaDefinition("shell.alarm_action", 1, 0,
+        [
+            new SchemaField("instance", SchemaFieldType.Text, true, MaxLength: 64),
+            new SchemaField("ticket", SchemaFieldType.Text, true, MaxLength: 40),
+            new SchemaField("enabled", SchemaFieldType.Boolean, true)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["instance", "ticket", "enabled"] }, MaxPayloadBytes: 192));
+        registry.RegisterCommand("network.shell", "poll_alarm", "shell.alarm_poll", 1, "shell.output", 1, transient: true);
+        registry.RegisterCommand("network.shell", "alarm_action", "shell.alarm_action", 1, "shell.output", 1);
+        registry.RegisterCommand("network.shell", "knowledge", "shell.knowledge_request", 1, "shell.knowledge", 1, transient: true);
 
         // NetEntity migration (§14.4): the owner moves its program to another device's shell.
         registry.Register(new SchemaDefinition("shell.migrate_request", 1, 0,
@@ -567,7 +641,7 @@ public sealed class SchemaRegistry
     }
 
     public void RegisterCommand(string serviceType, string name, string argumentsSchema, int argumentsMajor,
-        string resultSchema, int resultMajor, bool hostHandled = false, bool transient = false)
+        string resultSchema, int resultMajor, bool hostHandled = false, bool transient = false, bool shellReadableResult = false)
     {
         var arguments = Find(argumentsSchema, argumentsMajor);
         var result = Find(resultSchema, resultMajor);
@@ -575,7 +649,7 @@ public sealed class SchemaRegistry
             arguments is null || result is null || !arguments.Projections.ContainsKey("full") ||
             !result.Projections.ContainsKey("full"))
             throw new ArgumentException("Invalid command definition.");
-        if (!_commands.TryAdd((serviceType, name), new CommandDefinition(serviceType, name, arguments, result, hostHandled, transient)))
+        if (!_commands.TryAdd((serviceType, name), new CommandDefinition(serviceType, name, arguments, result, hostHandled, transient, shellReadableResult)))
             throw new ArgumentException($"Command '{serviceType}/{name}' is already registered.");
         if (!_commandNames.TryGetValue(serviceType, out var names))
             _commandNames[serviceType] = names = [];
