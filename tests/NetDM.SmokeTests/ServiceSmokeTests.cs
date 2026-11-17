@@ -14,6 +14,7 @@ static class ServiceSmokeTests
     public static void Run()
     {
         CheckSchemas();
+        CheckContractModules();
         CheckDeliveryLifecycle();
         CheckBounds();
         CheckOutboxBackpressure();
@@ -25,6 +26,44 @@ static class ServiceSmokeTests
         CheckMessenger();
         CheckDirectoryQuery();
         Console.WriteLine("P2 service foundation, P4 telemetry snapshot, P7 messenger and P10 directory query checks passed.");
+    }
+
+
+    /// <summary>
+    /// A new game feature should be able to introduce a schema and a command without
+    /// modifying the built-in SchemaRegistry catalog. Duplicates fail at startup.
+    /// </summary>
+    private static void CheckContractModules()
+    {
+        var registry = SchemaRegistry.CreateDefault([new ExampleFeatureContracts()]);
+        var schema = registry.Find("test.ping", 1);
+        Check(schema is { Minor: 0 } && registry.FindCommand("test.ping_service", "ping") is not null,
+            "a feature module registers its schema and command");
+        var payload = Json("""{"message":"probe"}""");
+        Check(registry.Validate(schema!, 0, payload, out var canonical) == ServiceStatus.Ok &&
+              canonical!.Values["message"].GetString() == "probe",
+            "feature contract validates a published payload");
+        var duplicateRejected = false;
+        try
+        {
+            _ = SchemaRegistry.CreateDefault([new ExampleFeatureContracts(), new ExampleFeatureContracts()]);
+        }
+        catch (ArgumentException)
+        {
+            duplicateRejected = true;
+        }
+        Check(duplicateRejected, "duplicate feature contracts must be rejected, not overwritten");
+    }
+
+    private sealed class ExampleFeatureContracts : IServiceContractModule
+    {
+        public void Register(SchemaRegistry registry)
+        {
+            registry.Register(new SchemaDefinition("test.ping", 1, 0,
+                [new SchemaField("message", SchemaFieldType.Text, true, MaxLength: 32)],
+                new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["message"] }, MaxPayloadBytes: 128));
+            registry.RegisterCommand("test.ping_service", "ping", "test.ping", 1, "test.ping", 1);
+        }
     }
 
     private static void CheckCameraOperationRetention()

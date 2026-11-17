@@ -7,7 +7,7 @@ namespace NetDM.Host.Transport;
 /// A feature's local control-plane entry points. These commands only coordinate
 /// Host state: they do not impersonate network deliveries between DM endpoints.
 /// </summary>
-internal interface IHostIpcModule
+public interface IHostIpcModule
 {
     IReadOnlyCollection<string> Operations { get; }
 
@@ -17,13 +17,13 @@ internal interface IHostIpcModule
     HostIpcResult Execute(string operation, JsonElement? payload);
 }
 
-internal sealed record HostIpcResult(bool Ok, string? Error, object? Value);
+public sealed record HostIpcResult(bool Ok, string? Error, object? Value);
 
 /// <summary>
 /// Immutable command registry for feature modules. An ambiguous registration is a
 /// startup failure, not a silent last-wins replacement.
 /// </summary>
-internal sealed class HostIpcModuleRouter
+public sealed class HostIpcModuleRouter
 {
     private readonly IReadOnlyDictionary<string, IHostIpcModule> _modules;
 
