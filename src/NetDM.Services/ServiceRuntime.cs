@@ -714,6 +714,25 @@ public sealed class ServiceRuntime
         }
     }
 
+    /// <summary>
+    /// Read-only reconciliation probe for a named subscription. It exposes no payload or
+    /// other endpoint's subscriptions, and checks the exact endpoint generation.
+    /// Callers must still use Subscribe to reauthorize an absent or changed lease.
+    /// </summary>
+    public bool HasSubscription(EndpointKey subscriber, string key, string instance, string projection,
+        DeliveryMode mode, int maxPending)
+    {
+        lock (_gate)
+        {
+            if (Require(subscriber, out var endpoint) != ServiceStatus.Ok ||
+                !endpoint!.Subscriptions.TryGetValue(key, out var id) ||
+                !_subscriptions.TryGetValue(id, out var subscription))
+                return false;
+            return subscription.Instance == instance && subscription.Projection == projection &&
+                subscription.Mode == mode && subscription.MaxPending == (mode == DeliveryMode.LatestValue ? 1 : maxPending);
+        }
+    }
+
     public ServiceStatus Unsubscribe(EndpointKey subscriber, string key)
     {
         lock (_gate)
