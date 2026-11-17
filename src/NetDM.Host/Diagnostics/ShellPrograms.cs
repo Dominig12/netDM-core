@@ -45,10 +45,11 @@ public static class ShellPrograms
     /// </summary>
     public const int RefreshEveryMs = 30_000;
 
-    private readonly record struct ChangeIndex(long World, object Wiring, long Directory, long Programs, long Operations)
+    private readonly record struct ChangeIndex(long World, object Wiring, long Directory, long Programs, long Operations, long Events)
     {
         public bool Same(ChangeIndex other) => World == other.World && ReferenceEquals(Wiring, other.Wiring) &&
-            Directory == other.Directory && Programs == other.Programs && Operations == other.Operations;
+            Directory == other.Directory && Programs == other.Programs && Operations == other.Operations &&
+            Events == other.Events;
     }
 
     private static long _programsRevision;
@@ -135,6 +136,10 @@ public static class ShellPrograms
         public string Name = "", Instance = "", State = "running", Reason = "", Resume = "running", ThrottledFrom = "running";
         public EndpointKey Owner, Provider;
         public string? Rule;
+        public bool IsEventRule => Rule is { } rule && rule.StartsWith("events", StringComparison.Ordinal) &&
+            (rule.Length == 6 || char.IsWhiteSpace(rule[6]) || rule[6] == '|');
+        /// <summary>Last consumed event sequence in the receiver's acknowledged journal.</summary>
+        public long EventCursor;
         /// <summary>The text it was started from: a device that keeps it on its media starts it again with it.</summary>
         public string? Source;
         /// <summary>Kept on the device's media: it waits for its endpoint to come back like a restored program.</summary>
@@ -177,7 +182,8 @@ public static class ShellPrograms
         ulong ProviderGeneration, string? Rule, string[] Phases, string? LastEvent, int Phase, int Runs, string State, string Resume,
         string ThrottledFrom, string Reason, long Fuel, bool InPhase, List<Dictionary<string, JsonElement>> Sent,
         List<Dictionary<string, JsonElement>> Event, string? Source = null, bool Kept = false, int Every = 0,
-        List<Dictionary<string, JsonElement>>? Memory = null, int Generation = 1, long Revision = 0);
+        List<Dictionary<string, JsonElement>>? Memory = null, int Generation = 1, long Revision = 0,
+        long EventCursor = 0);
 
     /// <summary>Where an entity went: a device's media may still name it under its old device.</summary>
     private sealed record Moved(int Id, string From, string Name, string OwnerId, string? Source, string To, int Generation);
@@ -257,7 +263,7 @@ public static class ShellPrograms
             ThrottledFrom = saved.ThrottledFrom, Reason = saved.Reason, Fuel = saved.Fuel, Sent = saved.Sent.Select(Record).ToArray(),
             Event = saved.Event.Select(Record).ToArray(), Source = saved.Source, Kept = saved.Kept, Every = saved.Every,
             Memory = saved.Memory?.Select(Record).ToArray() ?? [], Generation = saved.Generation, Revision = saved.Revision,
-            Detached = true, SuspendedAt = now
+            EventCursor = saved.EventCursor, Detached = true, SuspendedAt = now
         };
         if (saved.InPhase)
         {
@@ -283,6 +289,11 @@ public static class ShellPrograms
         program.NextEvaluation = 0;
         program.Seen = null;
         program.Reads = null;
+        if (program.IsEventRule)
+        {
+            program.EventCursor = 0; // A new runtime owns a new, empty acknowledged event stream.
+            program.LastEvent = null;
+        }
         program.Detached = true;
         program.DetachedSince = 0;
     }
@@ -316,7 +327,7 @@ public static class ShellPrograms
         if (_path is null)
             return;
         var structure = string.Join(";", Programs.Where(program => !program.Finished).Select(program =>
-            $"{program.Id}|{program.Owner}|{program.Provider}|{program.State}|{program.Resume}|{program.Phase}|{program.Runs}|{program.InPhase}|{program.Kept}|{program.Source?.GetHashCode()}|{program.Generation}"))
+            $"{program.Id}|{program.Owner}|{program.Provider}|{program.State}|{program.Resume}|{program.Phase}|{program.Runs}|{program.InPhase}|{program.Kept}|{program.Source?.GetHashCode()}|{program.Generation}|{program.EventCursor}"))
             + "#" + Moves.Count.ToString(CultureInfo.InvariantCulture);
         var now = Environment.TickCount64;
         if (!durable && structure == _writtenStructure && now - _lastWrite < LazyWriteMs)
@@ -325,7 +336,7 @@ public static class ShellPrograms
             program.Id, program.Name, program.Instance, program.Owner.Id, program.Owner.Generation, program.Provider.Id, program.Provider.Generation,
             program.Rule, program.Phases, program.LastEvent, program.Phase, program.Runs, program.State, program.Resume, program.ThrottledFrom,
             program.Reason, program.Fuel, program.InPhase, Fields(program.Sent), Fields(program.Event), program.Source, program.Kept, program.Every, Fields(program.Memory), program.Generation,
-            program.Revision)).ToList(), Moves.ToList());
+            program.Revision, program.EventCursor)).ToList(), Moves.ToList());
         var text = JsonSerializer.Serialize(file);
         if (text == _written)
         {
@@ -577,7 +588,7 @@ public static class ShellPrograms
         public IReadOnlyList<ShellRecord>? Read(string command, ShellArguments arguments, int maxRecords, out string? error)
             => throw new InvalidOperationException("Validation must not read from the network.");
 
-        public bool Knows(string command) => command is "invoke" or "publish";
+        public bool Knows(string command) => command is "invoke" or "publish" or "watch" or "unwatch";
 
         public IReadOnlyList<ShellRecord>? Act(string command, IReadOnlyList<ShellRecord>? input, ShellArguments arguments, out string? error)
             => throw new InvalidOperationException("Validation must not send commands.");
@@ -618,6 +629,11 @@ public static class ShellPrograms
         Passes++;
         var session = game.CaptureSession();
         Sync(session);
+        // Only active event-driven programs may retain an ACKed inbox view. An endpoint
+        // being retired, disconnected, or losing its program discards the journal.
+        session.Services.SetEventReaders(Programs.Where(program =>
+            !program.Finished && program.IsEventRule && session.Services.IsAttached(program.Owner))
+            .Select(program => program.Owner));
         if (Programs.Count == 0)
         {
             Save(); // A removed last program leaves an empty file, not a stale one.
@@ -674,7 +690,8 @@ public static class ShellPrograms
             bool Reads(params string[] sources) => program.Reads is null || sources.Any(program.Reads.Contains);
             var changes = new ChangeIndex(power.World.Version, power.Wiring,
                 Reads("services", "route") ? session.Services.DirectoryRevision : 0, Reads("programs") ? _programsRevision : 0,
-                Reads("jobs") || Reads("result") ? session.Services.OperationsRevisionOf(program.Owner) : 0);
+                Reads("jobs") || Reads("result") ? session.Services.OperationsRevisionOf(program.Owner) : 0,
+                Reads("events") ? session.Services.EventRevisionOf(program.Owner) : 0);
             if (program.State == "watching" && program.Rule is not null && now >= program.NextEvaluation && program.Seen is { } seenIndex &&
                 seenIndex.Same(changes) && now < program.RefreshAt)
             {
@@ -709,7 +726,8 @@ public static class ShellPrograms
                     program.Seen = changes;
                     program.RefreshAt = now + RefreshEveryMs;
                     Evaluations++;
-                    var ruleSource = new ShellHost.Source(game, session, scope);
+                    var ruleSource = new ShellHost.Source(game, session, scope,
+                        program.IsEventRule ? program.EventCursor : null);
                     var seen = NetShell.Run(program.Rule!, ruleSource, ShellHost.ProgramLimits);
                     program.Reads = ruleSource.Names;
                     Charge(program, seen.FuelUsed, 0);
@@ -719,15 +737,28 @@ public static class ShellPrograms
                         break;
                     }
                     var text = ShellHost.Format(seen.Records);
-                    var first = program.LastEvent is null;
-                    if (text == program.LastEvent)
-                        break;
-                    program.LastEvent = text;
+                    if (program.IsEventRule)
+                    {
+                        // Consume even events excluded by the rule's filters. The sequence
+                        // refers to an already acknowledged physical delivery, not a timer.
+                        program.EventCursor = ruleSource.EventReadThrough;
+                        if (program.EventCursor < ruleSource.EventLatest)
+                            program.Seen = null; // More events await the next bounded pass.
+                        if (seen.Records.Count == 0)
+                            break;
+                    }
+                    else
+                    {
+                        var first = program.LastEvent is null;
+                        if (text == program.LastEvent)
+                            break;
+                        program.LastEvent = text;
+                        if (first)
+                            break; // Ordinary change rules first establish a baseline.
+                    }
                     program.Reason = "";
                     if (OverBudget(program))
                         break;
-                    if (first)
-                        break; // The first evaluation is what the rule compares with.
                     if (program.Runs >= MaxRuns)
                     {
                         Finish(program, "faulted", "run budget spent");
