@@ -120,11 +120,23 @@ public sealed class NetworkLifeRuntime
         return bot;
     }
 
+    /// <summary>Limit extension-origin text before storing or publishing it.</summary>
+    public static string BoundedText(string? text, int max)
+    {
+        if (text is null || max <= 0)
+            return "";
+        var length = Math.Min(text.Length, max);
+        var buffer = new char[length];
+        for (var i = 0; i < length; i++)
+            buffer[i] = text[i] is '|' or ';' or '\n' or '\r' or '\0' ? ' ' : text[i];
+        return new string(buffer);
+    }
+
     public void Record(string kind, NodeId node, string name, string message)
     {
-        _activities.Enqueue(new NetworkLifeActivity(++_activitySeq, kind,
-            node.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            name, message, Environment.TickCount64));
+        _activities.Enqueue(new NetworkLifeActivity(++_activitySeq,
+            BoundedText(kind, 24), node.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            BoundedText(name, 24), BoundedText(message, 160), Environment.TickCount64));
         while (_activities.Count > MaxActivity)
             _activities.Dequeue();
     }
