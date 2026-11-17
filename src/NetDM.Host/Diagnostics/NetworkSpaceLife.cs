@@ -28,8 +28,6 @@ public static partial class NetworkSpace
     private const int BotPassMs = 1000, BotFirstActionMs = 5000, BotMoveMinMs = 5000, BotMoveMaxMs = 11_000;
     private const int BotActionsPerPass = 2, BotFuel = 400, IntrusionDwellMs = 10_000;
 
-    private static readonly string[] Names = ["sentinel", "watcher", "archivist", "courier", "rogue", "saboteur", "engineer"];
-    private static readonly string[] Signatures = ["S", "W", "A", "C", "R", "X", "E"];
     private static readonly NetworkLifeRuntime Life = new();
 
     private static void EnsureLifeSession(Guid stream)
@@ -122,7 +120,7 @@ public static partial class NetworkSpace
             ? Math.Clamp(parsedLimit, 1, MaxActivityPage) : MaxActivityPage;
         var bots = string.Join(';', Life.Bots.Where(bot => known.Contains(bot.Node.Value.ToString(CultureInfo.InvariantCulture)))
             .Select(bot => string.Join('|', bot.Id.ToString(CultureInfo.InvariantCulture), Clean(bot.Name), Clean(bot.Signature),
-                bot.Colour.ToString(CultureInfo.InvariantCulture), bot.Goal.ToString().ToLowerInvariant(),
+                bot.Colour.ToString(CultureInfo.InvariantCulture), bot.BehaviorId,
                 bot.Node.Value.ToString(CultureInfo.InvariantCulture), bot.State, bot.Moves.ToString(CultureInfo.InvariantCulture))));
         var activity = Life.Activities.Where(entry => entry.Seq > since && known.Contains(entry.Node)).Take(limit).ToArray();
         var text = string.Join(';', activity.Select(entry => string.Join('|', entry.Seq.ToString(CultureInfo.InvariantCulture),
@@ -179,15 +177,15 @@ public static partial class NetworkSpace
                 {
                     total = Life.Bots.Count,
                     nodes = Life.Bots.Select(bot => bot.Node.Value.ToString(CultureInfo.InvariantCulture)).ToArray(),
-                    goals = Life.Bots.Select(bot => bot.Goal.ToString().ToLowerInvariant()).ToArray()
+                    goals = Life.Bots.Select(bot => bot.BehaviorId).ToArray()
                 });
             case "spawn":
                 var count = payload.TryGetProperty("count", out var countValue) && countValue.TryGetInt32(out var parsedCount)
                     ? Math.Clamp(parsedCount, 1, MaxSpawnPerRequest) : 1;
-                var goal = NetworkBotGoal.Sentinel;
-                if (payload.TryGetProperty("goal", out var goalValue) && goalValue.ValueKind == JsonValueKind.String &&
-                    Enum.TryParse<NetworkBotGoal>(goalValue.GetString(), true, out var parsedGoal))
-                    goal = parsedGoal;
+                var goalId = payload.TryGetProperty("goal", out var goalValue) && goalValue.ValueKind == JsonValueKind.String
+                    ? goalValue.GetString() ?? "" : "sentinel";
+                if (!game.BotBehaviors.TryGet(goalId, out var behavior))
+                    return (false, "unknown_goal", null);
                 NodeId? only = null;
                 if (payload.TryGetProperty("node", out var nodeValue) &&
                     nodeValue.ValueKind is JsonValueKind.String or JsonValueKind.Number)
@@ -204,10 +202,10 @@ public static partial class NetworkSpace
                 var spawned = 0;
                 foreach (var candidate in candidates)
                 {
-                    NewBot(candidate, goal, Environment.TickCount64);
+                    NewBot(candidate, behavior, Environment.TickCount64);
                     spawned++;
                 }
-                return (true, null, new { spawned, total = Life.Bots.Count, goal = goal.ToString().ToLowerInvariant(),
+                return (true, null, new { spawned, total = Life.Bots.Count, goal = behavior.Id,
                     nodes = candidates.Select(node => node.Value.ToString()).ToArray() });
             case "banish":
                 // Counterplay: an operator on the node can push a hostile agent out of the network.
@@ -238,8 +236,8 @@ public static partial class NetworkSpace
             : world.Physical.Nodes.Values.Where(node => node.CanForward && node.Links.Count > 0)
                 .Select(node => node.Id).OrderBy(id => id.Value);
 
-    private static NetworkBot NewBot(NodeId node, NetworkBotGoal goal, long now) =>
-        Life.Spawn(node, goal, Names[(int)goal], Signatures[(int)goal], now, BotFirstActionMs);
+    private static NetworkBot NewBot(NodeId node, INetworkBotBehavior behavior, long now) =>
+        Life.Spawn(node, behavior, now, BotFirstActionMs);
 
     /// <summary>One bounded pass: a few bots move one physical link and leave an activity record.</summary>
     private static void LifePass(GameNetworkService game, long now)
@@ -251,7 +249,7 @@ public static partial class NetworkSpace
         Life.NextBotPass = now + BotPassMs;
         var world = session.Medium.Snapshot;
         if (!Life.PopulationStarted)
-            Populate(world, now);
+            Populate(world, now, game.BotBehaviors);
         var actions = 0;
         var bots = Life.Bots.Count;
         for (var step = 0; step < bots && actions < BotActionsPerPass; step++)
@@ -266,55 +264,66 @@ public static partial class NetworkSpace
             if (bot.Fuel <= 0)
             {
                 bot.State = "idle";
-                bot.Fuel = BotFuel; // A rest, not a permanent stop: the population stays alive.
+                bot.Fuel = BotFuel;
                 bot.NextAt = now + 30_000;
                 continue;
             }
             bot.Fuel--;
-            if (!world.Physical.Nodes.TryGetValue(bot.Node, out var node) || node.Links.Count == 0)
+            if (!game.BotBehaviors.TryGet(bot.BehaviorId, out var behavior) ||
+                !world.Physical.Nodes.TryGetValue(bot.Node, out var node))
             {
                 bot.State = "idle";
+                bot.ThreatSince = 0;
                 continue;
             }
-            if (bot.Goal == NetworkBotGoal.Intruder)
+
+            // Behaviors get only a bounded observation. The Host computes pursuit over actual physical
+            // routing and validates every proposed hop; a plugin cannot teleport or bypass the network.
+            var adjacent = node.Links.Keys.OrderBy(id => id.Value).ToArray();
+            var pursuit = behavior.Hostile ? Hunt(world, bot) : null;
+            var observation = new NetworkBotObservation(Array.AsReadOnly(adjacent), pursuit?.Next,
+                pursuit?.Reached is not null, Life.BotSerial);
+            var snapshot = new NetworkBotState(bot.Id, bot.Node, bot.Moves, bot.Fuel, bot.State);
+            var decision = behavior.Decide(snapshot, observation);
+            if (!NetworkBotDecisionPolicy.Allows(bot.Node, behavior.Hostile, observation, decision) ||
+                (decision.Next is { } proposed && proposed != bot.Node && !node.Links.ContainsKey(proposed)))
             {
-                // An intruder hunts operators: it walks the real links towards the nearest live presence.
-                if (Hunt(world, bot) is not { } hunt)
-                {
-                    bot.State = "idle";
-                    continue;
-                }
-                bot.Node = hunt.Next;
-                bot.State = "active";
-                bot.Moves++;
-                Record("move", hunt.Next, bot.Name, $"{bot.Name} moved to {hunt.Next.Value}");
-                if (hunt.Reached is { } victim)
-                {
-                    victim.Threat = bot.Name;
-                    if (bot.ThreatSince == 0)
-                        bot.ThreatSince = now;
-                    Record("intrusion", hunt.Next, bot.Name, $"{bot.Name} reached an operator presence at {hunt.Next.Value}");
-                    // A link does not survive a sustained intrusion: after the dwell the operator is thrown
-                    // out of the network and must enter again. Time, not chance: the defender can see it coming.
-                    if (now - bot.ThreatSince >= IntrusionDwellMs && victim.State == "active")
-                    {
-                        victim.Intruded = true;
-                        Suspend(victim, "intrusion");
-                        Record("intrusion", hunt.Next, bot.Name, $"{bot.Name} severed the operator's link at {hunt.Next.Value}");
-                    }
-                }
-                else
-                    bot.ThreatSince = 0;
+                bot.State = "idle";
+                bot.ThreatSince = 0;
                 continue;
             }
-            var links = node.Links.Keys.OrderBy(id => id.Value).ToArray();
-            var hop = links[(int)(Life.BotSerial % (long)links.Length)];
-            bot.Node = hop;
+            var next = decision.Next!.Value;
+
+            var moved = next != bot.Node;
+            if (moved)
+            {
+                bot.Node = next;
+                bot.Moves++;
+                Record("move", next, bot.Name, $"{bot.Name} moved to {next.Value}");
+            }
             bot.State = "active";
-            bot.Moves++;
-            Record("move", hop, bot.Name, $"{bot.Name} moved to {hop.Value}");
-            if (bot.Moves % 3 == 0)
-                Record(bot.Goal == NetworkBotGoal.Watcher ? "watch" : "task", bot.Node, bot.Name, GoalText(bot.Goal, bot.Node));
+
+            if (decision.Engage && pursuit?.Reached is { } victim && victim.State == "active")
+            {
+                victim.Threat = bot.Name;
+                if (bot.ThreatSince == 0)
+                    bot.ThreatSince = now;
+                Record("intrusion", bot.Node, bot.Name,
+                    $"{bot.Name} reached an operator presence at {bot.Node.Value}");
+                if (now - bot.ThreatSince >= IntrusionDwellMs)
+                {
+                    victim.Intruded = true;
+                    Suspend(victim, "intrusion");
+                    Record("intrusion", bot.Node, bot.Name,
+                        $"{bot.Name} severed the operator's link at {bot.Node.Value}");
+                }
+            }
+            else
+                bot.ThreatSince = 0;
+
+            if (moved && decision.ActivityKind is { Length: > 0 } kind &&
+                decision.ActivityText is { Length: > 0 } activity)
+                Record(kind, bot.Node, bot.Name, activity);
         }
 
         // P13: the population murmurs on the shared channel now and then, so the network feels alive.
@@ -324,8 +333,9 @@ public static partial class NetworkSpace
             if (Life.Bots.Count > 0)
             {
                 var chatter = Life.Bots[Random.Shared.Next(Life.Bots.Count)];
-                EnqueueChannel(new ChatMessage(Guid.NewGuid().ToString("N"), default, chatter.Name,
-                    GoalText(chatter.Goal, chatter.Node), now));
+                if (game.BotBehaviors.TryGet(chatter.BehaviorId, out var behavior))
+                    EnqueueChannel(new ChatMessage(Guid.NewGuid().ToString("N"), default, chatter.Name,
+                        NetworkLifeRuntime.BoundedText(behavior.Describe(chatter.Node), 160), now));
             }
         }
     }
@@ -335,10 +345,13 @@ public static partial class NetworkSpace
     /// are the background of the network, not a threat: nothing is spawned on a node the map does not
     /// forward through.
     /// </summary>
-    private static void Populate(SharedMediumSnapshot world, long now)
+    private static void Populate(SharedMediumSnapshot world, long now, NetworkBotBehaviorRegistry behaviors)
     {
+        var entries = behaviors.All;
+        if (entries.Count == 0)
+            return;
         foreach (var node in SpawnNodes(world, null).Take(MaxBots))
-            NewBot(node, (NetworkBotGoal)((Life.NextBotId + 1) % Names.Length), now);
+            NewBot(node, entries[(Life.NextBotId + 1) % entries.Count], now);
     }
 
     /// <summary>
@@ -366,17 +379,6 @@ public static partial class NetworkSpace
         return hop.Nodes.Count >= 2 ? (hop.Nodes[1].Node, null) : null;
     }
 
-    /// <summary>What an agent with this goal is doing when it pauses: the goal is the task it performs.</summary>
-    private static string GoalText(NetworkBotGoal goal, NodeId node) => goal switch
-    {
-        NetworkBotGoal.Sentinel => $"sentinel completed a patrol lap at {node.Value}",
-        NetworkBotGoal.Archivist => $"archivist indexed traffic at {node.Value}",
-        NetworkBotGoal.Courier => $"courier delivered a packet to {node.Value}",
-        NetworkBotGoal.Intruder => $"rogue scanned node {node.Value}, looking for operators",
-        NetworkBotGoal.Saboteur => $"saboteur looked for a breaker at {node.Value}",
-        NetworkBotGoal.Engineer => $"engineer checked the power feed at {node.Value}",
-        _ => $"watcher is watching traffic at {node.Value}"
-    };
     private static void Record(string kind, NodeId node, string name, string text) =>
         Life.Record(kind, node, name, text);
 

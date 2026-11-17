@@ -16,6 +16,7 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
     internal sealed record Session(SharedMediumNetwork Medium, RadioPacketTransport Packets, ServiceRuntime Services);
 
     private readonly SchemaRegistry _schemas;
+    internal NetworkBotBehaviorRegistry BotBehaviors { get; }
     /// <summary>
     /// Research servers keep their state in the Host: their commands are answered here, not by DM.
     /// A message server relays to every recipient from one endpoint, so an endpoint may run 32
@@ -44,9 +45,11 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
     public GameNetworkService(PriorityWorkScheduler scheduler,
         IHostApplicationLifetime? application = null, ILogger<GameNetworkService>? log = null,
         IEnumerable<IServiceContractModule>? contractModules = null,
-        IEnumerable<IHostServiceExtension>? hostServices = null)
+        IEnumerable<IHostServiceExtension>? hostServices = null,
+        IEnumerable<INetworkBotBehavior>? botBehaviors = null)
     {
         _schemas = SchemaRegistry.CreateDefault(contractModules);
+        BotBehaviors = new NetworkBotBehaviorRegistry(botBehaviors);
         // Names and handlers share one DI registration: adding a Host-provided feature
         // no longer requires editing the GameNetworkService service-type list.
         var types = new HashSet<string>(StringComparer.Ordinal) { NetDM.Host.Research.ResearchHost.ServiceType };
