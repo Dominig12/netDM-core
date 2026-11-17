@@ -147,6 +147,8 @@ public static class ShellPrograms
         public string[] Phases = [];
         /// <summary>Seconds between runs of a timer program ("every N"); 0 for any other.</summary>
         public int Every;
+        /// <summary>Subscriptions declared by this program; keys belong only to its entity ID.</summary>
+        public ProgramWatch[] Watches = [];
         /// <summary>The program's own <c>$state</c>: what its phases kept for the next phase and the next run.</summary>
         public IReadOnlyList<ShellRecord> Memory = [];
         public string? LastEvent;
@@ -263,7 +265,8 @@ public static class ShellPrograms
             ThrottledFrom = saved.ThrottledFrom, Reason = saved.Reason, Fuel = saved.Fuel, Sent = saved.Sent.Select(Record).ToArray(),
             Event = saved.Event.Select(Record).ToArray(), Source = saved.Source, Kept = saved.Kept, Every = saved.Every,
             Memory = saved.Memory?.Select(Record).ToArray() ?? [], Generation = saved.Generation, Revision = saved.Revision,
-            EventCursor = saved.EventCursor, Detached = true, SuspendedAt = now
+            EventCursor = saved.EventCursor, Detached = true, SuspendedAt = now,
+            Watches = saved.Source is null ? [] : ProgramWatchSyntax.Parse(saved.Source).Watches.ToArray()
         };
         if (saved.InPhase)
         {
@@ -375,6 +378,52 @@ public static class ShellPrograms
     private static int _nextId;
     private static long _nextPass;
 
+    /// <summary>Per-session lease of subscriptions owned by resident programs, never by DM or player watches.</summary>
+    private sealed record WatchLease(ProgramWatch Declaration, long DirectoryRevision, long RetryAt);
+    private static readonly Dictionary<(EndpointKey Owner, string Key), WatchLease> WatchLeases = [];
+
+    /// <summary>
+    /// Reconcile declared watches under each program owner's rights, without any alternate transport.
+    /// The subscription is a ServiceRuntime control-plane operation; actual events still need a
+    /// routed publication and a receiver-side DM acknowledgement before a rule can read them.
+    /// A missing service is retried on directory changes or after a bounded delay.
+    /// </summary>
+    private static void ReconcileWatches(GameNetworkService.Session session, long now)
+    {
+        var desired = new Dictionary<(EndpointKey Owner, string Key), ProgramWatch>();
+        foreach (var program in Programs.Where(program => !program.Finished && program.Watches.Length > 0))
+        {
+            if (session.Services.ResidentCommandNode(program.Owner, program.Provider, program.Instance) is null)
+                continue;
+            foreach (var declaration in program.Watches)
+                desired[(program.Owner, declaration.SubscriptionKey(program.Id))] = declaration;
+        }
+
+        var tools = new NetworkInteractionTools(session.Services);
+        foreach (var old in WatchLeases.Keys.Where(key => !desired.ContainsKey(key)).ToArray())
+        {
+            // Endpoint may already be retired; ServiceRuntime then cleaned up the subscription.
+            tools.Execute(new NetworkToolActor(old.Owner),
+                new NetworkToolRequest(NetworkToolKind.Unwatch, old.Key));
+            WatchLeases.Remove(old);
+        }
+
+        var revision = session.Services.DirectoryRevision;
+        foreach (var (id, declaration) in desired)
+        {
+            if (WatchLeases.TryGetValue(id, out var lease) &&
+                lease.Declaration == declaration && lease.DirectoryRevision == revision && now < lease.RetryAt)
+                continue;
+            var result = tools.Execute(new NetworkToolActor(id.Owner),
+                new NetworkToolRequest(NetworkToolKind.Watch, declaration.Instance,
+                    Key: id.Key, Projection: declaration.Projection,
+                    Mode: declaration.Mode, MaxPending: declaration.MaxPending));
+            var accepted = result.Status is ServiceStatus.Ok or ServiceStatus.Duplicate;
+            WatchLeases[id] = new WatchLease(declaration, revision, now +
+                (accepted ? RefreshEveryMs : RuleCooldownMs));
+        }
+    }
+
     private static void Sync(GameNetworkService.Session session)
     {
         ApplyBind();
@@ -383,6 +432,7 @@ public static class ShellPrograms
         // A new runtime: the programs stay, their endpoints come back with the world's facts.
         _stream = session.Packets.ReceiptStreamId;
         Budgets.Clear();
+        WatchLeases.Clear(); // A new stream owns no subscriptions from the old one.
         foreach (var program in Programs.Where(program => !program.Finished))
             Forget(program);
     }
@@ -442,11 +492,15 @@ public static class ShellPrograms
             Programs.Count(program => !program.Finished && program != kept && program.Instance == command.Instance) >= MaxPerDevice)
             return JsonSerializer.SerializeToElement(Refuse("limit_exceeded", $"a device holds at most {MaxPerDevice} programs"));
 
-        // "on <pipeline>" or "every <seconds>" is the first line; "wait" on a line of its own separates the phases.
-        var lines = text.Split('\n');
+        // Optional observe declarations precede on events; they never act during validation.
+        var declarations = ProgramWatchSyntax.Parse(text);
+        if (!declarations.Ok)
+            return JsonSerializer.SerializeToElement(Refuse("invalid_argument", declarations.Error!, declarations.Position));
+        // "on <pipeline>" or "every <seconds>" begins the executable body; wait separates phases.
+        var lines = declarations.Body.Split('\n');
         string? rule = null;
         var every = 0;
-        var offset = 0;
+        var offset = text.Length - declarations.Body.Length;
         var first = lines[0].TrimStart();
         if (first.StartsWith("on", StringComparison.Ordinal) && (first.Length == 2 || char.IsWhiteSpace(first[2])))
         {
@@ -462,6 +516,11 @@ public static class ShellPrograms
             offset = lines[0].Length + 1;
             lines = lines[1..];
         }
+        if (declarations.Watches.Count > 0 && (rule is null || !rule.StartsWith("events", StringComparison.Ordinal) ||
+            rule.Length > 6 && !char.IsWhiteSpace(rule[6]) && rule[6] != '|'))
+            return JsonSerializer.SerializeToElement(Refuse("invalid_argument",
+                "observe declarations require an 'on events' rule", offset));
+
         var phases = new List<(string Source, int Offset)>();
         var current = new List<string>();
         var phaseOffset = offset;
@@ -504,7 +563,8 @@ public static class ShellPrograms
         var started = new Program
         {
             Id = ++_nextId, Name = name, Instance = command.Instance, Owner = command.InitiatorKey, Provider = command.ProviderKey,
-            Rule = rule, Every = every, Source = text, Kept = ensure, Phases = phases.Select(phase => phase.Source).ToArray(),
+            Rule = rule, Every = every, Source = text, Kept = ensure, Watches = declarations.Watches.ToArray(),
+            Phases = phases.Select(phase => phase.Source).ToArray(),
             State = rule is null ? "running" : "watching"
         };
         applied = () =>
@@ -634,6 +694,7 @@ public static class ShellPrograms
         session.Services.SetEventReaders(Programs.Where(program =>
             !program.Finished && program.IsEventRule && session.Services.IsAttached(program.Owner))
             .Select(program => program.Owner));
+        ReconcileWatches(session, now);
         if (Programs.Count == 0)
         {
             Save(); // A removed last program leaves an empty file, not a stale one.
@@ -732,7 +793,11 @@ public static class ShellPrograms
                     program.RefreshAt = now + RefreshEveryMs;
                     Evaluations++;
                     var ruleSource = new ShellHost.Source(game, session, scope,
-                        program.IsEventRule ? program.EventCursor : null);
+                        program.IsEventRule ? program.EventCursor : null,
+                        program.Watches.Length > 0
+                            ? program.Watches.ToDictionary(watch => watch.Alias,
+                                watch => watch.SubscriptionKey(program.Id), StringComparer.Ordinal)
+                            : null);
                     var seen = NetShell.Run(program.Rule!, ruleSource, ShellHost.ProgramLimits);
                     program.Reads = ruleSource.Names;
                     Charge(program, seen.FuelUsed, 0);
