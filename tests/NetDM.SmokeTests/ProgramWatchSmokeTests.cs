@@ -50,6 +50,12 @@ static class ProgramWatchSmokeTests
         Check(manual.Status == ServiceStatus.Ok && program1.Status == ServiceStatus.Ok &&
             program2.Status == ServiceStatus.Ok && services.Capture().Subscriptions == 3,
             "program aliases have independent, transport-backed subscriptions");
+        Check(services.HasSubscription(operatorKey, watch.SubscriptionKey(17), watch.Instance,
+            watch.Projection, watch.Mode, watch.MaxPending),
+            "reconciliation probe finds an intact lease without writing it again");
+        Check(!services.HasSubscription(outsiderKey, watch.SubscriptionKey(17), watch.Instance,
+            watch.Projection, watch.Mode, watch.MaxPending),
+            "subscription probe cannot leak another endpoint's keys");
         Check(tools.Execute(owner, new NetworkToolRequest(NetworkToolKind.Watch,
             watch.Instance, Key: watch.SubscriptionKey(17), Projection: watch.Projection,
             Mode: watch.Mode, MaxPending: watch.MaxPending)).Status == ServiceStatus.Duplicate,
@@ -60,6 +66,9 @@ static class ProgramWatchSmokeTests
         Check(tools.Execute(owner, new NetworkToolRequest(NetworkToolKind.Unwatch, watch.SubscriptionKey(17))).Status ==
               ServiceStatus.Ok && services.Capture().Subscriptions == 2,
             "ending a program releases only its lease, not another program or a player's watch");
+        Check(!services.HasSubscription(operatorKey, watch.SubscriptionKey(17), watch.Instance,
+            watch.Projection, watch.Mode, watch.MaxPending),
+            "stopped program's subscription is no longer discoverable by its owner");
 
         // Host restart creates a clean ServiceRuntime; only desired program declarations
         // are re-established, while user watches are not created by the program manager.
