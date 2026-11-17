@@ -1,4 +1,5 @@
 using System.Text.Json;
+using NetDM.Core;
 using NetDM.Services;
 
 /// <summary>
@@ -49,7 +50,43 @@ static class NetworkLifeSmokeTests
         }
         Check(registry.FindCommand("network.shell", "life")!.Arguments.Field("limit")!.Max == 64,
             "the activity page is bounded by the command's own contract");
-        Console.WriteLine("P13 network life contracts (persona, life) passed.");
+        CheckLifeRuntime();
+        Console.WriteLine("P13 network life contracts and session lifecycle passed.");
+    }
+
+    private static void CheckLifeRuntime()
+    {
+        var state = new NetworkLifeRuntime();
+        var first = Guid.NewGuid();
+        Check(state.EnsureSession(first), "first session initializes");
+        Check(!state.EnsureSession(first), "same session preserves state");
+
+        var owner = new EndpointKey("operator-1", 1);
+        state.SetPersona(owner, new NetworkPersona { Name = "operator-1", Signature = "O1" });
+        Check(state.Personas.ContainsKey(owner), "persona stored");
+
+        var bot = state.Spawn(new NodeId(4), NetworkBotGoal.Intruder, "rogue", "R", 100, 5000);
+        Check(bot.NextAt == 5100 && state.PopulationStarted, "explicit spawn initializes population");
+        Check(state.Banish(new NodeId(5)) == 0 && state.Bots.Count == 1, "banish respects node");
+        Check(state.Banish(new NodeId(4)) == 1 && state.Bots.Count == 0, "banish removes intruder");
+        Check(state.PopulationStarted, "banish does not reboot population");
+
+        state.Spawn(new NodeId(1), NetworkBotGoal.Sentinel, "sentinel", "S", 100, 5000);
+        Check(state.Retire(1) == 1 && state.Bots.Count == 0, "explicit retire removes bot");
+        Check(state.PopulationStarted, "retire cannot cause immediate respawn");
+        Check(!state.EnsureSession(first), "same stream preserves population decision");
+
+        for (var i = 0; i < NetworkLifeRuntime.MaxActivity + 20; i++)
+            state.Record("watch", new NodeId(1), "watcher", "watch");
+        Check(state.Activities.Count == NetworkLifeRuntime.MaxActivity, "activity queue remains bounded");
+
+        for (var i = 0; i < NetworkLifeRuntime.MaxPersonas + 12; i++)
+            state.SetPersona(new EndpointKey($"operator-{i + 100}", 1), new NetworkPersona { Name = "operator" });
+        Check(state.Personas.Count == NetworkLifeRuntime.MaxPersonas, "persona registry remains bounded");
+
+        Check(state.EnsureSession(Guid.NewGuid()), "session transition detected");
+        Check(!state.PopulationStarted && state.Bots.Count == 0 && state.Activities.Count == 0 &&
+            state.Personas.Count == 0 && state.NextBotId == 0, "new stream discards prior entities and identities");
     }
 
     private static void Check(bool condition, string message)
