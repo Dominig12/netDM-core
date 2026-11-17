@@ -65,7 +65,7 @@ public static partial class NetworkSpace
 
     private sealed record ChatMessage(string Id, EndpointKey Owner, string Sender, string Text, long SentAt);
     private static readonly Queue<ChatMessage> Channel = [];
-    private static long _nextChannelChatter;
+    // The network-life runtime owns the shared-channel chat cadence.
 
     private sealed class ChatVisit
     {
@@ -149,7 +149,7 @@ public static partial class NetworkSpace
         if (presence.Moving && !Travel(session, presence, now))
             return;
         // P13: the warning is live state, not a log entry: it clears as soon as the node is calm again.
-        if (presence.Threat.Length > 0 && !Bots.Any(bot => bot.Goal == BotGoal.Intruder && bot.Node == presence.Node))
+        if (presence.Threat.Length > 0 && !Life.Bots.Any(bot => bot.Goal == NetworkBotGoal.Intruder && bot.Node == presence.Node))
             presence.Threat = "";
         if (session.Services.DiscoverableProvider(presence.Provider, presence.Instance) is not { } host || host.Provider != presence.Provider)
         {
@@ -362,7 +362,7 @@ public static partial class NetworkSpace
             ["node"] = presence.Moving ? "" : presence.Node.Value.ToString()
         };
         // P13: the identity the operator shows to others in the space, as flat schema fields.
-        var persona = Personas.GetValueOrDefault(presence.Owner);
+        var persona = Life.Personas.GetValueOrDefault(presence.Owner);
         result["personaName"] = persona?.Name ?? "";
         result["personaSignature"] = persona?.Signature ?? "";
         result["personaColour"] = persona?.Colour ?? 0;
@@ -697,6 +697,7 @@ public static partial class NetworkSpace
 
     internal static JsonElement Answer(GameNetworkService game, GameNetworkService.Session session, HostCommand command, JsonElement arguments)
     {
+        EnsureLifeSession(session.Packets.ReceiptStreamId);
         var now = Environment.TickCount64;
         if (command.Command is "enter" or "detach" or "leave" or "presence" or "abort_move")
             return PresenceCommand(game, session, command, arguments, now);
