@@ -1137,9 +1137,9 @@ public sealed class ServiceRuntime
                 _rejected++;
             if (delivery.Kind != DeliveryKind.Command)
             {
-                if (applied && delivery.Kind == DeliveryKind.Event)
+                if (delivery.Kind == DeliveryKind.Event)
                     _automationEvents.Record(delivery.Recipient, delivery.Id, delivery.SubscriptionKey,
-                        delivery.Instance, delivery.Schema.Id, delivery.Payload);
+                        delivery.Instance, delivery.Schema.Id, delivery.Payload, applied, reason);
                 Finish(delivery, applied ? DeliveryState.Applied : DeliveryState.RejectedByWorld, reason);
                 return (ServiceStatus.Ok, View(delivery));
             }
