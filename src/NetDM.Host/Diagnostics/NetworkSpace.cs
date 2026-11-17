@@ -149,7 +149,7 @@ public static partial class NetworkSpace
         if (presence.Moving && !Travel(session, presence, now))
             return;
         // P13: the warning is live state, not a log entry: it clears as soon as the node is calm again.
-        if (presence.Threat.Length > 0 && !Life.Bots.Any(bot => bot.Goal == NetworkBotGoal.Intruder && bot.Node == presence.Node))
+        if (presence.Threat.Length > 0 && !Life.Bots.Any(bot => bot.Hostile && bot.Node == presence.Node))
             presence.Threat = "";
         if (session.Services.DiscoverableProvider(presence.Provider, presence.Instance) is not { } host || host.Provider != presence.Provider)
         {
