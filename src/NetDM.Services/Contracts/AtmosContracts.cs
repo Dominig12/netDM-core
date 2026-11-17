@@ -7,17 +7,19 @@ public sealed partial class SchemaRegistry
 {
     private static void RegisterAtmos(SchemaRegistry registry)
     {
-        registry.Register(new SchemaDefinition("atmos.sample", 1, 0,
+        registry.Register(new SchemaDefinition("atmos.sample", 1, 1,
         [
             new SchemaField("pressureKPa", SchemaFieldType.Number, true, 0, 1_000_000),
             new SchemaField("temperatureK", SchemaFieldType.Number, true, 0, 1_000_000),
             new SchemaField("sampleTick", SchemaFieldType.Integer, true, 0),
-            new SchemaField("quality", SchemaFieldType.Enum, true, Values: ["current", "stale", "fault"])
+            new SchemaField("quality", SchemaFieldType.Enum, true, Values: ["current", "stale", "fault"]),
+            // Full gas composition is part of the delivered telemetry, not a local radio copy.
+            new SchemaField("gasesJson", SchemaFieldType.Text, false, MaxLength: 2000, SinceMinor: 1)
         ], new Dictionary<string, IReadOnlyList<string>>
         {
-            ["full"] = ["pressureKPa", "temperatureK", "sampleTick", "quality"],
+            ["full"] = ["pressureKPa", "temperatureK", "sampleTick", "quality", "gasesJson"],
             ["panel.v1"] = ["pressureKPa", "temperatureK", "quality"]
-        }, MaxPayloadBytes: 512));
+        }, MaxPayloadBytes: 4096));
 
         // atmos.telemetry/sample: a subscriber asks the sensor for its latest sample; the answer is a
         // result over the network, so a late or reconnected display gets a snapshot without waiting.
