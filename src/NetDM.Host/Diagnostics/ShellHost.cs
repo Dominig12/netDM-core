@@ -271,7 +271,7 @@ public static class ShellHost
     }
 
     internal sealed class Source(GameNetworkService game, GameNetworkService.Session session, Scope command,
-        long? eventAfter = null) : IShellSource
+        long? eventAfter = null, IReadOnlyDictionary<string, string>? watchAliases = null) : IShellSource
     {
         private const int DirectoryCandidates = 2048;
         public long EventReadThrough { get; private set; }
@@ -334,6 +334,7 @@ public static class ShellHost
                 HelpRow("programs", "programs", "Просмотрите состояние фоновых программ на устройстве.", "programs"),
                 HelpRow("programs", "every <секунды>", "Первая строка фонового скрипта задаёт таймер от 10 секунд. Запуск и остановка доступны в редакторе."),
                 HelpRow("programs", "on строка … end", "Правило срабатывает когда источник меняется и условие даёт записи."),
+                HelpRow("programs", "observe <instance> -key <alias>", "В начале программы объявляет подписку с автоматическим восстановлением и освобождением при остановке.", "observe atmos.o2_sensor -key oxygen"),
                 HelpRow("programs", "on events [-key K] | where ...", "Программа реагирует на новые подтверждённые сетевые события; $event содержит их поля.", "on events -key oxygen | where pressureKPa -gt 130"),
                 HelpRow("programs", "wait <секунды> / $state", "Приостановите программу или сохраните записи между её проходами.")
             ],
@@ -606,12 +607,22 @@ public static class ShellHost
                     ("schema", ""), ("sequence", page.Through), ("delivery", 0L)));
             foreach (var item in page.Events)
             {
-                if (key is not null && item.SubscriptionKey != key)
+                // A declared observe key is private to one program. Never expose another
+                // program's or the user's event as if it belonged to this declaration.
+                var visibleKey = item.SubscriptionKey;
+                if (watchAliases is not null)
+                {
+                    var alias = watchAliases.FirstOrDefault(pair => pair.Value == item.SubscriptionKey);
+                    if (alias.Key is null)
+                        continue;
+                    visibleKey = alias.Key;
+                }
+                if (key is not null && visibleKey != key)
                     continue;
                 var fields = new Dictionary<string, object>(StringComparer.Ordinal)
                 {
                     ["kind"] = "event", ["sequence"] = item.Sequence, ["delivery"] = item.DeliveryId,
-                    ["key"] = item.SubscriptionKey, ["instance"] = item.Instance, ["schema"] = item.Schema,
+                    ["key"] = visibleKey, ["instance"] = item.Instance, ["schema"] = item.Schema,
                     ["ack"] = item.Applied ? "applied" : "rejected", ["reason"] = item.Reason ?? ""
                 };
                 foreach (var field in item.Payload.EnumerateObject().Take(24))
