@@ -17,7 +17,7 @@ namespace NetDM.Host.Transport;
 /// unbounded routing tasks. One connection never writes concurrently to its stream.
 /// </summary>
 public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkScheduler scheduler,
-    GameNetworkService game, NetDM.Host.Research.ResearchHost research, ILogger<PipeHostedService> log)
+    GameNetworkService game, HostIpcModuleRouter modules, NetDM.Host.Research.ResearchHost research, ILogger<PipeHostedService> log)
     : BackgroundService
 {
     private const int MaxConnections = 16;
@@ -424,12 +424,8 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
                             or "unsubscribe" or "delivery_poll" or "delivery_ack" or "delivery_status"
                             or "command_status" when stagedProtocol => ServiceCommand(request),
                         "topology_view" when stagedProtocol => TopologyView(request),
-                        "research_catalog" or "research_storage" or "research_income" or "research_grant"
-                            or "research_debit" or "research_import" or "research_boost" or "research_state" or "research_replicate"
-                            or "research_effects" or "research_knowledge" when stagedProtocol => Research(request),
-            // P13 network life: a round event, an admin tool or a test seeds the network population.
-            "network_life" when stagedProtocol => NetworkLifeControl(request),
-                        "radio_reach" when stagedProtocol => RadioReachRequest(request),
+                        // Feature modules own their IPC commands and can be registered by DI.
+                        _ when stagedProtocol && modules.TryGet(request.Op, out _) => ModuleCommand(request),
                         "stats" => Stats(request),
                         "game_stats" => new PipeResponse(request.Id, true, Game: game.Status()),
                         "game_batch" when !stagedProtocol => ApplyGameBatch(request, seenNodes),
@@ -825,7 +821,7 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
         new(request.Id, true, SnapshotId: snapshot.Id, NextChunk: snapshot.NextChunk,
             LastFactSequence: snapshot.LastSequence);
 
-    private static WorldSnapshotStage CreateStage(PipeRequest request, string? id, bool apcMap)
+    private WorldSnapshotStage CreateStage(PipeRequest request, string? id, bool apcMap)
     {
         if (id is not { Length: > 0 and <= 64 } || string.IsNullOrWhiteSpace(id) ||
             request.ChunkCount is not (>= 0 and <= WorldSnapshotStage.MaxChunks) ||
@@ -834,7 +830,8 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
             request.FactCount < request.ChunkCount ||
             request.FactCount > request.ChunkCount * WorldSnapshotStage.MaxChunkFacts)
             throw new ArgumentException("Invalid snapshot declaration.");
-        return new WorldSnapshotStage(id, request.ChunkCount.Value, request.FactCount.Value, request.FactSequence, apcMap);
+        return new WorldSnapshotStage(id, request.ChunkCount.Value, request.FactCount.Value,
+            request.FactSequence, game.PrepareSnapshot, apcMap);
     }
 
     /// <summary>Legacy game_radio facts default their range; device facts must state it.</summary>
@@ -982,29 +979,17 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
     private const int MaxDeliveryPageBytes = 32 * 1024;
 
     /// <summary>
-    /// Research control plane (P5): facts only DM knows about its research servers. It does not need
-    /// the published topology: a server's storage, income and rewards are local to the server.
+    /// Domain commands are dispatched after the session fence and sequence checks.
+    /// Each module explicitly declares whether it requires a published, live network.
     /// </summary>
-    /// <summary>P8 Shadow: analytic reach of a radio transmission over the published topology.</summary>
-    private PipeResponse RadioReachRequest(PipeRequest request)
+    private PipeResponse ModuleCommand(PipeRequest request)
     {
-        if (_sync.Phase != "ready")
+        if (!modules.TryGet(request.Op, out var module))
+            return new PipeResponse(request.Id, false, "Unknown operation.");
+        if (module.RequiresNetworkReady && !NetworkReady)
             return new PipeResponse(request.Id, false, "game_not_ready");
-        var (ok, error, result) = RadioReach.Handle(game.Snapshot, request.Payload);
-        return new PipeResponse(request.Id, ok, error, Result: result);
-    }
-
-    private PipeResponse Research(PipeRequest request)
-    {
-        var (ok, error, result) = research.Handle(request.Op, request.Payload);
-        return new PipeResponse(request.Id, ok, error, Result: result);
-    }
-    private PipeResponse NetworkLifeControl(PipeRequest request)
-    {
-        if (request.Payload is not { ValueKind: JsonValueKind.Object } payload)
-            return new PipeResponse(request.Id, false, "invalid_request");
-        var (ok, error, result) = Diagnostics.NetworkSpace.Control(game, payload);
-        return new PipeResponse(request.Id, ok, error, Result: result);
+        var response = module.Execute(request.Op, request.Payload);
+        return new PipeResponse(request.Id, response.Ok, response.Error, Result: response.Value);
     }
 
     /// <summary>

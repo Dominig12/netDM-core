@@ -41,6 +41,11 @@ builder.Services.AddSingleton(_ => new PriorityWorkScheduler(new WorkSchedulerOp
 builder.Services.AddSingleton<BenchmarkRunner>();
 builder.Services.AddSingleton<ThreeScenarioBenchmarkSuite>();
 builder.Services.AddSingleton<RoutingComparisonRunner>();
+// Modules are registered once at composition root, not in a central IPC switch.
+builder.Services.AddSingleton<IHostIpcModule, ResearchIpcModule>();
+builder.Services.AddSingleton<IHostIpcModule, RadioReachIpcModule>();
+builder.Services.AddSingleton<IHostIpcModule, NetworkLifeIpcModule>();
+builder.Services.AddSingleton<HostIpcModuleRouter>();
 builder.Services.AddSingleton<GameNetworkService>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<GameNetworkService>());
 builder.Services.AddSingleton<NetDM.Host.Research.ResearchHost>();

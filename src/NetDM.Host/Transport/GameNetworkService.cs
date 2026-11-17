@@ -15,7 +15,7 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
     /// <summary>Topology, transport and services share one runtime and reset together.</summary>
     internal sealed record Session(SharedMediumNetwork Medium, RadioPacketTransport Packets, ServiceRuntime Services);
 
-    private static readonly SchemaRegistry Schemas = SchemaRegistry.CreateDefault();
+    private readonly SchemaRegistry _schemas;
     /// <summary>
     /// Research servers keep their state in the Host: their commands are answered here, not by DM.
     /// A message server relays to every recipient from one endpoint, so an endpoint may run 32
@@ -28,7 +28,7 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
     private int _deliverySubmissions;
     private readonly object _drainGate = new();
     private readonly object _sessionGate = new();
-    private Session _session = CreateSession();
+    private Session _session;
     private Session Current => Volatile.Read(ref _session);
     private readonly PacketTickRunner _runner;
     private readonly PriorityWorkScheduler _scheduler;
@@ -44,8 +44,11 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
     private static readonly long QuantumTicks = Math.Max(1, Stopwatch.Frequency / (1000 / QuantumMs));
 
     public GameNetworkService(PriorityWorkScheduler scheduler,
-        IHostApplicationLifetime? application = null, ILogger<GameNetworkService>? log = null)
+        IHostApplicationLifetime? application = null, ILogger<GameNetworkService>? log = null,
+        IEnumerable<IServiceContractModule>? contractModules = null)
     {
+        _schemas = SchemaRegistry.CreateDefault(contractModules);
+        _session = CreateSession();
         _scheduler = scheduler;
         _application = application;
         _log = log;
@@ -54,12 +57,12 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
 
     private static long Now() => Stopwatch.GetTimestamp() / QuantumTicks;
 
-    private static Session CreateSession(NetworkRuntime? runtime = null)
+    private Session CreateSession(NetworkRuntime? runtime = null)
     {
         var medium = new SharedMediumNetwork(runtime ?? new NetworkRuntime(), bytesPerTick: 8192,
             searchMode: SharedRadioSearchMode.AStarDense,
             airtimeScope: RadioAirtimeScope.SpatialCells);
-        var services = new ServiceRuntime(Schemas, Now, ServiceOptions);
+        var services = new ServiceRuntime(_schemas, Now, ServiceOptions);
         var packets = new RadioPacketTransport(medium, new PacketTransportOptions(
             Capacity: 4096, MaxAgeTicks: 900, MaxAdvancesPerTick: 4096,
             MaxPendingReroutes: 64, MaxConcurrentReroutes: 2,
@@ -134,7 +137,7 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
         }
     }
 
-    internal static Session PrepareSnapshot(IReadOnlyList<TopologyChange> topology,
+    internal Session PrepareSnapshot(IReadOnlyList<TopologyChange> topology,
         IReadOnlyList<RadioNodeUpdate> radio)
     {
         var runtime = new NetworkRuntime();

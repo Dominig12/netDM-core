@@ -4,7 +4,9 @@ using NetDM.Core;
 
 namespace NetDM.Host.Transport;
 
-internal sealed class WorldSnapshotStage(string id, int chunks, int facts, long baseSequence, bool apcMap = false)
+internal sealed class WorldSnapshotStage(string id, int chunks, int facts, long baseSequence,
+    Func<IReadOnlyList<TopologyChange>, IReadOnlyList<RadioNodeUpdate>, GameNetworkService.Session> prepareSnapshot,
+    bool apcMap = false)
 {
     public const int MaxFacts = 32_768;
     public const int MaxChunks = 512;
@@ -54,7 +56,7 @@ internal sealed class WorldSnapshotStage(string id, int chunks, int facts, long 
         if (apcMap || _geometry.Count != 0 || _apcs.Count != 0)
         {
             var map = BuildMap(digest);
-            _candidate = GameNetworkService.PrepareSnapshot([.. map.Nodes.Values.Select(map.AddNode), .. map.Links],
+            _candidate = prepareSnapshot([.. map.Nodes.Values.Select(map.AddNode), .. map.Links],
                 [.. map.Access.Select(access => ApcMap.AccessUpdate(access.Key, access.Value))]);
             Map = map;
         }
@@ -68,7 +70,7 @@ internal sealed class WorldSnapshotStage(string id, int chunks, int facts, long 
                 if (change.Operation == TopologyOperation.Connect && !links.Add(change.A.Value < change.B.Value
                         ? (change.A, change.B) : (change.B, change.A)))
                     throw new ArgumentException("Snapshot has duplicate links.");
-            _candidate = GameNetworkService.PrepareSnapshot(
+            _candidate = prepareSnapshot(
                 _topology.OrderBy(change => change.Operation).ToArray(), _radios);
         }
         _seen.UnionWith(_candidate.Medium.Snapshot.Physical.Nodes.Keys);
