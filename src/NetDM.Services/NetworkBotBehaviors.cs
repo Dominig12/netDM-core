@@ -111,14 +111,17 @@ public sealed class NetworkBotBehaviorRegistry
             new PatrolBotBehavior("engineer", "engineer", "E",
                 node => $"engineer checked the power feed at {node.Value}")
         ];
+        var ordered = new List<INetworkBotBehavior>(defaults.Length);
         foreach (var behavior in defaults.Concat(additional ?? []))
         {
             ArgumentNullException.ThrowIfNull(behavior);
             if (!ValidId(behavior.Id) || !ValidDisplay(behavior.Name, 24) ||
                 !ValidDisplay(behavior.Signature, 4) || !_byId.TryAdd(behavior.Id, behavior))
                 throw new ArgumentException($"Duplicate or invalid network bot behavior '{behavior.Id}'.");
+            ordered.Add(behavior);
         }
-        All = _byId.Values.ToArray();
+        // Preserve registration order for background population; callers cannot rewrite the catalog.
+        All = ordered.AsReadOnly();
     }
 
     public bool TryGet(string id, out INetworkBotBehavior behavior) =>
