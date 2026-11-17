@@ -34,7 +34,7 @@ public static class ShellHost
         applied = null;
         using var arguments = JsonDocument.Parse(command.Arguments);
         if (command.Command is "scan" or "knowledge" or "enter" or "detach" or "leave" or "presence" or "act" or "move"
-            or "preview_move" or "abort_move" or "poll_alarm" or "alarm_action")
+            or "preview_move" or "abort_move" or "poll_alarm" or "alarm_action" or "persona" or "life" or "hack_start" or "hack_answer" or "hack_keys" or "hack_use" or "mask")
             return NetworkSpace.Answer(game, session, command, arguments.RootElement);
         if (command.Command is "chat_read" or "chat_send")
             return NetworkSpace.Chat(game, session, command, arguments.RootElement, out applied);
@@ -219,6 +219,32 @@ public static class ShellHost
     internal sealed class Source(GameNetworkService game, GameNetworkService.Session session, Scope command) : IShellSource
     {
         private const int DirectoryCandidates = 2048;
+
+        /// <summary>The whole shell surface, in one place: help, the <c>commands</c> command and the window's
+        /// completion list are generated from it, so a new command cannot be undiscoverable.</summary>
+        private static readonly (string Name, string Kind, string Usage, string Description)[] Catalogue =
+        [
+            ("self", "source", "self", "Свой сетевой узел, питание и порты."),
+            ("links", "source", "links", "Соседние порты и их состояние."),
+            ("nodes", "source", "nodes", "Известные узлы сети (номера для trace и move)."),
+            ("services", "source", "services [-type T] [-prefix P] [-hops N]", "Достижимые сервисы; ближайшие первыми."),
+            ("api", "source", "api [serviceType]", "API сервисов: типы, команды, схемы запроса и ответа."),
+            ("commands", "source", "commands", "Все команды оболочки с примерами."),
+            ("route", "source", "route <instance>", "Путь до сервиса: узлы и типы связей."),
+            ("trace", "source", "trace <node>", "Путь до узла; ticks — задержка в десятых секунды."),
+            ("jobs", "source", "jobs", "Свои операции и их исход."),
+            ("result", "source", "result <operation>", "Результат доставленной операции."),
+            ("programs", "source", "programs", "Фоновые программы устройства."),
+            ("help", "source", "help [basics|services|scripts|programs|api]", "Темы справки."),
+            ("where", "filter", "where <field> <op> <value>", "Фильтр: eq, ne, lt, le, gt, ge, like."),
+            ("select", "filter", "select <field>...", "Оставить только указанные поля."),
+            ("sort", "filter", "sort <field> [-desc]", "Сортировка записей по полю."),
+            ("first", "filter", "first [N]", "Первые N записей (по умолчанию 1)."),
+            ("last", "filter", "last [N]", "Последние N записей."),
+            ("count", "filter", "count", "Сколько записей пришло."),
+            ("invoke", "action", "invoke <instance> <command> [name=value…]", "Отправить команду сервису."),
+            ("publish", "action", "… | publish", "Опубликовать записи в свой сервис.")
+        ];
         private static readonly IReadOnlyDictionary<string, ShellRecord[]> Help = new Dictionary<string, ShellRecord[]>(StringComparer.Ordinal)
         {
             ["basics"] =
@@ -247,6 +273,14 @@ public static class ShellHost
                 HelpRow("programs", "every <секунды>", "Первая строка фонового скрипта задаёт таймер от 10 секунд. Запуск и остановка доступны в редакторе."),
                 HelpRow("programs", "on строка … end", "Правило срабатывает когда источник меняется и условие даёт записи."),
                 HelpRow("programs", "wait <секунды> / $state", "Приостановите программу или сохраните записи между её проходами.")
+            ],
+            ["api"] =
+            [
+                HelpRow("api", "api", "Какие сервисы доступны и какие команды они принимают."),
+                HelpRow("api", "api <serviceType>", "Команды сервиса: аргументы (args), поля ответа (returns), схемы, host/transient."),
+                HelpRow("api", "api <serviceType> <command>", "Все аргументы и поля результата: обязательность, диапазоны, значения enum."),
+                HelpRow("api", "commands", "Все команды оболочки с примерами (этот список используется и для Tab)."),
+                HelpRow("api", "nodes", "Номера известных узлов: для trace, move и маршрутов.")
             ]
         };
 
@@ -264,6 +298,18 @@ public static class ShellHost
             if (name == "help")
                 return args.Named.Count == 0 && (args.Positional.Count == 0 || args.Positional is [string topic] && Help.ContainsKey(topic))
                     ? null : "help [basics|services|scripts|programs]";
+            if (name == "commands")
+                return args.Positional.Count + args.Named.Count == 0 ? null : "commands takes no arguments";
+            if (name == "api")
+                return args.Named.Count == 0 && args.Positional switch
+                {
+                    [] => true,
+                    [string type] => ServiceNames.IsValid(type),
+                    [string type, string command] => ServiceNames.IsValid(type) && ServiceNames.IsValid(command),
+                    _ => false
+                } ? null : "api [serviceType [command]]";
+            if (name == "nodes")
+                return args.Positional.Count + args.Named.Count == 0 ? null : "nodes takes no arguments";
             if (name == "result")
                 return args.Named.Count == 0 && args.Positional is [long and > 0] ? null : "result <operation>";
             if (name == "services")
@@ -283,6 +329,82 @@ public static class ShellHost
             return "unknown command";
         }
 
+        /// <summary>Known wire ids for `nodes` and for the window's Tab completion.</summary>
+        private IReadOnlyList<string> KnownNodes() =>
+            NetworkSpace.KnownNodeIds(command.Initiator, session.Packets.ReceiptStreamId, DirectoryCandidates);
+
+        /// <summary>`api [type [command]]`: what the reachable services offer, without opening their code.
+        /// No type groups the directory; a type lists commands with their arguments; a command lists every
+        /// argument and result field with type, requiredness, range or enum values.</summary>
+        private IReadOnlyList<ShellRecord> DiscoverApi(ShellArguments arguments, out string? error)
+        {
+            error = null;
+            var type = arguments.Positional is [string wanted, ..] ? wanted : null;
+            var commandName = arguments.Positional is [_, string wantedCommand] ? wantedCommand : null;
+            var registry = session.Services.Schemas;
+            if (type is not null && commandName is not null)
+            {
+                if (registry.FindCommand(type, commandName) is not { } definition)
+                {
+                    error = $"у сервиса {type} нет команды {commandName}";
+                    return [];
+                }
+                return definition.Arguments.Fields
+                    .Select(field => ApiFieldRow("request", field))
+                    .Concat(definition.Result.Fields.Select(field => ApiFieldRow("result", field)))
+                    .ToArray();
+            }
+            if (type is not null)
+            {
+                return registry.CommandNames(type).Select(name =>
+                {
+                    var definition = registry.FindCommand(type, name);
+                    return Record(("type", type), ("command", name),
+                        ("request", definition?.Arguments.Id ?? ""), ("result", definition?.Result.Id ?? ""),
+                        ("args", ApiFields(definition?.Arguments)), ("returns", ApiFields(definition?.Result)),
+                        ("host", definition?.HostHandled == true ? "yes" : "no"),
+                        ("transient", definition?.Transient == true ? "yes" : "no"));
+                }).ToArray();
+            }
+            var slice = command.DeliveryId is { } delivery
+                ? session.Services.QueryDirectory(delivery, null, null, DirectoryCandidates)?.Slice
+                : session.Services.QueryDirectory(command.Initiator, null, null, DirectoryCandidates);
+            var entries = slice?.Entries ?? [];
+            return entries.GroupBy(entry => entry.ServiceType, StringComparer.Ordinal)
+                .OrderBy(group => group.Key, StringComparer.Ordinal)
+                .Select(group => Record(("type", group.Key), ("instances", (long)group.Count()),
+                    ("commands", string.Join(", ", registry.CommandNames(group.Key))))).ToArray();
+        }
+
+        /// <summary>One argument field of `api type command`: what a caller must or may send.</summary>
+        private static ShellRecord ApiFieldRow(string direction, SchemaField field) =>
+            Record(("how", direction), ("field", field.Name), ("type", ApiTypeName(field.Type)),
+                ("required", field.Required ? "yes" : "no"), ("spec", ApiFieldSpec(field)));
+
+        /// <summary>A compact human line for all fields: name, type, ?/! and limits.</summary>
+        private static string ApiFields(SchemaDefinition? schema) =>
+            schema is null ? "" : string.Join(", ", schema.Fields.Select(field =>
+                $"{field.Name}:{ApiTypeName(field.Type)}{(field.Required ? "!" : "?")}{ApiFieldSpec(field)}"));
+
+        private static string ApiTypeName(SchemaFieldType type) => type switch
+        {
+            SchemaFieldType.Text => "text",
+            SchemaFieldType.MultilineText => "multiline",
+            SchemaFieldType.Integer => "integer",
+            SchemaFieldType.Number => "number",
+            SchemaFieldType.Boolean => "boolean",
+            SchemaFieldType.Enum => "enum",
+            _ => type.ToString().ToLowerInvariant()
+        };
+
+        private static string ApiFieldSpec(SchemaField field) => field.Type switch
+        {
+            SchemaFieldType.Enum when field.Values is { } values => $"={string.Join('|', values)}",
+            SchemaFieldType.Integer or SchemaFieldType.Number => $" [{field.Min}..{field.Max}]",
+            SchemaFieldType.Text or SchemaFieldType.MultilineText => $" ≤{field.MaxLength}",
+            _ => ""
+        };
+
         public IReadOnlyList<ShellRecord>? Read(string name, ShellArguments arguments, int maxRecords, out string? error)
         {
             error = Validate(name, arguments);
@@ -298,9 +420,17 @@ public static class ShellHost
                 [
                     HelpRow("basics", "help basics", "Узел и его соединения", "help basics"),
                     HelpRow("services", "help services", "Поиск сервисов и результаты команд", "help services"),
+                    HelpRow("api", "help api", "API сервисов, команды и узлы", "api"),
                     HelpRow("scripts", "help scripts", "Конвейеры и условия", "help scripts"),
                     HelpRow("programs", "help programs", "Таймеры и фоновые правила", "help programs")
                 ];
+            if (name == "commands")
+                return Catalogue.Select(row => Record(("name", row.Name), ("kind", row.Kind), ("usage", row.Usage),
+                    ("description", row.Description))).ToArray();
+            if (name == "nodes")
+                return KnownNodes().Take(maxRecords).Select(node => Record(("node", node))).ToArray();
+            if (name == "api")
+                return DiscoverApi(arguments, out error);
             var world = session.Medium.Snapshot;
             var origin = command.Origin;
             switch (name)

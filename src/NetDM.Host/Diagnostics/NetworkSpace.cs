@@ -18,7 +18,7 @@ namespace NetDM.Host.Diagnostics;
 /// operator last scanned from breaks. Knowledge lives in the Host for the round and is read as pages of
 /// changes after a revision. All calls come from the one loop that answers Host commands.
 /// </summary>
-public static class NetworkSpace
+public static partial class NetworkSpace
 {
     public const int DefaultRadius = 3, MaxRadius = 8, MaxScanNodes = 256, ScanEveryMs = 10_000, FreshMs = 60_000;
     public const int MaxOperators = 64, MaxNodes = 512, MaxLinks = 1024, MaxServices = 512, MaxRemovals = 256;
@@ -59,9 +59,13 @@ public static class NetworkSpace
     /// <summary>Р4: a move takes this long per hop of its route, at least one hop's time and at most <see cref="MaxTravelMs"/>.</summary>
     public const int TravelMsPerHop = 1000, MaxTravelMs = 15_000;
     private const int ChatInboxSize = 8, ChatLifetimeMs = 120_000, ChatSendEveryMs = 1200;
+    /// <summary>P13: the shared channel every active operator may listen to and speak on.</summary>
+    private const int ChannelSize = 32;
     private static readonly JsonSerializerOptions ChatJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     private sealed record ChatMessage(string Id, EndpointKey Owner, string Sender, string Text, long SentAt);
+    private static readonly Queue<ChatMessage> Channel = [];
+    private static long _nextChannelChatter;
 
     private sealed class ChatVisit
     {
@@ -77,6 +81,8 @@ public static class NetworkSpace
         public string Instance = "", State = "active", Reason = "";
         public NodeId Node;
         public bool Away, Detached;
+        /// <summary>P13.5: the operator masks their persona from the other operators.</summary>
+        public bool Masked;
         public long AwaySince, EntryLostSince, DetachedSince;
         public bool Ended => State == "ended";
         public ChatVisit? Chat;
@@ -96,6 +102,10 @@ public static class NetworkSpace
         public string BreakKind = "", BreakFrom = "", BreakTo = "";
         /// <summary>What the last move ended in, shown as the reason while nothing else is.</summary>
         public string Notice = "";
+        /// <summary>P13: the name of an intruder on this presence's node, empty while the node is calm.</summary>
+        public string Threat = "";
+        /// <summary>P13: an intruder severed this presence; only an explicit enter resumes it.</summary>
+        public bool Intruded;
     }
 
     private static readonly Dictionary<EndpointKey, Presence> Presences = [];
@@ -107,6 +117,9 @@ public static class NetworkSpace
     public static void Tick(GameNetworkService game)
     {
         var now = Environment.TickCount64;
+        // Network life keeps its own cadence and is off unless the server opted in.
+        if (LifeEnabled)
+            LifePass(game, now);
         if (now < _nextPresencePass || Presences.Count == 0)
             return;
         _nextPresencePass = now + PresencePassMs;
@@ -114,6 +127,10 @@ public static class NetworkSpace
         if (_presenceStream != session.Packets.ReceiptStreamId)
         {
             _presenceStream = session.Packets.ReceiptStreamId;
+            // P13.5: the breach codes and stolen keys belong to one Host session; a new runtime resets them.
+            HackChallenges.Clear();
+            StolenKeys.Clear();
+            MaskCooldowns.Clear();
             foreach (var presence in Presences.Values.Where(presence => !presence.Ended))
             {
                 presence.Chat = null;
@@ -131,6 +148,9 @@ public static class NetworkSpace
     {
         if (presence.Moving && !Travel(session, presence, now))
             return;
+        // P13: the warning is live state, not a log entry: it clears as soon as the node is calm again.
+        if (presence.Threat.Length > 0 && !Bots.Any(bot => bot.Goal == BotGoal.Intruder && bot.Node == presence.Node))
+            presence.Threat = "";
         if (session.Services.DiscoverableProvider(presence.Provider, presence.Instance) is not { } host || host.Provider != presence.Provider)
         {
             if (presence.Detached && now - presence.DetachedSince < EntryGraceMs)
@@ -160,6 +180,8 @@ public static class NetworkSpace
             End(presence, "operator_gone");
         else if (presence.Away)
             Suspend(presence, "operator_away");
+        else if (presence.Intruded)
+            Suspend(presence, "intrusion");
         else
         {
             presence.State = "active";
@@ -336,8 +358,16 @@ public static class NetworkSpace
         var result = new Dictionary<string, object>
         {
             ["status"] = status, ["presence"] = presence.Id, ["host"] = presence.Moving ? "" : presence.Instance,
-            ["generation"] = presence.Generation, ["state"] = presence.State, ["reason"] = presence.Reason
+            ["generation"] = presence.Generation, ["state"] = presence.State, ["reason"] = presence.Reason, ["threat"] = presence.Threat,
+            ["node"] = presence.Moving ? "" : presence.Node.Value.ToString()
         };
+        // P13: the identity the operator shows to others in the space, as flat schema fields.
+        var persona = Personas.GetValueOrDefault(presence.Owner);
+        result["personaName"] = persona?.Name ?? "";
+        result["personaSignature"] = persona?.Signature ?? "";
+        result["personaColour"] = persona?.Colour ?? 0;
+        result["personaStatus"] = persona?.Status ?? "";
+        result["personaRole"] = persona?.Role ?? "";
         if (presence.Moving)
         {
             result["to"] = presence.ToInstance;
@@ -378,9 +408,11 @@ public static class NetworkSpace
             case "enter":
                 if (presence is not null)
                 {
-                    // One presence per operator: entering again resumes it where it stands.
+                    // One presence per operator: entering again resumes it where it stands. A severed link
+                    // (an intrusion) is resumed only by this explicit enter, never by a background pass.
                     var resumed = presence.Away;
                     presence.Away = false;
+                    presence.Intruded = false;
                     Settle(session, game.CapturePowerState(session), presence, now);
                     return JsonSerializer.SerializeToElement(Describe(resumed ? "resumed" : "present", presence));
                 }
@@ -397,12 +429,16 @@ public static class NetworkSpace
                 };
                 Presences[command.InitiatorKey] = presence;
                 Settle(session, game.CapturePowerState(session), presence, now);
+                if (LifeEnabled)
+                    Record("operator", presence.Node, OperatorName(presence), "оператор вошёл в сеть");
                 return JsonSerializer.SerializeToElement(Describe("entered", presence));
             case "detach":
                 if (presence is null || presence.Ended)
                     return JsonSerializer.SerializeToElement(Describe(presence is null ? "none" : "ended", presence));
                 if (!presence.Away)
                 {
+                    if (LifeEnabled)
+                        Record("operator", presence.Node, OperatorName(presence), "оператор покинул сеть");
                     presence.Away = true;
                     presence.AwaySince = now;
                 }
@@ -471,6 +507,16 @@ public static class NetworkSpace
         NetworkDiagnostics.Trace(world, entry, host, QueryHost.ReachBudget).State == NetworkDiagnostics.Reachable;
 
     /// <summary>A presence can read its own inbox and speak only during its current visit to the node.</summary>
+    /// <summary>P13.6: the wire ids of the nodes this operator has learned; used by the shell's `nodes` and completion.</summary>
+    internal static IReadOnlyList<string> KnownNodeIds(EndpointKey owner, Guid stream, int max)
+    {
+        var knowledge = KnowledgeOf(owner, stream, Environment.TickCount64);
+        if (knowledge is null || max <= 0)
+            return [];
+        return knowledge.Items.Keys.Where(key => key.StartsWith("n|", StringComparison.Ordinal))
+            .Select(key => key[2..]).Take(max).ToArray();
+    }
+
     internal static JsonElement Chat(GameNetworkService game, GameNetworkService.Session session, HostCommand command,
         JsonElement arguments, out Action? applied)
     {
@@ -484,6 +530,28 @@ public static class NetworkSpace
             return Refuse(refusal!);
 
         var node = Id(presence.Node);
+        // P13: the shared channel is open to every active operator; node chat stays local to the visit.
+        var sharedChannel = arguments.TryGetProperty("channel", out var channelFlag) && channelFlag.ValueKind == JsonValueKind.True;
+        if (sharedChannel)
+        {
+            if (command.Command == "chat_read")
+            {
+                PruneChannel(now);
+                return JsonSerializer.SerializeToElement(new
+                {
+                    status = "ok", channel = true, received = 0, messages = ChannelSnapshot(presence, now)
+                });
+            }
+            var channelText = arguments.GetProperty("text").GetString()!.Trim();
+            if (channelText.Length == 0)
+                return Refuse("invalid_text");
+            if (now < presence.NextChatAt)
+                return Refuse("rate_limited");
+            var speaker = OperatorName(presence);
+            var channelMessage = new ChatMessage(Guid.NewGuid().ToString("N"), presence.Owner, speaker, channelText, now);
+            applied = () => DeliverChannel(game, session, presence, channelMessage);
+            return JsonSerializer.SerializeToElement(new { status = "sent", channel = true });
+        }
         if (command.Command == "chat_read")
         {
             if (arguments.GetProperty("presence").GetDouble() != presence.Id ||
@@ -504,7 +572,7 @@ public static class NetworkSpace
         if (now < presence.NextChatAt)
             return Refuse("rate_limited");
 
-        var message = new ChatMessage(Guid.NewGuid().ToString("N"), presence.Owner, $"@{visit.Scope[..6]}", text, now);
+        var message = new ChatMessage(Guid.NewGuid().ToString("N"), presence.Owner, presence.Masked ? "скрытый оператор" : $"@{visit.Scope[..6]}", text, now);
         applied = () => DeliverChat(game, session, presence, visit, command.ProviderNode, message);
         return JsonSerializer.SerializeToElement(new { status = "sent", node });
     }
@@ -632,6 +700,10 @@ public static class NetworkSpace
         var now = Environment.TickCount64;
         if (command.Command is "enter" or "detach" or "leave" or "presence" or "abort_move")
             return PresenceCommand(game, session, command, arguments, now);
+        if (command.Command == "persona")
+            return PersonaCommand(command, arguments);
+        if (command.Command is "hack_start" or "hack_answer" or "hack_keys" or "hack_use" or "mask")
+            return HackCommand(game, session, command, arguments, now);
         if (command.Command == "act")
             return Act(game, session, command, arguments, now);
         if (command.Command is "poll_alarm" or "alarm_action")
@@ -639,6 +711,8 @@ public static class NetworkSpace
         if (command.Command is "move" or "preview_move")
             return Move(game, session, command, arguments, now, preview: command.Command == "preview_move");
         var knowledge = KnowledgeOf(command.InitiatorKey, session.Packets.ReceiptStreamId, now);
+        if (command.Command == "life")
+            return LifeCommand(command, arguments, knowledge, now);
         return command.Command == "scan"
             ? Scan(game, session, command, knowledge, arguments.TryGetProperty("radius", out var radius)
                 ? Math.Clamp(radius.GetInt32(), 1, MaxRadius) : DefaultRadius, now)
@@ -857,4 +931,48 @@ public static class NetworkSpace
     }
 
     private static string Id(NodeId node) => node.Value.ToString(CultureInfo.InvariantCulture);
+    /// <summary>P13: a channel message is visible to every active operator; the ring is bounded and pruned.</summary>
+    private static void DeliverChannel(GameNetworkService game, GameNetworkService.Session session, Presence sender, ChatMessage message)
+    {
+        if (game.CapturePowerState(session) is not { } power)
+            return;
+        var now = Environment.TickCount64;
+        Settle(session, power, sender, now);
+        if (sender.State != "active")
+            return;
+        sender.NextChatAt = now + ChatSendEveryMs;
+        EnqueueChannel(message);
+    }
+
+    private static void EnqueueChannel(ChatMessage message)
+    {
+        Channel.Enqueue(message);
+        while (Channel.Count > ChannelSize)
+            Channel.Dequeue();
+    }
+
+    private static void PruneChannel(long now)
+    {
+        while (Channel.Count > 0 && now - Channel.Peek().SentAt >= ChatLifetimeMs)
+            Channel.Dequeue();
+        while (Channel.Count > ChannelSize)
+            Channel.Dequeue();
+    }
+
+    private static string ChannelSnapshot(Presence presence, long now)
+    {
+        var rows = new List<string>(Channel.Count);
+        foreach (var message in Channel.Reverse())
+        {
+            var row = JsonSerializer.Serialize(new
+            {
+                id = message.Id, text = message.Text, sender = message.Sender, own = message.Owner == presence.Owner
+            }, ChatJson);
+            rows.Add(row);
+            if (rows.Count >= ChannelSize)
+                break;
+        }
+        rows.Reverse();
+        return $"[{string.Join(",", rows)}]";
+    }
 }

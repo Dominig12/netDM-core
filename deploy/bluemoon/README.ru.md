@@ -46,3 +46,16 @@ pwsh -File scripts\play-bluemoon.ps1 -Map metastation -NetworkCameras
 `setup-bluemoon-stand.ps1` проверяет инструменты, собирает Win32 bridge через Visual Studio, экспортирует исходники BlueMoon в `TestResults\p1\game-src` и ставит пакеты TGUI. Он нужен один раз на checkout. `play-bluemoon.ps1` собирает Host, TGUI и мир, запускает их и печатает адрес для DreamSeeker и список того, что проверить. Режимы: `-Mode shadow|authoritative` (исследования, мессенджер, радио), `-NetworkCameras` (охранные консоли через сеть), `-Map metastation|boxstation|runtime`, `-NoBuild` для повторного запуска без сборки. Остановка — Ctrl+C или файл `TestResults\p1\game-src\netdm-stand.stop`.
 
 Все автоматические проверки одной командой: `pwsh -File scripts\check-all.ps1 -Only all`. Состояние запущенного стенда: `pwsh -File scripts\stand-status.ps1`. Полный справочник команд, тестов и ручных сценариев в игре: [docs/testing-guide.ru.md](../../docs/testing-guide.ru.md).
+
+
+## P13: сеть как игровой слой (17.11.2026)
+
+Поставка не меняется: P13-функции включаются флагами и не влияют на обычный раунд. Compose прокидывает их с дефолтом `0`:
+
+- `NETDM_NET_LIFE=1` (env-файл) → `NETDM_NET_LIFE` у мира и `NetDM__NetLife` у Host — население сети (NPC-агенты, сид станцией, эмаг-вторженец).
+- `NETDM_NET_IMMERSION=1` → погружение через нейролинк.
+- Окно сети и панель АПЦ требуют `NETDM_OBSERVE=1`; раздел «Network» в панели АПЦ скрыт без Observe.
+
+Полный Compose и Windows bundle по-прежнему разворачивают Observe; для приёмки P13 добавьте флаги в env-файл и пройдите [чек-лист клиента BYOND и плейтеста](../../docs/manual-bryond-check.ru.md).
+
+Windows bundle: лаунчер принимает `-NetworkLife` (включает `NETDM_NET_LIFE=1` и `NETDM_NET_IMMERSION=1` для мира и `NetDM__NetLife=1` для Host); `Test-WindowsBundle.ps1 -NetworkLife` прокидывает переключатель в приёмку.

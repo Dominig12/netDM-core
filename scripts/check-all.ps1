@@ -18,10 +18,10 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot)
 $groups = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-$known = @('host', 'world', 'tgui', 'load', 'bridge', 'all')
+$known = @('host', 'world', 'tgui', 'browser', 'load', 'bridge', 'all')
 $unknown = @($groups | Where-Object { $_ -notin $known })
 if ($unknown.Count) { throw "Unknown group: $($unknown -join ', '). Use $($known -join ', ')." }
-if ($groups -contains 'all') { $groups = @('host', 'tgui', 'world', 'load', 'bridge') }
+if ($groups -contains 'all') { $groups = @('host', 'tgui', 'browser', 'world', 'load', 'bridge') }
 $results = [Collections.Generic.List[object]]::new()
 # Absolute: the TGUI checks run from the game's tgui folder.
 $logs = (New-Item -ItemType Directory -Force -Path (Join-Path 'TestResults' ("check-all-{0:yyyyMMdd-HHmmss}" -f (Get-Date)))).FullName
@@ -76,6 +76,9 @@ if ($groups -contains 'tgui') {
         Invoke-Check 'TGUI bundle' { node $yarn run tgui:build }
     }
     finally { Pop-Location }
+}
+if ($groups -contains 'browser') {
+    Invoke-Check 'Scene in real browser' { pwsh -NoProfile -File scripts/test-netdm-scene-browser.ps1 -GameRepository $GameRepository }
 }
 if ($groups -contains 'world') {
     Invoke-Check 'BlueMoon unit DMB' { pwsh -NoProfile -File scripts/build-bluemoon-unit-dmb.ps1 -GameRepository $GameRepository -BuildDirectory $BuildDirectory } `

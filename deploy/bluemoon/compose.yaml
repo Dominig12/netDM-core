@@ -18,7 +18,9 @@ services:
       test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
       interval: 3s
       timeout: 2s
-      retries: 30
+      retries: 60
+      # First initialization writes the schema files; on slower volumes it can take minutes.
+      start_period: 180s
 
   db-init:
     image: ${BLUEMOON_IMAGE_PREFIX:-netdm-local/bluemoon}-db:${BLUEMOON_RELEASE:-p1}
@@ -53,6 +55,8 @@ services:
       NetDM__ReadinessPort: '5088'
       # One durable journal per round; recreating the container keeps it (P5).
       NetDM__ResearchDirectory: /var/lib/netdm/research
+      # P13 network life is opt-in: the deployment keeps it off unless the environment asks for it.
+      NetDM__NetLife: ${NETDM_NET_LIFE:-0}
     volumes: [ipc:/run/netdm, research:/var/lib/netdm/research]
     networks: [backend]
     healthcheck:
@@ -76,6 +80,9 @@ services:
       NETDM_OBSERVE: '1'
       NETDM_SOCKET_PATH: /run/netdm/session/core.sock
       NETDM_SERVER_ID: ${BLUEMOON_SERVER_ID:-bluemoon}
+      # P13: the network-space layer stays off in a normal deployment; both flags are opt-in.
+      NETDM_NET_LIFE: ${NETDM_NET_LIFE:-0}
+      NETDM_NET_IMMERSION: ${NETDM_NET_IMMERSION:-0}
     secrets: [db_password]
     volumes: [ipc:/run/netdm, game-config:/game/config, game-data:/game/data]
     networks: [backend, edge]

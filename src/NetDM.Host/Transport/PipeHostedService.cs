@@ -427,6 +427,8 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
                         "research_catalog" or "research_storage" or "research_income" or "research_grant"
                             or "research_debit" or "research_import" or "research_boost" or "research_state" or "research_replicate"
                             or "research_effects" or "research_knowledge" when stagedProtocol => Research(request),
+            // P13 network life: a round event, an admin tool or a test seeds the network population.
+            "network_life" when stagedProtocol => NetworkLifeControl(request),
                         "radio_reach" when stagedProtocol => RadioReachRequest(request),
                         "stats" => Stats(request),
                         "game_stats" => new PipeResponse(request.Id, true, Game: game.Status()),
@@ -995,6 +997,13 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
     private PipeResponse Research(PipeRequest request)
     {
         var (ok, error, result) = research.Handle(request.Op, request.Payload);
+        return new PipeResponse(request.Id, ok, error, Result: result);
+    }
+    private PipeResponse NetworkLifeControl(PipeRequest request)
+    {
+        if (request.Payload is not { ValueKind: JsonValueKind.Object } payload)
+            return new PipeResponse(request.Id, false, "invalid_request");
+        var (ok, error, result) = Diagnostics.NetworkSpace.Control(game, payload);
         return new PipeResponse(request.Id, ok, error, Result: result);
     }
 

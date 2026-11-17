@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)] [string] $Bundle)
+param([Parameter(Mandatory)] [string] $Bundle, [switch] $NetworkLife)
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $Bundle).Path)
 $state = Join-Path $root 'state'
@@ -21,8 +21,13 @@ $info.CreateNoWindow = $true
 $info.RedirectStandardOutput = $info.RedirectStandardError = $true
 $info.WorkingDirectory = $root
 $info.Environment['PATH'] = "$env:WINDIR\System32;$env:WINDIR"
+# P13: pass the opt-in layer switches to the launcher explicitly; they are not part of the default run.
+foreach ($name in @('NETDM_NET_LIFE', 'NETDM_NET_IMMERSION')) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if ($value) { $info.Environment[$name] = $value }
+}
 foreach ($argument in @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'Start-BlueMoon.ps1'),
-        '-GamePort', $ports[0], '-HostPort', $ports[1], '-DatabasePort', $ports[2])) {
+        '-GamePort', $ports[0], '-HostPort', $ports[1], '-DatabasePort', $ports[2]) + @(if ($NetworkLife) { '-NetworkLife' })) {
     $info.ArgumentList.Add([string]$argument)
 }
 $launcher = [Diagnostics.Process]::Start($info)
@@ -58,6 +63,9 @@ function Read-RoundCount {
 
 try {
     $initial = Wait-Ready
+    # The one-time network population is seeded right after the first publication; give it a beat
+    # before the fault injection so this check does not race with the Host kill.
+    Start-Sleep -Seconds 10
     $daemon = Get-CimInstance Win32_Process -Filter "ProcessId=$($initial.daemonPid)"
     $expectedDaemon = [IO.Path]::GetFullPath((Join-Path $root 'runtime/byond/bin/dd.exe'))
     if (!$daemon.ExecutablePath -or [IO.Path]::GetFullPath($daemon.ExecutablePath) -ne $expectedDaemon) {
@@ -76,6 +84,8 @@ try {
 
     Stop-Process -Id $initial.hostPid
     $recovered = Wait-Ready $initial.streamId
+    # The population is seeded again on the new Host session; let the request settle before stopping.
+    Start-Sleep -Seconds 10
     $newSummary = Invoke-RestMethod "$base/api/game/summary"
     if ($recovered.daemonPid -ne $initial.daemonPid -or $recovered.dbPid -ne $initial.dbPid -or
         $recovered.hostPid -eq $initial.hostPid -or $newSummary.nodes -lt 1 -or (Read-RoundCount) -ne $rounds) {

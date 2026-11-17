@@ -25,13 +25,14 @@ static class ResearchSmokeTests
             CheckSharedAccount(directory);
             CheckEffects(directory);
             CheckJournalFormat(directory);
+            CheckJournalDamage(directory);
             CheckWriteFault(directory);
         }
         finally
         {
             Directory.Delete(directory, true);
         }
-        Console.WriteLine("P5 research ledger, purchase outbox, journal format and write fault, P6 sync, transfer and disk checks passed.");
+        Console.WriteLine("P5 research ledger, purchase outbox, journal format, journal damage and write fault, P6 sync, transfer and disk checks passed.");
     }
 
     private static ResearchNodeDefinition Node(string id, long cost, string[]? prerequisites = null, bool starting = false,
@@ -658,6 +659,103 @@ static class ResearchSmokeTests
             Check(new FileInfo(copy).Length == expected.Length, "an accepted journal is repaired when it is opened");
             File.Delete(copy);
         }
+    }
+
+    /// <summary>
+    /// Damage in the middle of the journal cannot be the tail an interrupted append leaves: the records
+    /// behind it were flushed before they were acknowledged. The journal is refused whole and left byte
+    /// for byte as it was, so confirmed research records are never cut away silently, and restoring the
+    /// file makes the round usable again.
+    /// </summary>
+    private static void CheckJournalDamage(string directory)
+    {
+        var round = Guid.NewGuid();
+        var path = Path.Combine(directory, "damage.journal");
+        using (var ledger = ResearchLedger.Open(path, round))
+        {
+            ledger.InstallCatalog(Catalog());
+            ledger.RegisterStorage("srv", 1, "station");
+            ledger.GrantIncome(1, [new("srv", 1, Points(1000))]);
+            Buy(ledger, "srv", "op-1", "cheap", 100);
+            Buy(ledger, "srv", "op-2", "engineering", 300);
+        }
+        var full = File.ReadAllBytes(path);
+        var offsets = RecordOffsets(full);
+        Check(offsets.Count >= 6, "the journal holds the records of the round");
+
+        // A whole record whose payload changed after it was flushed: its length is intact, its checksum is not.
+        var damaged = (byte[])full.Clone();
+        damaged[offsets[3] + 10] ^= 0xFF;
+        File.WriteAllBytes(path, damaged);
+        var before = File.ReadAllBytes(path);
+        var exception = Damage(path, round);
+        Check(exception is { Reason: "checksum", WholeRecords: 3 } && exception.Offset == offsets[3] &&
+            exception.Length == before.Length, $"damage after three whole records is named: {exception.Reason} at {exception.Offset}");
+        Check(File.ReadAllBytes(path).AsSpan().SequenceEqual(before), "a journal damaged in the middle is left byte for byte as it was");
+
+        // A whole record header that declares a length no append ever wrote.
+        damaged = (byte[])full.Clone();
+        damaged[offsets[1]] = damaged[offsets[1] + 1] = damaged[offsets[1] + 2] = damaged[offsets[1] + 3] = 0;
+        File.WriteAllBytes(path, damaged);
+        before = File.ReadAllBytes(path);
+        exception = Damage(path, round);
+        Check(exception is { Reason: "invalid_length", WholeRecords: 1 } && exception.Offset == offsets[1],
+            $"an impossible record length is damage, not a tail: {exception.Reason} at {exception.Offset}");
+        Check(File.ReadAllBytes(path).AsSpan().SequenceEqual(before), "an impossible length does not shorten the journal");
+
+        // Damage of the first record: the old behaviour wrote a new round over such a file and lost every
+        // acknowledged record of the round. It must be refused instead.
+        damaged = (byte[])full.Clone();
+        damaged[offsets[0] + 9] ^= 0xFF;
+        File.WriteAllBytes(path, damaged);
+        before = File.ReadAllBytes(path);
+        exception = Damage(path, round);
+        Check(exception is { WholeRecords: 0 } && exception.Offset == offsets[0],
+            $"damage before any whole record is refused too: {exception.Reason} at {exception.Offset}");
+        Check(File.ReadAllBytes(path).AsSpan().SequenceEqual(before), "damage of the first record does not start a fresh journal");
+
+        // An operator restoring the journal ends the refusal: the same round comes back with its records.
+        File.WriteAllBytes(path, full);
+        using (var restored = ResearchLedger.Open(path, round))
+            Check(restored.RecoveredEntries == offsets.Count && Available(restored, "srv") == 600 && restored.Totals().Balanced,
+                "a restored journal opens with its confirmed records");
+    }
+
+    /// <summary>Byte offset of every whole record's length field, the header excluded.</summary>
+    private static List<long> RecordOffsets(byte[] journal)
+    {
+        var offsets = new List<long>();
+        var offset = 8L;
+        while (offset + 8 <= journal.Length)
+        {
+            offsets.Add(offset);
+            var size = BitConverter.ToInt32(journal, (int)offset);
+            if (size is <= 0 or > ResearchJournal.MaxRecordBytes || offset + 8 + size > journal.Length)
+                break;
+            offset += 8 + size;
+        }
+        return offsets;
+    }
+
+    private static ResearchJournalCorruptException Damage(string path, Guid round)
+    {
+        try
+        {
+            using var journal = new ResearchJournal(path);
+        }
+        catch (ResearchJournalCorruptException exception)
+        {
+            Check(exception.WholeRecords >= 0, "damage is reported with its position");
+        }
+        try
+        {
+            using var ledger = ResearchLedger.Open(path, round);
+        }
+        catch (ResearchJournalCorruptException exception)
+        {
+            return exception;
+        }
+        throw new InvalidOperationException("Research check failed: a damaged journal was accepted.");
     }
 
     private static string Fingerprint(ResearchLedger ledger, IEnumerable<(string Storage, string Op)> operations)

@@ -27,7 +27,12 @@ $files = @('tgstation.dme', 'code/game/world.dm', 'code/game/area/areas.dm', 'co
     # ResearchEvidence call sites (14.11.2026): the points carry their source machine.
     'code/modules/research/techweb/_techweb.dm', 'code/modules/research/destructive_analyzer.dm', 'code/modules/research/experimentor.dm',
     'code/game/machinery/doppler_array.dm', 'code/modules/power/tesla/coil.dm', 'code/modules/power/singularity/collector.dm',
-    'code/modules/surgery/experimental_dissection.dm', 'code/modules/netdm/network_space.dm',
+    'code/modules/surgery/experimental_dissection.dm', 'code/modules/netdm/network_space.dm', 'code/modules/netdm/network_immersion.dm',
+    # Every legacy writer of research points must be in the build: a copied world without one proves
+    # nothing about single-writer rules (17.11.2026).
+    'code/modules/atmospherics/gasmixtures/reactions.dm', 'code/modules/atmospherics/machinery/components/electrolyzer/electrolyzer_reactions.dm',
+    'modular_bluemoon/code/game/machinery/astro_sensor.dm',
+    'modular_bluemoon/white_steel/inner/discovery_research/discoverable_component.dm',
     'code/__DEFINES/dcs/signals.dm', 'code/game/machinery/_machinery.dm',
     'code/modules/mapping/space_management/space_reservation.dm', 'code/modules/unit_tests/_unit_tests.dm',
     'code/modules/unit_tests/netdm_observe.dm')

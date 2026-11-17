@@ -1,0 +1,12 @@
+# Shell scripts and Docker files must keep LF in the working tree: Docker on Windows
+# builds from the checkout, and a CRLF shebang breaks the container entrypoints.
+*.sh text eol=lf
+*.Dockerfile text eol=lf
+Dockerfile text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.ps1 text
+*.md text
+*.cs text
+*.csproj text
+*.sln text

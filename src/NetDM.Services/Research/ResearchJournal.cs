@@ -6,8 +6,13 @@ namespace NetDM.Services.Research;
 /// Append-only durable journal of one round's research ledger. Each record is
 /// <c>[length:int32][crc32:uint32][payload]</c> after an 8-byte header. <see cref="Append"/> returns
 /// only after the operating system flushed the bytes to the device, so whatever the ledger acknowledged
-/// survives a crash. A torn or corrupt tail, the only damage an interrupted append can leave, is cut
-/// off by <see cref="Repair"/>; everything before it was acknowledged and is replayed.
+/// survives a crash. A torn tail, the only damage an interrupted append can leave, is cut off by
+/// <see cref="Repair"/>; everything before it was acknowledged and is replayed.
+///
+/// Damage an interrupted append cannot explain — a whole record header with an impossible length, or a
+/// whole record that fails its checksum — is not treated as a tail: the bytes after it were acknowledged
+/// too, so shortening the file would lose confirmed records. Such a journal raises
+/// <see cref="ResearchJournalCorruptException"/> from the constructor and is left byte for byte as it was.
 ///
 /// Opening only reads. The file changes when its reader has accepted what it replayed and calls
 /// <see cref="Repair"/> or appends: a journal that is then refused (another round, a newer format)
@@ -166,22 +171,21 @@ public sealed class ResearchJournal : IDisposable
             }
             var size = BinaryPrimitives.ReadInt32LittleEndian(prefix);
             var crc = BinaryPrimitives.ReadUInt32LittleEndian(prefix.AsSpan(4));
+            // A whole header was read, so these eight bytes are the ones an append wrote. A length no
+            // append ever writes means the record bytes were damaged, not that the append was cut short:
+            // the records behind it were acknowledged and must not be thrown away.
             if (size is <= 0 or > MaxRecordBytes)
-            {
-                reason = "invalid_length";
-                return records;
-            }
+                throw new ResearchJournalCorruptException(Path, "invalid_length", validLength, records.Count, length);
             var payload = new byte[size];
             if (!Fill(payload))
             {
                 reason = "torn_record";
                 return records;
             }
+            // The whole payload is present, so this is not a partial append either. Its checksum failing
+            // means the bytes changed after they were flushed.
             if (Crc32(payload) != crc)
-            {
-                reason = "checksum";
-                return records;
-            }
+                throw new ResearchJournalCorruptException(Path, "checksum", validLength, records.Count, length);
             records.Add(payload);
             validLength += 8 + size;
         }

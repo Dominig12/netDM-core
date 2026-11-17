@@ -107,6 +107,7 @@ CheckForwardingRoles();
 DeviceAttachmentSmokeTests.Run();
 ResearchSmokeTests.Run();
 ShellSmokeTests.Run();
+            NetworkLifeSmokeTests.Run();
 Console.WriteLine("All netDM-core smoke tests passed.");
 
 static void CheckAreaWiring()

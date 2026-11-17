@@ -72,10 +72,18 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
     public sealed record StorageReadiness(bool Ready, string State);
 
     /// <summary>
+    /// Damage a journal found that an interrupted append cannot explain: whole records before it were
+    /// acknowledged, so the file is not shortened and research stays blocked until it is restored.
+    /// </summary>
+    public sealed record JournalDamage(string Reason, long Offset, long Length, int WholeRecords);
+
+    /// <summary>
     /// <c>ready</c>: the round's journal is open and its last append reached the device. <c>faulted</c>:
     /// an append failed, writes are refused until the journal is replayed. <c>unavailable</c>: the journal
     /// cannot be opened. <c>refused</c>: the file is not this round's journal of a known format and is
-    /// left untouched. <c>closed</c>: no session has named a round yet. Takes no lock.
+    /// left untouched. <c>corrupt</c>: the journal holds damage that a torn append cannot explain, so it
+    /// is left untouched too and confirmed records are not cut away. <c>closed</c>: no session has named
+    /// a round yet. Takes no lock.
     /// </summary>
     public StorageReadiness Storage()
     {
@@ -88,6 +96,8 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
     private const int RecoveryMinMs = 1000, RecoveryMaxMs = 30_000, RecoveryCalmMs = 2 * RecoveryMaxMs;
     private Guid? _round;
     private volatile string _closedState = "closed";
+    /// <summary>What the last open attempt found damaged, if it was damage no torn append explains.</summary>
+    private volatile JournalDamage? _damage;
     private long _nextRecovery, _lastAttempt = long.MinValue / 2, _recoveries;
     private int _recoveryDelayMs = RecoveryMinMs;
     private bool _reported;
@@ -109,6 +119,7 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
 
         var recovering = sameRound && (_ledger is { Faulted: true } || _openError is not null);
         _closedState = "unavailable";
+        _damage = null;
         var previous = _ledger;
         Volatile.Write(ref _ledger, null); // Readers take no lock: they see no ledger while the file is replayed.
         previous?.Dispose(); // The file is opened without write sharing: the previous handle goes first.
@@ -131,6 +142,15 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
                 Interlocked.Increment(ref _recoveries);
             log.LogInformation("Research ledger of round {Round}: {Entries} records recovered, {Bytes} torn bytes cut off.",
                 round, ledger.RecoveredEntries, ledger.TruncatedBytes);
+        }
+        catch (ResearchJournalCorruptException exception)
+        {
+            // Records before the damage were acknowledged: cutting the journal at the damage would lose
+            // them silently. The file stays as it is and only an operator restoring it ends this state;
+            // a later hello tries again in case the journal was replaced in the meantime.
+            _closedState = "corrupt";
+            _damage = new JournalDamage(exception.Reason, exception.Offset, exception.Length, exception.WholeRecords);
+            Failed(path, exception.Message, exception);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -166,7 +186,8 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
             return;
         lock (_gate)
         {
-            if (_round is not { } round || _ledger is { Faulted: false } || (_ledger is null && _closedState == "refused"))
+            if (_round is not { } round || _ledger is { Faulted: false } ||
+                (_ledger is null && _closedState is "refused" or "corrupt"))
                 return;
             OpenJournal(round, true);
         }
@@ -184,6 +205,7 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
                 storage = Storage().State,
                 recoveries = Interlocked.Read(ref _recoveries),
                 error = _openError,
+                damage = _damage is { } damage ? new { damage.Reason, damage.Offset, damage.Length, damage.WholeRecords } : null,
                 journal = ledger?.JournalPath,
                 recoveredEntries = ledger?.RecoveredEntries,
                 truncatedBytes = ledger?.TruncatedBytes,

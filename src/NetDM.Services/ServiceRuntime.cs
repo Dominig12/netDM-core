@@ -247,6 +247,9 @@ public sealed class ServiceRuntime
     private const int TransientOperationTicks = 1200;
     private long _published, _created, _applied, _rejected, _failed;
 
+    /// <summary>The contract registry of this runtime: ids, schemas and command names, for discovery commands.</summary>
+    public SchemaRegistry Schemas => _schemas;
+
     public ServiceRuntime(SchemaRegistry schemas, Func<long> clock, ServiceRuntimeOptions? options = null)
     {
         _schemas = schemas ?? throw new ArgumentNullException(nameof(schemas));

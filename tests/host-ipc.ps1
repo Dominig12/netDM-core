@@ -19,6 +19,8 @@ $launch.Environment['Logging__LogLevel__Default'] = 'Error'
 $launch.Environment['NetDM__ResearchDirectory'] = Join-Path $work 'research'
 # A small program state budget, so the budget check needs no large world.
 $launch.Environment['NetDM__ProgramStateBytes'] = '1200'
+# P13 network life: the population is opt-in, so the test enables it explicitly.
+$launch.Environment['NetDM__NetLife'] = '1'
 
 function Open-Stream {
     if ($IsWindows) {
@@ -1552,9 +1554,11 @@ end
     $script:atCall = 0
     function Invoke-ShellAt([string] $Instance, [string] $Command, [hashtable] $Arguments, [string] $Sequence = '2') {
         $script:atCall++
-        Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = $Sequence }).ok) "heartbeat before $Command at $Instance"
-        Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = $Instance; command = $Command; idempotencyKey = "at-$script:atCall"
-            arguments = $Arguments; trafficClass = 1; timeoutTicks = 60 } + $engineer)).ok) "$Command sent to $Instance"
+        $beat = Invoke-Next @{ op = 'heartbeat'; snapshotId = 'svc3'; factSequence = $Sequence }
+        Assert-True ($beat.ok) "heartbeat before $Command at ${Instance}: $($beat | ConvertTo-Json -Compress)"
+        $sent = Invoke-Next (@{ op = 'invoke'; instance = $Instance; command = $Command; idempotencyKey = "at-$script:atCall"
+            arguments = $Arguments; trafficClass = 1; timeoutTicks = 60 } + $engineer)
+        Assert-True ($sent.ok) "$Command sent to ${Instance}: $($sent | ConvertTo-Json -Compress)"
         $answer = Wait-Result 'eng-1' $Command
         Assert-True ($null -ne $answer) "$Command answered at $Instance"
         return $answer.payload
@@ -1721,7 +1725,55 @@ end
     Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '8'
         changes = @(@{ op = 'node_state'; a = '2'; powered = 1; operational = 1 }) }).ok) 'APC 2 has power again'
     Assert-True ((Invoke-ShellAt 'netshell.apc1' 'leave' @{} '8').status -ceq 'left') 'the operator leaves'
-
+    # P13 network life: the operator's identity and the NPC entities that live in the network. The
+    # population is opt-in, so the test Host enables it; only known nodes disclose their agents.
+    $persona = Invoke-ShellAt 'netshell.apc2' 'persona' @{ name = 'operator-2'; signature = 'O2'; colour = 2 } '8'
+    Assert-True ($persona.status -ceq 'ok' -and $persona.personaName -ceq 'operator-2' -and
+        $persona.personaSignature -ceq 'O2' -and $persona.personaColour -eq 2) "an operator sets a persona: $($persona | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = 'netshell.apc2'; command = 'persona'; idempotencyKey = 'p13-bad-name'
+        arguments = @{ name = ('x' * 40) }; trafficClass = 1; timeoutTicks = 60 } + $engineer)).error -ceq 'invalid_payload') 'a persona name is bounded by its contract'
+    Assert-True ((Invoke-Next (@{ op = 'invoke'; instance = 'netshell.apc2'; command = 'persona'; idempotencyKey = 'p13-bad-colour'
+        arguments = @{ colour = 9 }; trafficClass = 1; timeoutTicks = 60 } + $engineer)).error -ceq 'invalid_payload') 'a persona colour is bounded by its contract'
+    $life = $null
+    for ($try = 0; $try -lt 60; $try++) {
+        $life = Invoke-ShellAt 'netshell.apc2' 'life' @{} '8'
+        if ("$($life.bots)" -ne '' -and "$($life.activity)" -ne '') { break }
+        Start-Sleep -Milliseconds 250
+    }
+    Assert-True ($life.status -ceq 'ok' -and "$($life.bots)" -ne '' -and "$($life.activity)" -ne '') "agents live in the network and leave activity: $($life | ConvertTo-Json -Depth 4 -Compress)"
+    Assert-True ("$($life.activity)" -match '\|spawn\||\|move\||\|persona\|') 'activity names what happened in the network'
+    $page = Invoke-ShellAt 'netshell.apc2' 'life' @{ since = 0; limit = 1 } '8'
+    Assert-True ((("$($page.activity)" -split ';') | Where-Object { $_ -ne '' }).Count -le 1) 'the activity page is bounded'
+    # P13 agents: a round event, an admin tool or a test seeds the population over the Host control plane.
+    $spawned = Invoke-Next @{ op = 'network_life'; payload = @{ action = 'spawn'; count = 2; goal = 'courier' } }
+    Assert-True ($spawned.ok -and $spawned.result.spawned -eq 2) "agents can be seeded over the control plane: $($spawned | ConvertTo-Json -Compress)"
+    $onNode = Invoke-Next @{ op = 'network_life'; payload = @{ action = 'spawn'; count = 1; goal = 'courier'; node = '2' } }
+    Assert-True ($onNode.ok -and $onNode.result.spawned -eq 1) "one agent can be placed on a chosen node: $($onNode | ConvertTo-Json -Compress)"
+    $seeded = Invoke-ShellAt 'netshell.apc2' 'life' @{} '8'
+    Assert-True ("$($seeded.bots)" -match 'courier') "a seeded agent is visible on a known node: $($seeded.bots)"
+    $retired = Invoke-Next @{ op = 'network_life'; payload = @{ action = 'retire' } }
+    Assert-True ($retired.ok -and $retired.result.retired -ge 2) "the population can be retired: $($retired | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Next @{ op = 'network_life'; payload = @{ action = 'spawn'; count = 1; node = '999999' } }).error -ceq 'unknown_node') 'a seeded agent needs a real node'
+    # P13 intruders: a rogue agent hunts the nearest live presence across real routes and warns it.
+    Assert-True ((Invoke-ShellAt 'netshell.apc2' 'enter' @{} '8').status -cin @('entered', 'present')) 'the operator enters to be hunted'
+    Assert-True ((Invoke-Next @{ op = 'network_life'; payload = @{ action = 'spawn'; count = 1; goal = 'intruder'; node = '3' } }).result.spawned -eq 1) 'an intruder can be seeded on a node'
+    $threat = $null
+    for ($try = 0; $try -lt 80; $try++) {
+        $threat = Invoke-ShellAt 'netshell.apc2' 'presence' @{} '8'
+        if ("$($threat.threat)" -ne '') { break }
+        Start-Sleep -Milliseconds 250
+    }
+    Assert-True ("$($threat.threat)" -ne '') "an intruder warns the presence it reaches: $($threat | ConvertTo-Json -Compress)"
+    $intrusion = Invoke-ShellAt 'netshell.apc2' 'life' @{} '8'
+    Assert-True ("$($intrusion.activity)" -match '\|intrusion\|') "the activity names the intrusion: $($intrusion.activity)"
+    $severed = $null
+    for ($try = 0; $try -lt 160; $try++) {
+        $severed = Invoke-ShellAt 'netshell.apc2' 'presence' @{} '8'
+        if ($severed.state -ceq 'suspended') { break }
+        Start-Sleep -Milliseconds 250
+    }
+    Assert-True ($severed.state -ceq 'suspended' -and $severed.reason -ceq 'intrusion') "a sustained intrusion severs the link: $($severed | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-ShellAt 'netshell.apc2' 'leave' @{} '8').status -ceq 'left') 'the hunted operator leaves'
     if ($IsLinux) {
         Assert-StartupRejected $socketPath
         Assert-True ((Invoke-Next @{ op = 'game_stats' }).game.nodes -eq 3) 'second Host does not unlink live socket'
@@ -1740,7 +1792,6 @@ end
         Assert-True ($LASTEXITCODE -eq 0 -and $hostProcess.WaitForExit(5000) -and $hostProcess.ExitCode -eq 0) 'graceful Host SIGTERM'
         Assert-True (!(Test-Path -LiteralPath $socketPath) -and (Test-Path -LiteralPath "$socketPath.lock")) 'listener releases socket and retains lock file'
     }
-    Write-Host 'NETDM_IPC_PASS'
 }
 finally {
     if ($null -ne $owner) { $owner.Dispose() }
@@ -1748,3 +1799,171 @@ finally {
     if (-not $hostProcess.HasExited) { $hostProcess.Kill($true); $hostProcess.WaitForExit() }
     $hostProcess.Dispose()
 }
+
+# Durable journal damage before research authority (P5 safety gate). A torn tail is what an interrupted
+# append leaves and is cut off on open. Damage a whole record cannot be that: the records behind it were
+# flushed before they were acknowledged, so the Host refuses the round whole, leaves the file untouched,
+# blocks research and keeps the network. Restoring the journal opens it again without a Host restart.
+$damageWork = [IO.Directory]::CreateTempSubdirectory('netdm-ipc-damage-').FullName
+$script:pipe = 'netdm-damage-' + [guid]::NewGuid().ToString('N')
+$script:socketPath = Join-Path $damageWork 'core.sock'
+$damagePort = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+$damagePort.Start()
+$script:httpPort = $damagePort.LocalEndpoint.Port
+$damagePort.Stop()
+$script:owner = $null
+$script:session = $null
+$damageLaunch = [Diagnostics.ProcessStartInfo]::new((Get-Command dotnet -ErrorAction Stop).Source)
+$damageLaunch.ArgumentList.Add((Resolve-Path -LiteralPath $HostDll).Path)
+$damageLaunch.UseShellExecute = $false
+$damageLaunch.CreateNoWindow = $true
+$damageLaunch.Environment['NETDM_IPC_MODE'] = 'v1'
+$damageLaunch.Environment['NETDM_PIPE_NAME'] = $script:pipe
+$damageLaunch.Environment['NETDM_SOCKET_PATH'] = $script:socketPath
+$damageLaunch.Environment['NetDM__HttpPort'] = "$script:httpPort"
+$damageLaunch.Environment['Logging__LogLevel__Default'] = 'Error'
+$damageLaunch.Environment['NetDM__ResearchDirectory'] = Join-Path $damageWork 'research'
+$damageHost = [Diagnostics.Process]::Start($damageLaunch)
+function Get-ResearchStatus {
+    $response = Invoke-WebRequest "http://127.0.0.1:$script:httpPort/api/research/status" -SkipHttpErrorCheck -TimeoutSec 5
+    return @{ Status = [int]$response.StatusCode; Body = ($response.Content | ConvertFrom-Json -AsHashtable) }
+}
+function Wait-ResearchStorage([string] $State) {
+    $probe = $null
+    for ($poll = 0; $poll -lt 100; $poll++) {
+        try { $probe = Get-ResearchStatus } catch { $probe = $null }
+        if ($null -ne $probe -and $probe.Body.storage -ceq $State) { return $probe }
+        Start-Sleep -Milliseconds 100
+    }
+    return $probe
+}
+function Get-RecordOffsets([byte[]] $Journal) {
+    $offsets = [Collections.Generic.List[long]]::new()
+    $offset = 8L
+    while ($offset + 8 -le $Journal.Length) {
+        $offsets.Add($offset)
+        $size = [BitConverter]::ToInt32($Journal, [int]$offset)
+        if ($size -le 0 -or $size -gt 65536 -or $offset + 8 + $size -gt $Journal.Length) { break }
+        $offset += 8 + $size
+    }
+    return $offsets
+}
+try {
+    $damageHello = @{ id = 'hello'; op = 'hello'; protocolMajor = 1; protocolMinor = 1
+        serverId = 'station-damage'; roundEpoch = [guid]::NewGuid().ToString() }
+    $session = $null
+    $owner = $null
+    for ($attempt = 0; $attempt -lt 150 -and $null -eq $owner; $attempt++) {
+        try {
+            $owner = Open-Stream
+            Send-Frame $owner $damageHello
+            $session = Read-Frame $owner
+            if (-not $session.ok) { $owner.Dispose(); $owner = $null; $session = $null }
+        }
+        catch {
+            if ($null -ne $owner) { $owner.Dispose(); $owner = $null }
+            if ($damageHost.HasExited) { throw }
+        }
+        if ($null -eq $owner) { Start-Sleep -Milliseconds 50 }
+    }
+    Assert-True ($null -ne $owner -and $session.ok) 'the damaged-round Host opens a session'
+    $script:seq = 0
+    $damageRegister = @{ op = 'research_storage'; payload = @{ storage = 'srv1'; generation = '1'; domain = 'station'; action = 'register' } }
+    Assert-True ((Send-Catalog).ok) 'the damaged round binds its catalog before the damage'
+    $registered = Invoke-Next $damageRegister.Clone()
+    Assert-True ($registered.ok) "the first storage is registered before the damage: $($registered | ConvertTo-Json -Compress)"
+    Assert-True ((Invoke-Next @{ op = 'research_storage'; payload = @{ storage = 'srv2'; generation = '1'; domain = 'station'; action = 'register' } }).ok) 'a second storage is registered'
+    Assert-True ((Wait-ResearchStorage 'ready').Body.storage -ceq 'ready') 'the journal of the round is ready'
+    $journal = Join-Path (Join-Path $damageWork 'research') ("research-{0:N}.journal" -f [guid]$damageHello.roundEpoch)
+    Assert-True (Test-Path -LiteralPath $journal) 'the round has its journal'
+    $owner.Dispose()
+    $owner = $null
+    $damageHost.Kill($true)
+    $damageHost.WaitForExit()
+    # A whole record whose payload changed after it was flushed: not a tail, and everything behind it was
+    # acknowledged.
+    $fullJournal = [IO.File]::ReadAllBytes($journal)
+    $offsets = Get-RecordOffsets $fullJournal
+    Assert-True ($offsets.Count -ge 4) 'the journal holds several whole records'
+    $damagedJournal = [byte[]]$fullJournal.Clone()
+    $damagedJournal[$offsets[2] + 10] = $damagedJournal[$offsets[2] + 10] -bxor 0xFF
+    [IO.File]::WriteAllBytes($journal, $damagedJournal)
+    $damagedBytes = [IO.File]::ReadAllBytes($journal)
+    $damageHost = [Diagnostics.Process]::Start($damageLaunch)
+    $session = $null
+    $owner = $null
+    for ($attempt = 0; $attempt -lt 150 -and $null -eq $owner; $attempt++) {
+        try {
+            $owner = Open-Stream
+            Send-Frame $owner $damageHello
+            $session = Read-Frame $owner
+            if (-not $session.ok) { $owner.Dispose(); $owner = $null; $session = $null }
+        }
+        catch {
+            if ($null -ne $owner) { $owner.Dispose(); $owner = $null }
+            if ($damageHost.HasExited) { throw }
+        }
+        if ($null -eq $owner) { Start-Sleep -Milliseconds 50 }
+    }
+    Assert-True ($null -ne $owner -and $session.ok) 'the damaged round still gets its session'
+    $script:seq = 0
+    $corrupt = Wait-ResearchStorage 'corrupt'
+    Assert-True ($corrupt.Body.storage -ceq 'corrupt' -and $corrupt.Body.damage.reason -ceq 'checksum' -and
+        $corrupt.Body.damage.offset -eq $offsets[2] -and $corrupt.Body.damage.wholeRecords -eq 2 -and
+        $corrupt.Body.damage.length -eq $damagedBytes.Length) "damage after whole records is reported as damage: $($corrupt.Body | ConvertTo-Json -Depth 5 -Compress)"
+    Assert-True ([Convert]::ToHexString([IO.File]::ReadAllBytes($journal)) -ceq [Convert]::ToHexString($damagedBytes)) 'a journal damaged in the middle is not repaired or shortened'
+    # The world publishes its snapshot in the damaged round: the network serves the game, research does not.
+    Assert-True ((Invoke-Next @{ op = 'snapshot_begin'; snapshotId = 'dmg'; profile = 'apc_map'
+        chunkCount = 1; factCount = $mapFacts.Count; factSequence = '0' }).ok) 'damaged round snapshot begin'
+    Assert-True ((Invoke-Next @{ op = 'snapshot_chunk'; snapshotId = 'dmg'; chunkIndex = 0; factsJson = $chain; digest = $chainDigest }).ok) 'damaged round snapshot chunk'
+    Assert-True ((Invoke-Next @{ op = 'snapshot_commit'; snapshotId = 'dmg'; digest = (Get-Digest $chainDigest) }).ok) 'damaged round snapshot commit'
+    $damageReady = Invoke-Next @{ op = 'snapshot_ready'; snapshotId = 'dmg'; factSequence = '0' }
+    Assert-True ($damageReady.ok) 'damaged round snapshot ready'
+    $session['streamId'] = $damageReady.streamId
+    Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'dmg'; factSequence = '0' }).ok) 'damaged round heartbeat'
+    $damageGame = Get-GameReadiness
+    Assert-True ($damageGame.Status -eq 503 -and $damageGame.Body.research -ceq 'corrupt' -and $damageGame.Body.networkReady -and
+        -not $damageGame.Body.researchReady) "damaged storage makes the game unready while the network stays up: $($damageGame.Body | ConvertTo-Json -Depth 5 -Compress)"
+    $network = Invoke-WebRequest "http://127.0.0.1:$script:httpPort/api/readiness/network" -SkipHttpErrorCheck -TimeoutSec 5
+    Assert-True ([int]$network.StatusCode -eq 200) 'network readiness does not wait for research storage'
+    Assert-True ((Invoke-Next @{ op = 'packet_send'; a = '1'; b = '2'; bytes = 96; requestId = 'damage-blocked' }).ok) 'the network admits work without research storage'
+    Assert-True ((Invoke-Next $damageRegister.Clone()).error -ceq 'research_unavailable') 'research writes stay blocked'
+    Start-Sleep -Milliseconds 1200
+    Assert-True ((Wait-ResearchStorage 'corrupt').Body.storage -ceq 'corrupt') 'a damaged journal is not retried into a truncated one'
+    # An operator restores the journal: the same round opens it again without a Host restart.
+    Remove-Item -LiteralPath $journal
+    $owner.Dispose()
+    $owner = $null
+    $session = $null
+    for ($attempt = 0; $attempt -lt 150 -and $null -eq $owner; $attempt++) {
+        try {
+            $owner = Open-Stream
+            Send-Frame $owner $damageHello
+            $session = Read-Frame $owner
+            if (-not $session.ok) { $owner.Dispose(); $owner = $null; $session = $null }
+        }
+        catch {
+            if ($null -ne $owner) { $owner.Dispose(); $owner = $null }
+            if ($damageHost.HasExited) { throw }
+        }
+        if ($null -eq $owner) { Start-Sleep -Milliseconds 50 }
+    }
+    $script:seq = 0
+    $reopened = Wait-ResearchStorage 'ready'
+    Assert-True ($reopened.Body.storage -ceq 'ready' -and $null -eq $reopened.Body.damage) 'a restored journal opens again'
+    Assert-True ((Send-Catalog).ok) 'the restored round binds its catalog again'
+    Assert-True ((Invoke-Next $damageRegister.Clone()).ok) 'research accepts writes after the restore'
+    Write-Host 'NETDM_IPC_PASS'
+}
+finally {
+    if ($null -ne $owner) { $owner.Dispose() }
+    if (-not $damageHost.HasExited) { $damageHost.Kill($true); $damageHost.WaitForExit() }
+    $damageHost.Dispose()
+    Remove-Item -LiteralPath $damageWork -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+
+
+
+
+

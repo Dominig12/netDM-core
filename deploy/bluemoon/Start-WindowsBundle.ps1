@@ -1,4 +1,6 @@
 param(
+    # P13: opt-in network life layer (population seeding on the world and on the Host).
+    [switch] $NetworkLife,
     [ValidateRange(1, 65535)] [int] $GamePort = 1337,
     [ValidateRange(1, 65535)] [int] $HostPort = 5087,
     [ValidateRange(1, 65535)] [int] $DatabasePort = 3307,
@@ -114,7 +116,7 @@ try {
         $appPassword = New-Password
         $init = Start-OwnedProcess (Join-Path $dbBin 'mariadb-install-db.exe') @("--datadir=$dbData", "--port=$DatabasePort", '--silent') $state 'database-init'
         try {
-            if (!$init.WaitForExit(60000) -or $init.ExitCode -ne 0) { throw 'Could not initialize portable MariaDB.' }
+            if (!$init.WaitForExit(180000) -or $init.ExitCode -ne 0) { throw 'Could not initialize portable MariaDB.' }
         }
         finally { Stop-OwnedProcess $init }
         @(
@@ -154,13 +156,24 @@ try {
     $env:NETDM_IPC_MODE = 'v1'
     $env:NETDM_PIPE_NAME = 'bluemoon-' + [Guid]::NewGuid().ToString('N')
     $env:NETDM_OBSERVE = '1'
+    if ($NetworkLife)
+    {
+        $env:NETDM_NET_LIFE = '1'
+        $env:NETDM_NET_IMMERSION = '1'
+    }
     $env:NETDM_SERVER_ID = $ServerId
     $env:NETDM_BUNDLE_STOP_FILE = 'data/.netdm-stop-' + [Guid]::NewGuid().ToString('N')
     $gameStopPath = Join-Path $game $env:NETDM_BUNDLE_STOP_FILE
+    # Support artifact: which opt-in switches reached this launcher.
+    [IO.File]::WriteAllText((Join-Path $state 'env.txt'), (@("NETDM_OBSERVE=" + $env:NETDM_OBSERVE, "NETDM_NET_LIFE=" + $env:NETDM_NET_LIFE, "NETDM_NET_IMMERSION=" + $env:NETDM_NET_IMMERSION, "NetDM__NetLife=" + $env:NetDM__NetLife) -join [Environment]::NewLine) + [Environment]::NewLine)
     $env:NetDM__HttpPort = "$HostPort"
     $env:NetDM__Deployment = 'true'
     # The round's research journal lives with the instance state, not with the Host binaries.
     $env:NetDM__ResearchDirectory = Join-Path $state 'research'
+    # P13: the network life layer is opt-in; the launcher maps the single environment switch for both sides.
+    if (!$env:NetDM__NetLife) {
+        $env:NetDM__NetLife = if ($env:NETDM_NET_LIFE -eq '1') { '1' } else { '0' }
+    }
     $base ="http://127.0.0.1:$HostPort"
     $netdm = Start-Host
     $daemon = Start-OwnedProcess (Join-Path $PSScriptRoot 'runtime/byond/bin/dd.exe') @(

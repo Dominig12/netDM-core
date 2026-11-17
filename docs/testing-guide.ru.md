@@ -117,11 +117,13 @@ pwsh -File scripts\test-bluemoon-unit.ps1 -BuildDirectory TestResults\p1\game-sr
 
 ### Аудит станционных карт
 
+Аудит требует сборку **без LOWMEMORYMODE** (иначе игра форсирует Runtime Station и отчёт будет одинаковым на всех картах): uild-bluemoon-unit-dmb.ps1 -BuildDirectory TestResults\p1\game-audit -Defines CBT,CIBUILDING,UNIT_TEST_PROFILE_HERMETIC. Каталог game-audit — отдельная копия экспорта игры; NanoMap-картинки должны быть в checkout.
+
 Нужен тот же DMB, что для станционных тестов. Аудит загружает каждую карту и сохраняет отчёт: зоны без APC, изолированные сегменты, число узлов.
 
 ```powershell
 pwsh -File scripts\audit-bluemoon-maps.ps1 -BuildDirectory TestResults\p1\game-src -BridgeDll TestResults\p3-bridge\netdm_byond.dll -Maps metastation,boxstation
-pwsh -File scripts\audit-bluemoon-maps.ps1 -BuildDirectory TestResults\p1\game-src -BridgeDll TestResults\p3-bridge\netdm_byond.dll      # все 24 карты ротации, долго
+pwsh -File scripts\audit-bluemoon-maps.ps1 -BuildDirectory TestResults\p1\game-audit -BridgeDll TestResults\p3-bridge\netdm_byond.dll   # все 24 карты ротации, долго
 ```
 
 Отчёты сохраняются в `TestResults\map-audit\<карта>\netdm_map_audit.json`, сводная таблица печатается в конце.
@@ -439,3 +441,33 @@ pwsh -File deploy\bluemoon\Test-WindowsBundle.ps1 -Bundle <свежая расп
 - Папку лога мира из `data\logs\` (`runtime.log`, `world.log`, `unit_tests.json`).
 - Вывод `pwsh -File scripts\stand-status.ps1`, если стенд был запущен.
 - Версии: `git -C . rev-parse --short HEAD`, `git -C ..\MOLOT-BlueMoon-Station rev-parse --short HEAD`, `node --version`, `dotnet --version`.
+
+## 9. P13: сеть как игра (17.11.2026)
+
+Новые проверки и флаги:
+
+- DreamDaemon: `/datum/unit_test/netdm_observe/area_map/network_immersion` — гейт погружения по умолчанию выключен, тексты причин, точка доступа (рабочий АПЦ опубликованной карты, несколько АПЦ одной зоны).
+- DreamDaemon: `/datum/unit_test/netdm_observe/area_map/network_immersion_dive` — нейролинк в теле, погружение, транс (руки/оверлей), восстановление личности из памяти импланта, выход по потере присутствия (`presence_lost`) и повторный вход, обесточивание точки доступа (`access_point_lost`).
+- `host-ipc`: личности (`persona`), население (`network_life` spawn/retire), видимость по знанию, вторженец (`intruder`) и разрыв канала (`suspension reason=intrusion`), повреждение журнала исследований; прогоняется на Windows pipe и Linux UDS (контейнер `mcr.microsoft.com/dotnet/sdk:10.0`, pwsh 7.6.10).
+- Core smoke: контракты `persona`/`life`, повреждение середины журнала.
+- TGUI: `tsc --noEmit`, `jest packages/tgui/interfaces/NetdmTopology`, `node .yarn/releases/yarn-*.cjs run tgui:build`.
+
+Флаги (всё выключено по умолчанию, кроме Observe):
+
+| Флаг | Где | Что включает |
+|---|---|---|
+| `NETDM_OBSERVE=1`, `NETDM_IPC_MODE=v1` | мир | обязательная база сети |
+| `NETDM_NET_LIFE=1` | мир | сид населения станцией после публикации карты, эмаг-вторженец |
+| `NetDM__NetLife=1` | Host | население и `network_life` на Host |
+| `NETDM_NET_IMMERSION=1` | мир | погружение через нейролинк |
+
+Ручные проверки — [чек-лист клиента BYOND и плейтеста](manual-bryond-check.ru.md).
+
+## 10. Сцена сети в реальном браузере
+
+```powershell
+pwsh -File scripts\test-netdm-scene-browser.ps1            # webgl + canvas fallback, скриншоты
+pwsh -File scripts\check-all.ps1 -Only browser             # то же в общем прогоне
+```
+
+Тест собирает ту же сцену, что монтирует окно TGUI, и рендерит её headless Chromium. Артефакты —`TestResults\p13\browser-proof\`. Это доказательство для PixiJS-рендерера и canvas-fallback вне jsdom; встроенный браузер BYOND проверяется вручную по чек-листу.

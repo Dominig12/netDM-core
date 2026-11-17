@@ -549,11 +549,23 @@ public sealed class SchemaRegistry
             new SchemaField("breakFrom", SchemaFieldType.Text, false, MaxLength: 20),
             new SchemaField("breakTo", SchemaFieldType.Text, false, MaxLength: 20),
             // Up to 64 occupied nodes, each as a 20-digit node ID, a separator and a count.
-            new SchemaField("others", SchemaFieldType.Text, false, MaxLength: 1472)
+            new SchemaField("others", SchemaFieldType.Text, false, MaxLength: 1472),
+            // P13: the operator's identity in the network, flat so every field stays scalar.
+            new SchemaField("personaName", SchemaFieldType.Text, false, MaxLength: 24),
+                new SchemaField("personaStatus", SchemaFieldType.Text, false, MaxLength: 32),
+                new SchemaField("personaRole", SchemaFieldType.Text, false, MaxLength: 24),
+                new SchemaField("masked", SchemaFieldType.Boolean, false),
+            new SchemaField("personaSignature", SchemaFieldType.Text, false, MaxLength: 4),
+            new SchemaField("personaColour", SchemaFieldType.Integer, false, 0, 7),
+            // P13: an intruder standing on the presence node.
+            new SchemaField("threat", SchemaFieldType.Text, false, MaxLength: 24),
+            // P13: the wire node the presence acts from, for tools that seed events there.
+            new SchemaField("node", SchemaFieldType.Text, false, MaxLength: 20)
         ], new Dictionary<string, IReadOnlyList<string>>
         {
             ["full"] = ["status", "presence", "host", "generation", "state", "reason", "to", "arriveIn", "travelSeconds",
-                "route", "radioLegs", "limited", "breakKind", "breakFrom", "breakTo", "others"]
+                "route", "radioLegs", "limited", "breakKind", "breakFrom", "breakTo", "others",
+                "personaName", "personaSignature", "personaColour", "personaStatus", "personaRole", "masked", "threat", "node"]
         }, MaxPayloadBytes: 3072));
         registry.Register(new SchemaDefinition("shell.move_request", 1, 0,
             [new SchemaField("to", SchemaFieldType.Text, true, MaxLength: 64)],
@@ -579,16 +591,72 @@ public sealed class SchemaRegistry
             registry.RegisterCommand("network.shell", presenceCommand, "shell.presence_request", 1, "shell.presence", 1,
                 transient: presenceCommand == "presence");
         registry.RegisterCommand("network.shell", "act", "shell.run_request", 1, "shell.output", 1);
+        // P13 network life: the operator's own identity and the entities that live in the network. Lists
+        // travel as text, the same way every other shell result carries them.
+        registry.Register(new SchemaDefinition("shell.persona_request", 1, 0,
+            [
+                new SchemaField("name", SchemaFieldType.Text, false, MaxLength: 24),
+                new SchemaField("signature", SchemaFieldType.Text, false, MaxLength: 4),
+                new SchemaField("statusLine", SchemaFieldType.Text, false, MaxLength: 32),
+                new SchemaField("role", SchemaFieldType.Text, false, MaxLength: 24),
+                new SchemaField("colour", SchemaFieldType.Integer, false, 0, 7)
+            ],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["name", "signature", "colour", "statusLine", "role"] }, MaxPayloadBytes: 160));
+        registry.Register(new SchemaDefinition("shell.persona", 1, 0,
+            [
+                new SchemaField("status", SchemaFieldType.Enum, true, Values: ["ok", "invalid_argument"]),
+                new SchemaField("reason", SchemaFieldType.Text, false, MaxLength: 16),
+                new SchemaField("personaName", SchemaFieldType.Text, false, MaxLength: 24),
+                new SchemaField("personaSignature", SchemaFieldType.Text, false, MaxLength: 4),
+                new SchemaField("personaColour", SchemaFieldType.Integer, false, 0, 7),
+                new SchemaField("personaStatus", SchemaFieldType.Text, false, MaxLength: 32),
+                new SchemaField("personaRole", SchemaFieldType.Text, false, MaxLength: 24),
+                new SchemaField("masked", SchemaFieldType.Boolean, false),
+            ],
+            new Dictionary<string, IReadOnlyList<string>>
+            {
+                ["full"] = ["status", "reason", "personaName", "personaSignature", "personaColour", "personaStatus", "personaRole"]
+            }, MaxPayloadBytes: 192));
+        registry.RegisterCommand("network.shell", "persona", "shell.persona_request", 1, "shell.persona", 1);
+        registry.Register(new SchemaDefinition("shell.life_request", 1, 0,
+            [new SchemaField("since", SchemaFieldType.Integer, false, 0), new SchemaField("limit", SchemaFieldType.Integer, false, 1, 64)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["since", "limit"] }, MaxPayloadBytes: 64));
+        registry.Register(new SchemaDefinition("shell.life", 1, 0,
+            [
+                new SchemaField("status", SchemaFieldType.Enum, true, Values: ["ok", "no_knowledge"]),
+                // "id|name|signature|colour|goal|node|state|moves" joined by semicolons.
+                new SchemaField("bots", SchemaFieldType.Text, false, MaxLength: 1984),
+                // "seq|kind|node|name|text" joined by semicolons.
+                new SchemaField("activity", SchemaFieldType.Text, false, MaxLength: 3936),
+                // P13: other operators on known nodes: "node|name|signature|colour|state|threat".
+                new SchemaField("presences", SchemaFieldType.Text, false, MaxLength: 4096),
+                new SchemaField("since", SchemaFieldType.Integer, false, 0),
+                new SchemaField("enabled", SchemaFieldType.Boolean, false),
+                new SchemaField("personaName", SchemaFieldType.Text, false, MaxLength: 24),
+                new SchemaField("personaSignature", SchemaFieldType.Text, false, MaxLength: 4),
+                new SchemaField("personaColour", SchemaFieldType.Integer, false, 0, 7),
+                new SchemaField("personaStatus", SchemaFieldType.Text, false, MaxLength: 32),
+                new SchemaField("personaRole", SchemaFieldType.Text, false, MaxLength: 24),
+                new SchemaField("masked", SchemaFieldType.Boolean, false),
+            ],
+            new Dictionary<string, IReadOnlyList<string>>
+            {
+                ["full"] = ["status", "bots", "activity", "presences", "since", "enabled", "personaName", "personaSignature", "personaColour", "personaStatus", "personaRole"]
+            }, MaxPayloadBytes: 7168));
+        registry.RegisterCommand("network.shell", "life", "shell.life_request", 1, "shell.life", 1, transient: true);
         registry.Register(new SchemaDefinition("shell.chat_read", 1, 0,
         [
             new SchemaField("presence", SchemaFieldType.Integer, true, 1, 1_000_000_000),
-            new SchemaField("generation", SchemaFieldType.Integer, true, 1, 1_000_000)
-        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["presence", "generation"] }, MaxPayloadBytes: 96));
+            new SchemaField("generation", SchemaFieldType.Integer, true, 1, 1_000_000),
+            // P13: read the shared channel instead of the node visit.
+            new SchemaField("channel", SchemaFieldType.Boolean, false)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["presence", "generation", "channel"] }, MaxPayloadBytes: 112));
         registry.Register(new SchemaDefinition("shell.chat_send", 1, 0,
         [
             new SchemaField("scope", SchemaFieldType.Text, true, MaxLength: 32),
-            new SchemaField("text", SchemaFieldType.Text, true, MaxLength: ChatTextMaxLength)
-        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["scope", "text"] }, MaxPayloadBytes: 1152));
+            new SchemaField("text", SchemaFieldType.Text, true, MaxLength: ChatTextMaxLength),
+            new SchemaField("channel", SchemaFieldType.Boolean, false)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["scope", "text", "channel"] }, MaxPayloadBytes: 1168));
         registry.Register(new SchemaDefinition("shell.chat", 1, 0,
         [
             new SchemaField("status", SchemaFieldType.Enum, true, Values:
@@ -596,10 +664,57 @@ public sealed class SchemaRegistry
             new SchemaField("node", SchemaFieldType.Text, false, MaxLength: 20),
             new SchemaField("scope", SchemaFieldType.Text, false, MaxLength: 32),
             new SchemaField("received", SchemaFieldType.Integer, false, 0),
-            new SchemaField("messages", SchemaFieldType.Text, false, MaxLength: ChatSnapshotMaxLength)
-        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "node", "scope", "received", "messages"] }, MaxPayloadBytes: AbsoluteMaxPayloadBytes));
+            new SchemaField("messages", SchemaFieldType.Text, false, MaxLength: ChatSnapshotMaxLength),
+            new SchemaField("channel", SchemaFieldType.Boolean, false)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "node", "scope", "received", "messages", "channel"] }, MaxPayloadBytes: AbsoluteMaxPayloadBytes));
         registry.RegisterCommand("network.shell", "chat_read", "shell.chat_read", 1, "shell.chat", 1, transient: true);
         registry.RegisterCommand("network.shell", "chat_send", "shell.chat_send", 1, "shell.chat", 1);
+
+        // P13.5: breaking into a node, the stolen key ring, and masking the operator''s persona.
+        registry.Register(new SchemaDefinition("shell.hack_start", 1, 0,
+            [new SchemaField("node", SchemaFieldType.Text, true, MaxLength: 20)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["node"] }, MaxPayloadBytes: 64));
+        registry.Register(new SchemaDefinition("shell.hack_answer", 1, 0,
+            [new SchemaField("code", SchemaFieldType.Text, true, MaxLength: 16)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["code"] }, MaxPayloadBytes: 64));
+        registry.Register(new SchemaDefinition("shell.hack_keys", 1, 0,
+            [new SchemaField("since", SchemaFieldType.Integer, false, 0)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["since"] }, MaxPayloadBytes: 32));
+        registry.Register(new SchemaDefinition("shell.hack_use", 1, 0,
+            [
+                new SchemaField("node", SchemaFieldType.Text, true, MaxLength: 20),
+                new SchemaField("purpose", SchemaFieldType.Text, false, MaxLength: 24)
+            ],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["node", "purpose"] }, MaxPayloadBytes: 96));
+        registry.Register(new SchemaDefinition("shell.mask", 1, 0,
+            [new SchemaField("on", SchemaFieldType.Boolean, false)],
+            new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["on"] }, MaxPayloadBytes: 32));
+        registry.Register(new SchemaDefinition("shell.hack", 1, 0,
+            [
+                new SchemaField("status", SchemaFieldType.Enum, true, Values:
+                    ["challenge", "ok", "failed", "cooldown", "expired", "no_key", "no_knowledge", "unknown_node",
+                     "invalid_request", "no_presence", "suspended", "moving", "out_of_reach", "no_presence_control",
+                     "masked", "unmasked", "stale"]),
+                new SchemaField("reason", SchemaFieldType.Text, false, MaxLength: 24),
+                new SchemaField("code", SchemaFieldType.Text, false, MaxLength: 16),
+                new SchemaField("target", SchemaFieldType.Text, false, MaxLength: 20),
+                new SchemaField("label", SchemaFieldType.Text, false, MaxLength: 64),
+                new SchemaField("node", SchemaFieldType.Text, false, MaxLength: 20),
+                new SchemaField("keys", SchemaFieldType.Text, false, MaxLength: 1024),
+                new SchemaField("masked", SchemaFieldType.Boolean, false),
+                new SchemaField("expires", SchemaFieldType.Integer, false, 0, 1_000_000_000),
+                new SchemaField("expiresIn", SchemaFieldType.Integer, false, 0, 1_000_000),
+                new SchemaField("retryIn", SchemaFieldType.Integer, false, 0, 1_000_000)
+            ],
+            new Dictionary<string, IReadOnlyList<string>>
+            {
+                ["full"] = ["status", "reason", "code", "target", "label", "node", "keys", "masked", "expires", "expiresIn", "retryIn"]
+            }, MaxPayloadBytes: 2048));
+        registry.RegisterCommand("network.shell", "hack_start", "shell.hack_start", 1, "shell.hack", 1, transient: true);
+        registry.RegisterCommand("network.shell", "hack_answer", "shell.hack_answer", 1, "shell.hack", 1);
+        registry.RegisterCommand("network.shell", "hack_keys", "shell.hack_keys", 1, "shell.hack", 1, transient: true);
+        registry.RegisterCommand("network.shell", "hack_use", "shell.hack_use", 1, "shell.hack", 1);
+        registry.RegisterCommand("network.shell", "mask", "shell.mask", 1, "shell.hack", 1);
         registry.Register(new SchemaDefinition("shell.alarm_poll", 1, 0,
             [new SchemaField("instance", SchemaFieldType.Text, true, MaxLength: 64)],
             new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["instance"] }, MaxPayloadBytes: 128));

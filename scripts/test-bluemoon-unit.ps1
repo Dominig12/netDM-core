@@ -45,7 +45,7 @@ $LogDirectory = "$LogDirectory-" + (Get-Date -Format 'HHmmss')
 $logRoot = Join-Path $build "data/logs/$LogDirectory"
 # The research ledger journal of this run's round lies next to its logs.
 $hostEnv = $common + @{ NetDM__HttpPort = "$port"; Logging__LogLevel__Default = 'Warning'; Logging__LogLevel__NetDM = 'Information'
-    NetDM__ResearchDirectory = (Join-Path $logRoot 'research') }
+    NetDM__ResearchDirectory = (Join-Path $logRoot 'research'); NetDM__NetLife = '1' }
 $host_ = $null
 try {
     $host_ = Start-Logged (Get-Command dotnet).Source @($hostPath) $hostEnv (Split-Path $hostPath) 'host.log'
@@ -61,6 +61,8 @@ try {
     $gameEnv.NETDM_MESSENGER_MODE = $MessengerMode
     $gameEnv.NETDM_RADIO_MODE = $RadioMode
     if ($NetworkCameras) { $gameEnv.NETDM_CAMERA_MODE = 'authoritative' }
+# The dive layer is opt-in per round: the automated test round enables it explicitly.
+$gameEnv.NETDM_NET_IMMERSION = '1'
     $params = "log-directory=$LogDirectory&unit-test-list=$list"
     if ($Map) { $params += "&unit-test-map=$Map" }
     $started = Get-Date
