@@ -599,7 +599,8 @@ public static class ShellHost
                 var fields = new Dictionary<string, object>(StringComparer.Ordinal)
                 {
                     ["kind"] = "event", ["sequence"] = item.Sequence, ["delivery"] = item.DeliveryId,
-                    ["key"] = item.SubscriptionKey, ["instance"] = item.Instance, ["schema"] = item.Schema
+                    ["key"] = item.SubscriptionKey, ["instance"] = item.Instance, ["schema"] = item.Schema,
+                    ["ack"] = item.Applied ? "applied" : "rejected", ["reason"] = item.Reason ?? ""
                 };
                 foreach (var field in item.Payload.EnumerateObject().Take(24))
                 {
