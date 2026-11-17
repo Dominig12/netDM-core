@@ -584,12 +584,15 @@ public static class ShellHost
         {
             var key = arguments.Named.GetValueOrDefault("key") as string;
             var current = session.Services.EventRevisionOf(command.Initiator);
-            var start = eventAfter ?? Math.Max(0, current - Math.Min(16, maxRecords));
-            var page = session.Services.AcknowledgedEvents(command.Initiator, start, Math.Min(16, maxRecords));
+            // Reserve room for the overflow marker when the caller sets a narrow record budget.
+            // A one-record budget still advances with data; it cannot carry two rows at once.
+            var eventLimit = maxRecords > 1 && maxRecords <= 16 ? maxRecords - 1 : Math.Min(16, maxRecords);
+            var start = eventAfter ?? Math.Max(0, current - Math.Max(1, eventLimit));
+            var page = session.Services.AcknowledgedEvents(command.Initiator, start, Math.Max(1, eventLimit));
             EventReadThrough = page.Through;
             EventLatest = page.Latest;
             var result = new List<ShellRecord>();
-            if (page.Overflowed)
+            if (page.Overflowed && maxRecords > page.Events.Count)
                 result.Add(Record(("kind", "overflow"), ("key", key ?? ""), ("instance", ""),
                     ("schema", ""), ("sequence", page.Through), ("delivery", 0L)));
             foreach (var item in page.Events)
