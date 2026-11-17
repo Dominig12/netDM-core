@@ -703,6 +703,10 @@ public static class ShellPrograms
                 Throttle(program, now);
                 continue;
             }
+            // Detach/rebind in the same transport stream can retire a reader without
+            // retiring a durable program. Its old cursor must not suppress new events.
+            if (program.IsEventRule && program.EventCursor > session.Services.EventRevisionOf(program.Owner))
+                program.EventCursor = 0;
             var scope = new ShellHost.Scope(program.Owner, program.Instance, origin, null,
                 $"pg.{_stream:N}.{program.Id.ToString(CultureInfo.InvariantCulture)}.{program.Runs.ToString(CultureInfo.InvariantCulture)}.{program.Phase.ToString(CultureInfo.InvariantCulture)}",
                 program.Owner == program.Provider ? program.Provider : null);
