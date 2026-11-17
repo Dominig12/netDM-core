@@ -21,6 +21,17 @@ static class ShellSmokeTests
                     return All.Where(record => type is null || (string)record["type"]! == type).Take(maxRecords).ToArray();
                 case "many":
                     return Enumerable.Range(0, (int)(long)arguments.Positional[0]).Select(index => Record(("n", (long)index))).ToArray();
+                case "events":
+                    var key = arguments.Named.GetValueOrDefault("key") as string;
+                    return new[]
+                    {
+                        Record(("kind", "event"), ("key", "oxygen"), ("instance", "sensor.o2"),
+                            ("sequence", 12L), ("pressureKPa", 151.5), ("ack", "applied")),
+                        Record(("kind", "event"), ("key", "oxygen"), ("instance", "sensor.o2"),
+                            ("sequence", 13L), ("pressureKPa", 90.0), ("ack", "rejected")),
+                        Record(("kind", "event"), ("key", "temperature"), ("instance", "sensor.temp"),
+                            ("sequence", 14L), ("pressureKPa", 170.0), ("ack", "applied"))
+                    }.Where(record => key is null || (string)record["key"]! == key).Take(maxRecords).ToArray();
                 case "broken":
                     error = "no answer";
                     return null;
@@ -168,7 +179,17 @@ static class ShellSmokeTests
         Check(Script(string.Join("\n", Enumerable.Range(0, 9).Select(index => $"$v{index} = self"))).Status == ShellStatus.LimitExceeded,
             "a script holds a bounded number of variables");
         Check(Script("$big = many 200\n$big | count", new ShellLimits(Fuel: 150)).Status == ShellStatus.FuelExhausted, "reading a variable costs fuel");
-        Console.WriteLine("Network shell pipeline, scripts, variables, actions, limits and fuel checks passed.");
+        var eventRule = NetShell.Run("events -key oxygen | where pressureKPa -gt 130", source);
+        Check(eventRule is { Ok: true, Records.Count: 1 } &&
+            (double)eventRule.Records[0]["pressureKPa"]! == 151.5 &&
+            (string)eventRule.Records[0]["ack"]! == "applied",
+            "typed event source supports ordinary filters and subscription keys");
+        var eventPhase = NetShell.RunScript("$event = events -key oxygen | where pressureKPa -gt 130\n$event | count",
+            source);
+        Check(eventPhase is { Ok: true, Records.Count: 1 } &&
+            (long)eventPhase.Records[0]["count"]! == 1,
+            "event data can be passed into the existing script variables and pipeline runtime");
+        Console.WriteLine("Network shell pipeline, scripts, variables, actions, event filtering, limits and fuel checks passed.");
     }
 
     private static void Check(bool condition, string message)
