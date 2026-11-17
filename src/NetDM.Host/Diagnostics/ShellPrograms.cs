@@ -463,6 +463,7 @@ public static class ShellPrograms
         }
         if (command.Command == "migrate")
             return Migrate(session, command, arguments, out applied);
+        var checkOnly = command.Command == "check";
         var name = arguments.GetProperty("name").GetString() ?? "";
         var text = arguments.GetProperty("source").GetString() ?? "";
         object Refuse(string status, string error, int position = 0) => new { status, error = ShellHost.Printable(error), position };
@@ -498,8 +499,8 @@ public static class ShellPrograms
             };
             return JsonSerializer.SerializeToElement(new { status = "running", program = kept.Id });
         }
-        if (Programs.Count(program => !program.Finished && program != kept) >= MaxTotal ||
-            Programs.Count(program => !program.Finished && program != kept && program.Instance == command.Instance) >= MaxPerDevice)
+        if (!checkOnly && (Programs.Count(program => !program.Finished && program != kept) >= MaxTotal ||
+            Programs.Count(program => !program.Finished && program != kept && program.Instance == command.Instance) >= MaxPerDevice))
             return JsonSerializer.SerializeToElement(Refuse("limit_exceeded", $"a device holds at most {MaxPerDevice} programs"));
 
         // Optional observe declarations precede on events; they never act during validation.
@@ -570,6 +571,8 @@ public static class ShellPrograms
             if (!checkedPhase.Ok)
                 return JsonSerializer.SerializeToElement(Refuse(Code(checkedPhase.Status), checkedPhase.Error ?? "", start + checkedPhase.Position));
         }
+        if (checkOnly)
+            return JsonSerializer.SerializeToElement(new { status = "valid" }); // No ID allocated, no mutation, no actions.
         var started = new Program
         {
             Id = ++_nextId, Name = name, Instance = command.Instance, Owner = command.InitiatorKey, Provider = command.ProviderKey,
