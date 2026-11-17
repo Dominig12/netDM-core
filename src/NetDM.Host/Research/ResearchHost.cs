@@ -15,11 +15,14 @@ namespace NetDM.Host.Research;
 /// simulated network: such commands arrive here through <see cref="ServiceRuntime.TakeHostCommands"/>
 /// once their packet reached the server's node, and the answer travels back as a result leg.
 /// </summary>
-public sealed class ResearchHost(GameNetworkService game, IConfiguration configuration, ILogger<ResearchHost> log)
+public sealed class ResearchHost(GameNetworkService game, IConfiguration configuration, ILogger<ResearchHost> log,
+    IEnumerable<IHostServiceExtension>? hostServices = null)
     : BackgroundService
 {
     public const string ServiceType = "research.server";
     public const string InstancePrefix = "research.";
+    private readonly IReadOnlyDictionary<string, IHostServiceExtension> _hostHandlers =
+        (hostServices ?? []).ToDictionary(extension => extension.ServiceType, StringComparer.Ordinal);
     private const int MaxCatalogChunks = 64;
     /// <summary>This loop serves every service the Host runs for a device; diagnostics publishes from it too.</summary>
     private readonly Diagnostics.DiagnosticsHost.Watch _diagnosticsWatch = Diagnostics.DiagnosticsHost.Watch.Links();
@@ -474,14 +477,17 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
         {
             Action? applied = null;
             Interlocked.Increment(ref _commands);
-            // One queue serves every service the Host runs for a device; each type answers its own.
-            var result = command.ServiceType switch
+            // Only research commands go to the ledger; every other Host service must
+            // explicitly register its own handler, otherwise it is rejected.
+            if (command.ServiceType != ServiceType && !_hostHandlers.TryGetValue(command.ServiceType, out _))
             {
-                Diagnostics.DiagnosticsHost.ServiceType => Diagnostics.DiagnosticsHost.Answer(game, command),
-                Diagnostics.QueryHost.ServiceType => Diagnostics.QueryHost.Answer(session, command),
-                Diagnostics.ShellHost.ServiceType => Diagnostics.ShellHost.Answer(game, session, command, out applied),
-                _ => Answer(command)
-            };
+                services.Acknowledge(command.DeliveryId, false, "host_service_unhandled");
+                Interlocked.Increment(ref _lateAnswers);
+                continue;
+            }
+            var result = command.ServiceType == ServiceType
+                ? Answer(command)
+                : _hostHandlers[command.ServiceType].Answer(game, command, out applied);
             var (status, _) = services.Acknowledge(command.DeliveryId, true, null, result);
             if (status == ServiceStatus.Ok)
             {

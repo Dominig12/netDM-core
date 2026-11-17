@@ -10,3 +10,7 @@
 Ни один `IHostIpcModule` не должен предоставлять обход доставки DM → DM через прямой доступ к мировым объектам. В отличие от команд нового сервиса, локальные IPC-команды управляют только состоянием самого Host (топология, регистрируемые доменные данные, bootstrap). Их вызовы ограничены согласованием v1, owner fence, stream id и порядковым номером команды на уровне `PipeHostedService`.
 
 Готовность сети проверяется перед исполнением модулей, требующих `RequiresNetworkReady`. Изменение или расширение протокола требует собственных контрактов, лимитов payload, версионирования и тестов на недостаточную готовность и повторное исполнение. `PipeHostedService` сохраняет владение сессией и IPC-транспортом.
+
+## Host-provided network services
+
+When a command has physically reached a Host-provided service endpoint, it must be answered by a registered `IHostServiceExtension`, not by a large switch in `ResearchHost`. Implement `ServiceType` and `Answer(GameNetworkService, HostCommand, out Action?)` in a stateless handler, then add one DI registration. `GameNetworkService` derives the Host service type set from the same registrations; an unknown or duplicate name fails closed. The built-in `research.server` is kept local to `ResearchHost`, which owns its durable ledger. The optional post-ack callback is invoked only when the service successfully acknowledges an arrived command. Do not execute DM gameplay effects from these handlers.

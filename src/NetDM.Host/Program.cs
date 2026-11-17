@@ -46,6 +46,10 @@ builder.Services.AddSingleton<IHostIpcModule, ResearchIpcModule>();
 builder.Services.AddSingleton<IHostIpcModule, RadioReachIpcModule>();
 builder.Services.AddSingleton<IHostIpcModule, NetworkLifeIpcModule>();
 builder.Services.AddSingleton<HostIpcModuleRouter>();
+// Every registered feature also adds its service type to the Host delivery queue.
+builder.Services.AddSingleton<IHostServiceExtension, DiagnosticsHostService>();
+builder.Services.AddSingleton<IHostServiceExtension, QueryHostService>();
+builder.Services.AddSingleton<IHostServiceExtension, ShellHostService>();
 builder.Services.AddSingleton<GameNetworkService>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<GameNetworkService>());
 builder.Services.AddSingleton<NetDM.Host.Research.ResearchHost>();

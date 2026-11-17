@@ -21,9 +21,7 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
     /// A message server relays to every recipient from one endpoint, so an endpoint may run 32
     /// operations at once instead of 8.
     /// </summary>
-    private static readonly ServiceRuntimeOptions ServiceOptions = new(HostProvidedTypes: ["research.server", NetDM.Host.Diagnostics.DiagnosticsHost.ServiceType,
-        NetDM.Host.Diagnostics.QueryHost.ServiceType, NetDM.Host.Diagnostics.ShellHost.ServiceType],
-        MaxActiveOperationsPerEndpoint: 32);
+    private readonly ServiceRuntimeOptions _serviceOptions;
     private const int MaxDeliverySubmissions = 256;
     private int _deliverySubmissions;
     private readonly object _drainGate = new();
@@ -45,9 +43,20 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
 
     public GameNetworkService(PriorityWorkScheduler scheduler,
         IHostApplicationLifetime? application = null, ILogger<GameNetworkService>? log = null,
-        IEnumerable<IServiceContractModule>? contractModules = null)
+        IEnumerable<IServiceContractModule>? contractModules = null,
+        IEnumerable<IHostServiceExtension>? hostServices = null)
     {
         _schemas = SchemaRegistry.CreateDefault(contractModules);
+        // Names and handlers share one DI registration: adding a Host-provided feature
+        // no longer requires editing the GameNetworkService service-type list.
+        var types = new HashSet<string>(StringComparer.Ordinal) { NetDM.Host.Research.ResearchHost.ServiceType };
+        foreach (var extension in hostServices ?? [])
+        {
+            if (!ServiceNames.IsValid(extension.ServiceType) || !types.Add(extension.ServiceType))
+                throw new ArgumentException($"Duplicate or invalid Host service type '{extension.ServiceType}'.");
+        }
+        _serviceOptions = new ServiceRuntimeOptions(
+            HostProvidedTypes: types.ToArray(), MaxActiveOperationsPerEndpoint: 32);
         _session = CreateSession();
         _scheduler = scheduler;
         _application = application;
@@ -62,7 +71,7 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
         var medium = new SharedMediumNetwork(runtime ?? new NetworkRuntime(), bytesPerTick: 8192,
             searchMode: SharedRadioSearchMode.AStarDense,
             airtimeScope: RadioAirtimeScope.SpatialCells);
-        var services = new ServiceRuntime(_schemas, Now, ServiceOptions);
+        var services = new ServiceRuntime(_schemas, Now, _serviceOptions);
         var packets = new RadioPacketTransport(medium, new PacketTransportOptions(
             Capacity: 4096, MaxAgeTicks: 900, MaxAdvancesPerTick: 4096,
             MaxPendingReroutes: 64, MaxConcurrentReroutes: 2,
