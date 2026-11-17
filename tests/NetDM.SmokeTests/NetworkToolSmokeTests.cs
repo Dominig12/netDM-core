@@ -73,6 +73,33 @@ static class NetworkToolSmokeTests
             control with { Key = "press.3" }).Status == ServiceStatus.UnknownEndpoint,
             "unattached NPC/program cannot fabricate an actor");
 
+        // A real air alarm publishes changes to a typed service; watches receive ordinary
+        // transport deliveries, not a direct call into another DM object.
+        Check(services.RegisterService(machine, "atmos.alarm.test", "atmos.alarm", "atmos.alarm_state", 1, 0) ==
+            ServiceStatus.Ok, "register alarm event stream");
+        var alarmWatch = toolkit.Execute(viewer, new NetworkToolRequest(NetworkToolKind.Watch,
+            "atmos.alarm.test", Key: "alarm-events"));
+        Check(alarmWatch.Status == ServiceStatus.Ok && alarmWatch.Subscription > 0,
+            "subscribe to atmospheric alarm transitions");
+        var transition = toolkit.Execute(new NetworkToolActor(machine, Publisher: machine),
+            new NetworkToolRequest(NetworkToolKind.Publish, "atmos.alarm.test",
+                Payload: JsonSerializer.SerializeToElement(new
+                {
+                    pressureKPa = 108.5, temperatureK = 293.0, danger = 1, alarm = true
+                })));
+        Check(transition.Status == ServiceStatus.Ok && transition.Recipients == 1,
+            "a subscribed console receives a network event from a changed alarm");
+        Check(toolkit.Execute(viewer, new NetworkToolRequest(NetworkToolKind.Unwatch, "alarm-events")).Status ==
+            ServiceStatus.Ok, "remove alarm observation");
+        var afterUnwatch = toolkit.Execute(new NetworkToolActor(machine, Publisher: machine),
+            new NetworkToolRequest(NetworkToolKind.Publish, "atmos.alarm.test",
+                Payload: JsonSerializer.SerializeToElement(new
+                {
+                    pressureKPa = 101.3, temperatureK = 293.0, danger = 0, alarm = false
+                })));
+        Check(afterUnwatch.Status == ServiceStatus.Ok && afterUnwatch.Recipients == 0,
+            "unwatch stops sending alarm changes to the removed subscriber");
+
         // Both the publication and the invocation are queued as real physical submissions.
         Check(services.TakeSubmissions(32).Length >= 2,
             "tools must use ServiceRuntime transport outbox rather than local gameplay callbacks");
