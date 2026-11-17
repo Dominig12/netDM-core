@@ -82,6 +82,12 @@ static class NetworkLifeSmokeTests
         for (var i = 0; i < NetworkLifeRuntime.MaxActivity + 20; i++)
             state.Record("watch", new NodeId(1), "watcher", "watch");
         Check(state.Activities.Count == NetworkLifeRuntime.MaxActivity, "activity queue remains bounded");
+        state.Record("over|long", new NodeId(1), "evil;name", new string('x', 999));
+        var last = state.Activities.Last();
+        Check(last.Text.Length == 160 && last.Kind == "over long" && last.Name == "evil name",
+            "extension-origin activity fields are truncated and frame-safe");
+        Check(NetworkLifeRuntime.BoundedText("abc|;\n", 4) == "abc ",
+            "extension-origin chat text is frame-safe");
 
         for (var i = 0; i < NetworkLifeRuntime.MaxPersonas + 12; i++)
             state.SetPersona(new EndpointKey($"operator-{i + 100}", 1), new NetworkPersona { Name = "operator" });
