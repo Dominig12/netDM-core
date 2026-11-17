@@ -184,7 +184,7 @@ static class ShellSmokeTests
             (double)eventRule.Records[0]["pressureKPa"]! == 151.5 &&
             (string)eventRule.Records[0]["ack"]! == "applied",
             "typed event source supports ordinary filters and subscription keys");
-        var eventPhase = NetShell.RunScript("$event = events -key oxygen | where pressureKPa -gt 130\n$event | count",
+        var eventPhase = NetShell.RunScript("$incoming = events -key oxygen | where pressureKPa -gt 130\n$incoming | count",
             source);
         Check(eventPhase is { Ok: true, Records.Count: 1 } &&
             (long)eventPhase.Records[0]["count"]! == 1,
