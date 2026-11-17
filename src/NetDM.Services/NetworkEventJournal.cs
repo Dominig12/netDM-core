@@ -5,7 +5,7 @@ namespace NetDM.Services;
 
 /// <summary>One application-acknowledged, typed network event, scoped to its receiving endpoint.</summary>
 public sealed record NetworkObservedEvent(long Sequence, long DeliveryId, string SubscriptionKey,
-    string Instance, string Schema, JsonElement Payload);
+    string Instance, string Schema, JsonElement Payload, bool Applied, string? Reason);
 
 public sealed record NetworkEventPage(long Through, long Latest, bool Overflowed,
     IReadOnlyList<NetworkObservedEvent> Events);
@@ -43,8 +43,9 @@ public sealed class NetworkEventJournal
 
     public long Revision(EndpointKey owner) => _readers.GetValueOrDefault(owner)?.Sequence ?? 0;
 
-    /// <summary>Called solely after a successful application acknowledgement of a real event delivery.</summary>
-    public void Record(EndpointKey receiver, long delivery, string? key, string instance, string schema, byte[]? payload)
+    /// <summary>Called only after an application ACK of a real event delivery, regardless of the world's verdict.</summary>
+    public void Record(EndpointKey receiver, long delivery, string? key, string instance, string schema,
+        byte[]? payload, bool applied, string? reason)
     {
         if (!_readers.TryGetValue(receiver, out var reader) || key is not { Length: > 0 } ||
             payload is null || payload.Length > MaxPayloadBytes || reader.Sequence == long.MaxValue)
@@ -53,7 +54,7 @@ public sealed class NetworkEventJournal
         if (document.RootElement.ValueKind != JsonValueKind.Object)
             return;
         reader.Events.Enqueue(new NetworkObservedEvent(++reader.Sequence, delivery, key, instance,
-            schema, document.RootElement.Clone()));
+            schema, document.RootElement.Clone(), applied, reason));
         while (reader.Events.Count > MaxEventsPerReader)
             reader.Events.Dequeue();
     }
