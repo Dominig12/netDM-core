@@ -257,7 +257,7 @@ public static partial class NetworkSpace
         for (var step = 0; step < bots && actions < BotActionsPerPass; step++)
         {
             var index = (int)(Life.BotCursor++ % (uint)Math.Max(1, bots));
-            var bot = Bots[index];
+            var bot = Life.Bots[index];
             if (now < bot.NextAt)
                 continue;
             actions++;
@@ -323,7 +323,7 @@ public static partial class NetworkSpace
             Life.NextChannelChatter = now + Random.Shared.Next(20_000, 40_000);
             if (Life.Bots.Count > 0)
             {
-                var chatter = Bots[Random.Shared.Next(Life.Bots.Count)];
+                var chatter = Life.Bots[Random.Shared.Next(Life.Bots.Count)];
                 EnqueueChannel(new ChatMessage(Guid.NewGuid().ToString("N"), default, chatter.Name,
                     GoalText(chatter.Goal, chatter.Node), now));
             }
