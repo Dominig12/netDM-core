@@ -97,9 +97,9 @@ public static partial class NetworkSpace
             var wantedColour = arguments.TryGetProperty("colour", out var colour) && colour.TryGetInt32(out var parsedColour)
                 ? parsedColour : persona?.Colour ?? 0;
             var wantedStatus = arguments.TryGetProperty("statusLine", out var statusLine) && statusLine.ValueKind == JsonValueKind.String
-                ? statusLine.GetString()?.Trim() : persona?.Status;
+                ? statusLine.GetString()?.Trim() : persona?.Status ?? "";
             var wantedRole = arguments.TryGetProperty("role", out var role) && role.ValueKind == JsonValueKind.String
-                ? role.GetString()?.Trim() : persona?.Role;
+                ? role.GetString()?.Trim() : persona?.Role ?? "";
             if (wantedName is null || wantedName.Length is 0 or > MaxPersonaName || !Printable(wantedName))
                 return JsonSerializer.SerializeToElement(new { status = "invalid_argument", reason = "name" });
             if (wantedSignature is null || wantedSignature.Length > MaxSignature || !Printable(wantedSignature))
