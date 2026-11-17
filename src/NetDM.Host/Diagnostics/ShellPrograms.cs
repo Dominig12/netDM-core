@@ -415,8 +415,15 @@ public static class ShellPrograms
         foreach (var (id, declaration) in desired)
         {
             if (WatchLeases.TryGetValue(id, out var lease) &&
-                lease.Declaration == declaration && lease.DirectoryRevision == revision && now < lease.RetryAt)
-                continue;
+                lease.Declaration == declaration && now < lease.RetryAt &&
+                (lease.DirectoryRevision == revision ||
+                 session.Services.HasSubscription(id.Owner, id.Key, declaration.Instance,
+                     declaration.Projection, declaration.Mode, declaration.MaxPending)))
+            {
+                if (lease.DirectoryRevision != revision)
+                    WatchLeases[id] = lease with { DirectoryRevision = revision };
+                continue; // Registry growth is not a reason to re-subscribe an intact lease.
+            }
             var result = tools.Execute(new NetworkToolActor(id.Owner),
                 new NetworkToolRequest(NetworkToolKind.Watch, declaration.Instance,
                     Key: id.Key, Projection: declaration.Projection,
