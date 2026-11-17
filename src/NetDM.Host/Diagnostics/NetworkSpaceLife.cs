@@ -93,7 +93,7 @@ public static partial class NetworkSpace
         {
             var wantedName = name.ValueKind == JsonValueKind.String ? name.GetString()?.Trim() : persona?.Name;
             var wantedSignature = arguments.TryGetProperty("signature", out var signature) && signature.ValueKind == JsonValueKind.String
-                ? signature.GetString()?.Trim() : persona?.Signature;
+                ? signature.GetString()?.Trim() : persona?.Signature ?? "";
             var wantedColour = arguments.TryGetProperty("colour", out var colour) && colour.TryGetInt32(out var parsedColour)
                 ? parsedColour : persona?.Colour ?? 0;
             var wantedStatus = arguments.TryGetProperty("statusLine", out var statusLine) && statusLine.ValueKind == JsonValueKind.String
