@@ -102,6 +102,7 @@ CheckRadioOracle();
 CheckRoutingEquivalence();
 CheckRouteCacheBudgets();
 ServiceSmokeTests.Run();
+NetworkToolSmokeTests.Run();
 CheckAreaWiring();
 CheckForwardingRoles();
 DeviceAttachmentSmokeTests.Run();

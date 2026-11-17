@@ -123,16 +123,37 @@ public static class ShellHost
     internal sealed class Sink(GameNetworkService.Session session, Scope command) : IShellSink
     {
         private readonly string _keyPrefix = command.KeyPrefix;
+        private readonly NetworkInteractionTools _tools = new(session.Services);
+        private readonly NetworkToolActor _actor = new(command.Initiator, command.Publisher,
+            command.InvocationHost, command.InvocationHost is null ? null : command.Instance,
+            command.InvocationHost is null ? null : command.Origin);
         private int _ordinal;
         public List<ShellRecord> Results { get; } = [];
 
-        public bool Knows(string name) => name is "invoke" or "publish";
+        public bool Knows(string name) => name is "invoke" or "publish" or "watch" or "unwatch";
 
         internal static string? Validate(string name, ShellArguments arguments, bool piped)
         {
             if (name == "publish")
                 return piped && arguments.Positional.Count + arguments.Named.Count == 0 ? null : "… | publish";
-            return arguments.Positional.Count == (piped ? 1 : 2) &&
+            if (name == "unwatch")
+                return !piped && arguments.Named.Count == 0 && arguments.Positional is [string key] &&
+                    ServiceNames.IsValid(key) ? null : "unwatch <subscription-key>";
+            if (name == "watch")
+            {
+                var validNames = arguments.Named.All(pair => pair switch
+                {
+                    { Key: "key" or "projection", Value: string value } => ServiceNames.IsValid(value),
+                    { Key: "mode", Value: string value } => value is "latest" or "queue",
+                    { Key: "pending", Value: long count } => count is >= 1 and <= 16,
+                    _ => false
+                });
+                return validNames && arguments.Positional.Count == (piped ? 0 : 1) &&
+                    arguments.Positional.All(word => word is string target && ServiceNames.IsValid(target))
+                    ? null : "watch <instance> [-key K] [-projection full] [-mode latest|queue] [-pending 1..16]";
+            }
+            return name == "invoke" &&
+                arguments.Positional.Count == (piped ? 1 : 2) &&
                 arguments.Positional.All(word => word is string text && ServiceNames.IsValid(text)) ? null :
                 piped ? "… | invoke <command> [name=value…]" : "invoke <instance> <command> [name=value…]";
         }
@@ -144,50 +165,82 @@ public static class ShellHost
                 return null;
             if (name == "publish")
                 return Publish(input!, out error);
+            if (name == "unwatch")
+            {
+                var key = (string)arguments.Positional[0];
+                var receipt = _tools.Execute(_actor, new NetworkToolRequest(NetworkToolKind.Unwatch, key));
+                ShellRecord[] result = [Record(("key", key),
+                    ("status", ServiceNames.Code(receipt.Status)))];
+                Results.AddRange(result);
+                return result;
+            }
+
             var targets = input is null
                 ? [(string)arguments.Positional[0]]
                 : input.Select(record => record["instance"] as string).ToArray();
             if (targets.Any(target => !ServiceNames.IsValid(target)))
             {
-                error = "every record needs an instance to invoke";
+                error = "every record needs an instance to invoke or watch";
                 return null;
             }
-            var verb = (string)arguments.Positional[^1];
-            var payload = JsonSerializer.SerializeToElement(arguments.Named);
+            if (name == "watch" && targets.Length > 1 && arguments.Named.ContainsKey("key"))
+            {
+                error = "multiple watch targets need distinct keys; omit -key";
+                return null;
+            }
+
             var done = new List<ShellRecord>(targets.Length);
             for (var i = 0; i < targets.Length; i++)
             {
                 var instance = targets[i]!;
-                string status, operation = "";
-                // Visibility is the asker's; a line may not start further lines.
+                // A remote shell line is bound to the original delivery and may not
+                // discover another actor's private service through the Host.
                 var descriptor = command.DeliveryId is { } delivery
                     ? session.Services.QueryService(delivery, instance, false)?.Descriptor
                     : session.Services.Describe(command.Initiator, instance);
                 if (descriptor is null)
-                    status = "unknown_service";
-                else if (descriptor.ServiceType == ServiceType)
-                    status = "forbidden";
-                else
                 {
-                    var key = $"{_keyPrefix}.{(_ordinal++).ToString(CultureInfo.InvariantCulture)}";
-                    var result = command.InvocationHost is { } host
-                        ? session.Services.InvokeFrom(command.Initiator, host, command.Instance, command.Origin, instance,
-                            verb, key, payload, null, PacketTrafficClass.Interactive)
-                        : session.Services.Invoke(command.Initiator, instance, verb, key, payload, null, PacketTrafficClass.Interactive);
-                    status = result.Status == ServiceStatus.Ok ? "sent" : ServiceNames.Code(result.Status);
-                    operation = result.Operation?.OperationId.ToString(CultureInfo.InvariantCulture) ?? "";
+                    done.Add(Record(("instance", instance), ("status", "unknown_service")));
+                    continue;
                 }
-                done.Add(Record(("instance", instance), ("command", verb), ("status", status), ("operation", operation)));
+                if (name == "watch")
+                {
+                    var key = arguments.Named.TryGetValue("key", out var explicitKey)
+                        ? (string)explicitKey : instance;
+                    var projection = arguments.Named.TryGetValue("projection", out var selected)
+                        ? (string)selected : "full";
+                    var mode = arguments.Named.TryGetValue("mode", out var modeValue) && (string)modeValue == "queue"
+                        ? DeliveryMode.Queue : DeliveryMode.LatestValue;
+                    var pending = arguments.Named.TryGetValue("pending", out var requested)
+                        ? checked((int)(long)requested) : 1;
+                    var receipt = _tools.Execute(_actor, new NetworkToolRequest(NetworkToolKind.Watch,
+                        instance, Key: key, Projection: projection, Mode: mode, MaxPending: pending));
+                    done.Add(Record(("instance", instance), ("key", key),
+                        ("status", receipt.Status is ServiceStatus.Ok or ServiceStatus.Duplicate
+                            ? "watching" : ServiceNames.Code(receipt.Status)), ("subscription", receipt.Subscription)));
+                    continue;
+                }
+
+                var verb = (string)arguments.Positional[^1];
+                if (descriptor.ServiceType == ServiceType)
+                {
+                    done.Add(Record(("instance", instance), ("command", verb),
+                        ("status", "forbidden"), ("operation", "")));
+                    continue;
+                }
+                var payload = JsonSerializer.SerializeToElement(arguments.Named);
+                var keyForAction = $"{_keyPrefix}.{(_ordinal++).ToString(CultureInfo.InvariantCulture)}";
+                var outcome = _tools.Execute(_actor, new NetworkToolRequest(NetworkToolKind.Invoke,
+                    instance, verb, keyForAction, payload));
+                done.Add(Record(("instance", instance), ("command", verb),
+                    ("status", outcome.Status == ServiceStatus.Ok ? "sent" : ServiceNames.Code(outcome.Status)),
+                    ("operation", outcome.Operation > 0 ? outcome.Operation.ToString(CultureInfo.InvariantCulture) : "")));
             }
             Results.AddRange(done);
             return done;
         }
 
-        /// <summary>
-        /// <c>… | publish</c>: the records become the next publication of the device's shell service
-        /// (<c>shell.output</c>), delivered to its subscribers like any service's. Only the device itself
-        /// publishes for itself; a line another endpoint asked for is refused.
-        /// </summary>
+        /// <summary>The device publishes only from its own endpoint; all recipients get routed deliveries.</summary>
         private IReadOnlyList<ShellRecord>? Publish(IReadOnlyList<ShellRecord> input, out string? error)
         {
             error = null;
@@ -197,20 +250,12 @@ public static class ShellHost
                 error = "publication too long: select fewer fields or records";
                 return null;
             }
-            string status;
-            long recipients = 0;
-            if (command.Publisher is not { } publisher)
-                status = "forbidden";
-            else
-            {
-                var sequence = (session.Services.LastSequence(publisher, command.Instance) ?? 0) + 1;
-                var payload = JsonSerializer.SerializeToElement(new { status = "ok", count = input.Count, fuel = 0, rows });
-                var published = session.Services.Publish(publisher, command.Instance, sequence, payload, null, PacketTrafficClass.Background);
-                status = published.Status == ServiceStatus.Ok ? "published" : ServiceNames.Code(published.Status);
-                recipients = published.Recipients;
-            }
-            ShellRecord[] done = [Record(("instance", command.Instance), ("command", "publish"), ("status", status), ("operation", ""),
-                ("recipients", recipients))];
+            var payload = JsonSerializer.SerializeToElement(new { status = "ok", count = input.Count, fuel = 0, rows });
+            var result = _tools.Execute(_actor, new NetworkToolRequest(NetworkToolKind.Publish,
+                command.Instance, Payload: payload, Traffic: PacketTrafficClass.Background));
+            ShellRecord[] done = [Record(("instance", command.Instance), ("command", "publish"),
+                ("status", result.Status == ServiceStatus.Ok ? "published" : ServiceNames.Code(result.Status)),
+                ("operation", ""), ("recipients", result.Recipients))];
             Results.AddRange(done);
             return done;
         }
@@ -243,7 +288,9 @@ public static class ShellHost
             ("last", "filter", "last [N]", "Последние N записей."),
             ("count", "filter", "count", "Сколько записей пришло."),
             ("invoke", "action", "invoke <instance> <command> [name=value…]", "Отправить команду сервису."),
-            ("publish", "action", "… | publish", "Опубликовать записи в свой сервис.")
+            ("publish", "action", "… | publish", "Опубликовать записи в свой сервис."),
+            ("watch", "action", "watch <instance> [-key K] [-projection full] [-mode latest|queue]", "Подписаться на события сервиса через реальную сеть."),
+            ("unwatch", "action", "unwatch <subscription-key>", "Отменить подписку своего endpoint.")
         ];
         private static readonly IReadOnlyDictionary<string, ShellRecord[]> Help = new Dictionary<string, ShellRecord[]>(StringComparer.Ordinal)
         {
@@ -258,6 +305,8 @@ public static class ShellHost
                 HelpRow("services", "services [-type T] [-prefix P] [-hops N]", "Найдите достижимые сервисы. Сначала показаны ближайшие.", "services -type atmos.alarm -hops 4 | first 3"),
                 HelpRow("services", "route <instance>", "Посмотрите узлы и типы связей на пути до сервиса."),
                 HelpRow("services", "invoke <instance> <command> [параметры]", "Отправьте команду. Для чтения атмосферы добавьте аргумент reason со значением inspect."),
+                HelpRow("services", "watch <instance> [-key K] [-projection full] [-mode latest|queue]", "Подписывайтесь на события устройств; доставка идёт во входящие сообщения endpoint.", "watch atmos.o2_sensor -key oxygen -projection panel.v1"),
+                HelpRow("services", "unwatch <subscription-key>", "Отменить именованную подписку.", "unwatch oxygen"),
                 HelpRow("services", "jobs | first 5", "Проверьте исход операции по полям outcome и result.", "jobs | first 5"),
                 HelpRow("services", "result <operation>", "Получите доставленные показания атмосферной сигнализации по номеру своей операции.")
             ],
