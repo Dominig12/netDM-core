@@ -335,7 +335,7 @@ public static partial class NetworkSpace
                 var chatter = Life.Bots[Random.Shared.Next(Life.Bots.Count)];
                 if (game.BotBehaviors.TryGet(chatter.BehaviorId, out var behavior))
                     EnqueueChannel(new ChatMessage(Guid.NewGuid().ToString("N"), default, chatter.Name,
-                        behavior.Describe(chatter.Node), now));
+                        NetworkLifeRuntime.BoundedText(behavior.Describe(chatter.Node), 160), now));
             }
         }
     }
