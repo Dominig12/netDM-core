@@ -283,15 +283,15 @@ public static partial class NetworkSpace
             var pursuit = behavior.Hostile ? Hunt(world, bot) : null;
             var observation = new NetworkBotObservation(adjacent, pursuit?.Next,
                 pursuit?.Reached is not null, Life.BotSerial);
-            var decision = behavior.Decide(bot, observation);
-            if (decision.Next is not { } next ||
-                (next != bot.Node && !node.Links.ContainsKey(next)) ||
-                (decision.Engage && (!behavior.Hostile || pursuit?.Reached is null || next != bot.Node)))
+            var snapshot = new NetworkBotState(bot.Id, bot.Node, bot.Moves, bot.Fuel, bot.State);
+            var decision = behavior.Decide(snapshot, observation);
+            if (!NetworkBotDecisionPolicy.Allows(bot.Node, behavior.Hostile, observation, decision))
             {
                 bot.State = "idle";
                 bot.ThreatSince = 0;
                 continue;
             }
+            var next = decision.Next!.Value;
 
             var moved = next != bot.Node;
             if (moved)
