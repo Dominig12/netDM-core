@@ -17,7 +17,8 @@ internal sealed class DenseRadioIndex
         NodePosition? Position,
         RadioProfile? Radio,
         ImmutableDictionary<NodeId, Edge> LinkVersion,
-        Edge[] Cables);
+        Edge[] Cables,
+        bool CanForward);
 
     private readonly NodeId[] _ids;
     private readonly Dictionary<NodeId, int> _lookup;
@@ -56,7 +57,7 @@ internal sealed class DenseRadioIndex
             var node = physical.Nodes[id];
             blocks[i >> BlockShift][i & BlockMask] = new State(
                 node.Position, devices.TryGetValue(id, out var profile) ? profile : null,
-                node.Links, GetCables(node.Links));
+                node.Links, GetCables(node.Links), node.CanForward);
         }
         var index = new DenseRadioIndex(ids, lookup, blocks,
             ImmutableDictionary<RadioMediumCell, int[]>.Empty);
@@ -85,7 +86,7 @@ internal sealed class DenseRadioIndex
             var next = new State(node.Position,
                 devices.TryGetValue(id, out var profile) ? profile : null,
                 node.Links, ReferenceEquals(node.Links, current.LinkVersion)
-                    ? current.Cables : GetCables(node.Links));
+                    ? current.Cables : GetCables(node.Links), node.CanForward);
             if (current.Equals(next)) continue;
 
             var oldCell = CellOf(current);

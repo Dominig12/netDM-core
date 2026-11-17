@@ -215,3 +215,9 @@ h1{font-size:27px;font-weight:650;letter-spacing:-.6px;margin:7px 0 0}
  border:1px solid #303f56;border-radius:5px
 }
 #suite-max-visits,#suite-queue-capacity{height:39px}
+
+/* Independent SS13 network and synthetic benchmark controls. */
+.map-source-label{font-size:10px;color:#8ea4c0;letter-spacing:.7px}
+.map-source-select,.map-layer-select{background:#121d2f;color:#e2f2ff;border:1px solid #34445f;border-radius:4px;padding:7px;font-size:10px;max-width:175px}
+.map-layer-select{width:57px}
+@media(max-width:680px){.map-tools{gap:6px}.map-source-select{max-width:135px}}

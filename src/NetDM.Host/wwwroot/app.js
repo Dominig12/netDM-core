@@ -17,6 +17,59 @@ let previousCounters = null, lastMetricsAt = 0;
 let camera = {x:0,y:0,scale:0.8}, cameraInitialized = false;
 let requestController = null, mapTimeout = null, dragging = null, wasDragging = false;
 let previousTraffic = new Map(), heat = new Map();
+let gameSummary = null;
+const gameMode = () => $("map-source").value === "game";
+function hasActiveMap(){return gameMode()?!!gameSummary?.nodes:!!currentMetrics?.nodeCount;}
+async function pollGameSummary(){
+  try{
+    const response=await fetch("/api/game/summary",{cache:"no-store"});
+    if(!response.ok)throw Error(response.status);
+    const summary=await response.json();
+    const previous=gameSummary;
+    gameSummary=summary;
+    if(!gameMode())return;
+    const layerSelect=$("map-layer");
+    const oldLayer=Number(layerSelect.value);
+    const levels=summary.levels||[];
+    const values=levels.length?levels.map(l=>l.z):[1];
+    if(values.length!==layerSelect.options.length||
+        values.some((v,i)=>Number(layerSelect.options[i]?.value)!==v)){
+      layerSelect.replaceChildren(...values.map(v=>new Option(String(v),String(v))));
+      layerSelect.value=values.includes(oldLayer)?String(oldLayer):String(values[0]);
+      if(!values.includes(oldLayer))cameraInitialized=false;
+    }
+    const changed=!previous||previous.version!==summary.version||
+      previous.streamId!==summary.streamId;
+    $("connectivity-version").textContent=format(summary.connectivityVersion);
+    if(changed){
+      if(!cameraInitialized&&summary.nodes)fitMap();
+      else loadMap();
+    }
+    if(!summary.nodes){
+      currentMap={nodes:[],edges:[],domainCells:[],version:summary.version,
+        totalNodes:0,displayedNodes:0};
+      $("map-empty").style.display="block";
+      $("map-count").textContent="No SS13 game nodes connected";
+      $("map-status").textContent="GAME GRAPH · WAITING FOR BYOND";
+      drawMap();
+    }
+  }catch(error){console.warn("Game topology unavailable",error);}
+}
+$("map-source").addEventListener("change",()=>{
+  if(requestController)requestController.abort();
+  currentMap={nodes:[],edges:[],domainCells:[],version:0,totalNodes:0,displayedNodes:0};
+  previousTraffic=new Map();heat=new Map();selected=null;
+  cameraInitialized=false;
+  $("map-layer").replaceChildren(new Option(gameMode()?"1":"0",gameMode()?"1":"0"));
+  $("map-count").textContent="Loading topology";
+  $("map-empty").style.display="block";
+  if(gameMode())pollGameSummary();else{fitMap();loadMap();}
+  drawMap();
+});
+$("map-layer").addEventListener("change",()=>{
+  cameraInitialized=false;
+  if(gameMode())fitMap();else loadMap();
+});
 
 function toast(message) {
   const element=$("toast"); element.textContent=message; element.style.display="block";
@@ -34,15 +87,29 @@ function resizeCanvas(canvas) {
 function screen(p,w,h){return {x:(p.x-camera.x)*camera.scale+w/2,y:(p.y-camera.y)*camera.scale+h/2};}
 function world(x,y){const r=frame.getBoundingClientRect();return {x:(x-r.width/2)/camera.scale+camera.x,y:(y-r.height/2)/camera.scale+camera.y};}
 function fitMap() {
-  const status=currentMetrics?.benchmark;
-  if(!status || !status.worldWidth || !status.worldHeight) return;
-  camera.x=status.worldWidth/2;camera.y=status.worldHeight/2;
-  camera.scale=Math.max(0.08,Math.min(2,Math.min((frame.clientWidth-70)/status.worldWidth,(frame.clientHeight-70)/status.worldHeight)));
+  if(gameMode()){
+    const layer=Number($("map-layer").value);
+    const bounds=gameSummary?.levels?.find(item=>item.z===layer);
+    if(!bounds)return;
+    const width=Math.max(1,bounds.maxX-bounds.minX+1);
+    const height=Math.max(1,bounds.maxY-bounds.minY+1);
+    camera.x=(bounds.minX+bounds.maxX)/2;
+    camera.y=(bounds.minY+bounds.maxY)/2;
+    camera.scale=Math.max(.055,Math.min(8,Math.min(
+      (frame.clientWidth-70)/width,(frame.clientHeight-70)/height)));
+  }else{
+    const status=currentMetrics?.benchmark;
+    if(!status || !status.worldWidth || !status.worldHeight)return;
+    camera.x=status.worldWidth/2;camera.y=status.worldHeight/2;
+    camera.scale=Math.max(.08,Math.min(2,Math.min(
+      (frame.clientWidth-70)/status.worldWidth,
+      (frame.clientHeight-70)/status.worldHeight)));
+  }
   cameraInitialized=true;scheduleMap();drawMap();
 }
 function scheduleMap(){clearTimeout(mapTimeout);mapTimeout=setTimeout(loadMap,160);}
 async function loadMap() {
-  if(!currentMetrics?.nodeCount) return;
+  if(!hasActiveMap()) return;
   if(requestController)requestController.abort();
   requestController=new AbortController();
   const r=frame.getBoundingClientRect(),pad=35/camera.scale;
@@ -50,10 +117,12 @@ async function loadMap() {
   const right=camera.x+r.width/(2*camera.scale)+pad,bottom=camera.y+r.height/(2*camera.scale)+pad;
   const params=new URLSearchParams({
     minX:Math.floor(left),minY:Math.floor(top),
-    maxX:Math.ceil(right),maxY:Math.ceil(bottom),z:0,limit:6000
+    maxX:Math.ceil(right),maxY:Math.ceil(bottom),z:Number($("map-layer").value),limit:6000
   });
   try {
-    const response=await fetch("/api/map?"+params,{signal:requestController.signal});
+    const source=gameMode()?"game":"benchmark";
+    const response=await fetch((source==="game"?"/api/game/map?":"/api/map?")+params,
+      {signal:requestController.signal});
     if(!response.ok)throw Error("Topology snapshot HTTP "+response.status);
     const map=await response.json();
     const nextHeat=new Map(), newTraffic=new Map();
@@ -67,12 +136,13 @@ async function loadMap() {
     heat=nextHeat;
     currentMap=map;
     $("map-count").textContent=format(map.displayedNodes)+" / "+format(map.totalNodes)+" visible nodes";
-    $("map-status").textContent=map.truncated
+    $("map-status").textContent=(gameMode()?"SS13 · LIVE GAME · ":"BENCHMARK · ")+(map.truncated
       ? "VIEWPORT LIMIT REACHED · ZOOM IN"
       : map.domainCells?.length
         ? "SHARED MEDIUM · INDEXED DOMAIN CELLS"
-        : "SPATIAL INDEX · VIEWPORT QUERY";
+        : "SPATIAL INDEX · VIEWPORT QUERY");
     $("graph-version").textContent=format(map.version);
+    if(gameMode())$("connectivity-version").textContent=format(map.connectivityVersion);
     $("map-empty").style.display=map.totalNodes?"none":"block";
     drawMap();
   }catch(error){if(error.name!=="AbortError")console.warn(error);}
@@ -117,7 +187,7 @@ function drawMap(){
   const byId=new Map(currentMap.nodes.map(n=>[n.id,n]));
   const stroke=Math.max(.5,Math.min(1.25,camera.scale*.7));
   ctx.lineWidth=stroke;
-  ctx.strokeStyle=currentMetrics?.benchmark?.options?.wirelessEnabled
+  ctx.strokeStyle=(gameMode()&&!!gameSummary?.radios)||currentMetrics?.benchmark?.options?.wirelessEnabled
     ? "rgba(62,203,216,.42)" : "rgba(74,115,162,.27)";
   ctx.beginPath();
   for(const e of currentMap.edges){
@@ -147,8 +217,9 @@ function drawMap(){
     if(focus){
       ctx.strokeStyle="#d4f6ff";ctx.lineWidth=1.5;ctx.beginPath();
       ctx.arc(p.x,p.y,10,0,Math.PI*2);ctx.stroke();
-      const range=currentMetrics?.benchmark?.options?.wirelessEnabled
-        ? currentMetrics.benchmark.options.radioRange : 0;
+      const range=gameMode()?node.radioRange:
+        currentMetrics?.benchmark?.options?.wirelessEnabled
+          ? currentMetrics.benchmark.options.radioRange:0;
       if(range){
         ctx.strokeStyle="rgba(85,219,225,.35)";
         ctx.lineWidth=1;
@@ -162,8 +233,12 @@ function drawMap(){
     const node=byId.get(selected);
     $("node-details").textContent=node
       ? "NODE #"+node.id+" · "+node.links+
-        (currentMetrics?.benchmark?.options?.radioModel==="shared"?" WIRED LINKS":" LINKS")+
-        " · "+node.traffic+" TRAFFIC SAMPLES · "+node.x+", "+node.y
+        (gameMode()||currentMetrics?.benchmark?.options?.radioModel==="shared"?
+          " WIRED LINKS":" LINKS")+
+        (gameMode()?(node.radioEnabled?
+          " · RADIO CH "+node.radioChannel+" / RANGE "+node.radioRange:" · NO RADIO"):
+          " · "+node.traffic+" TRAFFIC SAMPLES")+
+        " · "+node.x+", "+node.y+", Z"+node.z
       : "SELECTED NODE OUTSIDE VIEWPORT";
   }
 }
@@ -453,8 +528,8 @@ async function pollMetrics(){
     previousCounters=data.runtime;lastMetricsAt=performance.now();
     const wasEmpty=!currentMetrics?.nodeCount;
     currentMetrics=data;
-    if(!cameraInitialized && bench.worldWidth>0)fitMap();
-    if(wasEmpty && data.nodeCount>0)setTimeout(loadMap,100);
+    if(!gameMode()&&!cameraInitialized && bench.worldWidth>0)fitMap();
+    if(!gameMode()&&wasEmpty && data.nodeCount>0)setTimeout(loadMap,100);
   }catch(error){
     $("connection").classList.add("offline");
     $("connection").innerHTML='<span class="status-dot"></span> HOST OFFLINE';
@@ -542,7 +617,9 @@ $("export").addEventListener("click",async event=>{
 pollMetrics();pollHistory();drawMap();
 setInterval(pollMetrics,950);
 setInterval(pollHistory,1600);
-setInterval(()=>{if(!dragging&&currentMetrics?.nodeCount>0)loadMap();},1600);
+setInterval(()=>{if(!dragging&&hasActiveMap())loadMap();},1600);
+setInterval(pollGameSummary,1800);
+pollGameSummary();
 
 
 let comparisonState=null;

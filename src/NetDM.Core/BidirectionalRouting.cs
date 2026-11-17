@@ -71,6 +71,8 @@ public static class BidirectionalRouter
             foreach (var edge in snapshot.Nodes[node].Links.Values)
             {
                 var neighbor = edge.To;
+                if (neighbor != source && neighbor != target && !snapshot.Nodes[neighbor].CanForward)
+                    continue;
                 var newCost = checked(distance + edge.Cost);
                 if (!costs.TryGetValue(neighbor, out var prior) || newCost < prior)
                 {

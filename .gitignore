@@ -6,3 +6,4 @@ obj/
 TestResults/
 
 benchmarks/results/
+deploy/bluemoon/secrets/

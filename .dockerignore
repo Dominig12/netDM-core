@@ -1,0 +1,10 @@
+.git
+**/bin
+**/obj
+**/.vs
+.idea
+TestResults
+benchmarks/results
+docs
+tests
+deploy/bluemoon/secrets

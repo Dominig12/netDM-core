@@ -21,7 +21,7 @@ public sealed record PacketTickRunnerCounters(
 public sealed class PacketTickRunner
 {
     private const int Window = 1024;
-    private readonly RadioPacketTransport _packets;
+    private readonly Action<long, CancellationToken> _advance;
     private readonly int _tickPeriodMilliseconds;
     private readonly long _periodTicks;
     private readonly object _startGate = new();
@@ -32,8 +32,14 @@ public sealed class PacketTickRunner
     private long _maxExecutionUs, _overPeriodExecutionTicks;
 
     public PacketTickRunner(RadioPacketTransport packets, int periodMilliseconds = 100)
+        : this(periodMilliseconds, (tick, ct) => packets.Advance(tick, ct))
     {
-        _packets = packets ?? throw new ArgumentNullException(nameof(packets));
+        ArgumentNullException.ThrowIfNull(packets);
+    }
+
+    public PacketTickRunner(int periodMilliseconds, Action<long, CancellationToken> advance)
+    {
+        _advance = advance ?? throw new ArgumentNullException(nameof(advance));
         if (periodMilliseconds is < 1 or > 10_000)
             throw new ArgumentOutOfRangeException(nameof(periodMilliseconds));
         _tickPeriodMilliseconds = periodMilliseconds;
@@ -41,6 +47,7 @@ public sealed class PacketTickRunner
     }
 
     public int PeriodMilliseconds => _tickPeriodMilliseconds;
+    public long LastTick => Interlocked.Read(ref _lastTick);
 
     public PacketTickRunnerCounters Capture()
     {
@@ -117,7 +124,7 @@ public sealed class PacketTickRunner
             var started = Stopwatch.GetTimestamp();
             try
             {
-                _packets.Advance(observedTick, token);
+                _advance(observedTick, token);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
