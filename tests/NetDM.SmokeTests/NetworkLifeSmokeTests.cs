@@ -51,7 +51,8 @@ static class NetworkLifeSmokeTests
         Check(registry.FindCommand("network.shell", "life")!.Arguments.Field("limit")!.Max == 64,
             "the activity page is bounded by the command's own contract");
         CheckLifeRuntime();
-        Console.WriteLine("P13 network life contracts and session lifecycle passed.");
+        CheckBehaviorRegistry();
+        Console.WriteLine("P13 network life contracts, session lifecycle and strategies passed.");
     }
 
     private static void CheckLifeRuntime()
@@ -65,13 +66,15 @@ static class NetworkLifeSmokeTests
         state.SetPersona(owner, new NetworkPersona { Name = "operator-1", Signature = "O1" });
         Check(state.Personas.ContainsKey(owner), "persona stored");
 
-        var bot = state.Spawn(new NodeId(4), NetworkBotGoal.Intruder, "rogue", "R", 100, 5000);
+        var bot = state.Spawn(new NodeId(4), new IntruderBotBehavior(), 100, 5000);
         Check(bot.NextAt == 5100 && state.PopulationStarted, "explicit spawn initializes population");
         Check(state.Banish(new NodeId(5)) == 0 && state.Bots.Count == 1, "banish respects node");
         Check(state.Banish(new NodeId(4)) == 1 && state.Bots.Count == 0, "banish removes intruder");
         Check(state.PopulationStarted, "banish does not reboot population");
 
-        state.Spawn(new NodeId(1), NetworkBotGoal.Sentinel, "sentinel", "S", 100, 5000);
+        var registry = new NetworkBotBehaviorRegistry();
+        Check(registry.TryGet("sentinel", out var patrol), "built-in patrol registered");
+        state.Spawn(new NodeId(1), patrol, 100, 5000);
         Check(state.Retire(1) == 1 && state.Bots.Count == 0, "explicit retire removes bot");
         Check(state.PopulationStarted, "retire cannot cause immediate respawn");
         Check(!state.EnsureSession(first), "same stream preserves population decision");
@@ -87,6 +90,59 @@ static class NetworkLifeSmokeTests
         Check(state.EnsureSession(Guid.NewGuid()), "session transition detected");
         Check(!state.PopulationStarted && state.Bots.Count == 0 && state.Activities.Count == 0 &&
             state.Personas.Count == 0 && state.NextBotId == 0, "new stream discards prior entities and identities");
+    }
+
+    private static void CheckBehaviorRegistry()
+    {
+        var scanner = new PatrolBotBehavior("scanner", "scanner", "Q", node => $"scanned node {node.Value}");
+        var catalog = new NetworkBotBehaviorRegistry([scanner]);
+        Check(catalog.All.Count == 8 && catalog.TryGet("scanner", out var resolved) &&
+            ReferenceEquals(resolved, scanner), "extensions are discovered without modifying the host");
+        Check(catalog.TryGet("INTRUDER", out var intruder) && intruder.Hostile,
+            "legacy goal IDs remain resolvable");
+
+        var origin = new NodeId(7);
+        var adjacent = new NodeId(8);
+        var state = new NetworkBotState(1, origin, 2, 399, "active");
+        var observation = new NetworkBotObservation([adjacent], null, false, 1);
+        var plan = scanner.Decide(state, observation);
+        Check(plan.Next == adjacent && plan.ActivityKind == "task",
+            "extension can select a nearby hop and report activity");
+        Check(NetworkBotDecisionPolicy.Allows(origin, false, observation, plan),
+            "registered patrol can move across a real link");
+        Check(!NetworkBotDecisionPolicy.Allows(origin, false, observation,
+                new NetworkBotDecision(new NodeId(900))),
+            "a behavior cannot teleport outside physical adjacency");
+        Check(!NetworkBotDecisionPolicy.Allows(origin, false, observation,
+                new NetworkBotDecision(origin, Engage: true)),
+            "a non-hostile behavior cannot initiate intrusion");
+
+        var atTarget = new NetworkBotObservation([adjacent], origin, true, 2);
+        var attack = intruder.Decide(state, atTarget);
+        Check(attack.Engage && attack.Next == origin &&
+            NetworkBotDecisionPolicy.Allows(origin, true, atTarget, attack),
+            "hostile behavior can engage only a present target");
+        Check(!NetworkBotDecisionPolicy.Allows(origin, true, observation, attack),
+            "hostile behavior cannot engage an absent target");
+        Check(!NetworkBotDecisionPolicy.Allows(origin, true, atTarget,
+                new NetworkBotDecision(adjacent, Engage: true)),
+            "hostile behavior cannot engage while teleporting to a different node");
+
+        Reject(() => new NetworkBotBehaviorRegistry([scanner, scanner]));
+        Reject(() => new NetworkBotBehaviorRegistry([
+            new PatrolBotBehavior("sentinel", "impostor", "X", node => $"at {node.Value}")
+        ]));
+        Reject(() => new NetworkBotBehaviorRegistry([
+            new PatrolBotBehavior("bad|name", "bad", "X", node => $"at {node.Value}")
+        ]));
+        Check(!catalog.TryGet("missing", out _), "unknown behavior IDs are not silently accepted");
+
+        static void Reject(Action action)
+        {
+            try { action(); }
+            catch (ArgumentException) { return; }
+            throw new InvalidOperationException("Duplicate or invalid network behavior accepted.");
+        }
     }
 
     private static void Check(bool condition, string message)
