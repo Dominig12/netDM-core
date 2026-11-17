@@ -69,15 +69,25 @@ static class ServiceSmokeTests
             services.EventRevisionOf(reader) == 1, "repeat ACK never creates another event");
         Check(services.AcknowledgedEvents(stranger, 0, 8).Events.Count == 0,
             "different endpoints cannot read other subscriptions");
+        Check(services.Publish(sensor, "sensor.auto", 2, Sample(170), 30,
+            PacketTrafficClass.Background).Status == ServiceStatus.Ok, "second event offered");
+        stand.Settle();
+        var rejectedDelivery = Inbox(stand, reader.Id, "event").Single(item => item.MessageId != delivered.MessageId);
+        Check(services.Acknowledge(rejectedDelivery.DeliveryId, false, "unsupported_schema").Status == ServiceStatus.Ok,
+            "DM can reject applying a delivered event without suppressing the program's observation");
+        var rejectedEvent = services.AcknowledgedEvents(reader, 1, 8).Events.Single();
+        Check(!rejectedEvent.Applied && rejectedEvent.Reason == "unsupported_schema" &&
+            rejectedEvent.Payload.GetProperty("pressureKPa").GetDouble() == 170,
+            "event tools report gameplay rejection separately from successful network delivery");
 
         // This journal has its own strict memory and reader limits even under bursts.
         var journal = new NetworkEventJournal();
         journal.SetReaders([reader]);
         var bytes = System.Text.Encoding.UTF8.GetBytes("""{"pressureKPa":151.5,"alarm":true}""");
-        journal.Record(stranger, 1, "spy", "sensor.auto", "atmos.sample", bytes);
+        journal.Record(stranger, 1, "spy", "sensor.auto", "atmos.sample", bytes, true, null);
         Check(journal.Read(stranger, 0, 16).Events.Count == 0, "unarmed endpoint cannot be observed");
         for (var i = 1; i <= NetworkEventJournal.MaxEventsPerReader + 9; i++)
-            journal.Record(reader, i, "oxygen", "sensor.auto", "atmos.sample", bytes);
+            journal.Record(reader, i, "oxygen", "sensor.auto", "atmos.sample", bytes, true, null);
         var firstPage = journal.Read(reader, 0, 16);
         Check(firstPage.Overflowed && firstPage.Events.Count == 16 &&
             firstPage.Events[0].Payload.GetProperty("alarm").GetBoolean() &&
