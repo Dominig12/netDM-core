@@ -47,7 +47,7 @@ public sealed partial class SchemaRegistry
         registry.Register(new SchemaDefinition("shell.program", 1, 0,
         [
             new SchemaField("status", SchemaFieldType.Enum, true, Values:
-                ["started", "running", "stopped", "unknown_program", "parse_error", "unknown_command", "invalid_argument", "limit_exceeded",
+                ["started", "running", "valid", "stopped", "unknown_program", "parse_error", "unknown_command", "invalid_argument", "limit_exceeded",
                  "migrated", "moved", "busy", "unreachable", "forbidden"]),
             new SchemaField("program", SchemaFieldType.Integer, false, 0, 1_000_000_000),
             new SchemaField("error", SchemaFieldType.Text, false, MaxLength: 200),
@@ -56,6 +56,7 @@ public sealed partial class SchemaRegistry
             new SchemaField("to", SchemaFieldType.Text, false, MaxLength: 64),
             new SchemaField("generation", SchemaFieldType.Integer, false, 1, 1_000_000)
         ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["status", "program", "error", "position", "to", "generation"] }, MaxPayloadBytes: 512));
+        registry.RegisterCommand("network.shell", "check", "shell.program_request", 1, "shell.program", 1);
         registry.RegisterCommand("network.shell", "start", "shell.program_request", 1, "shell.program", 1);
         registry.RegisterCommand("network.shell", "stop", "shell.stop_request", 1, "shell.program", 1);
         // P12.1 network space: an operator scans from a device's shell and reads what it knows as pages of
