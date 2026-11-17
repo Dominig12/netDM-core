@@ -261,9 +261,12 @@ public static class ShellHost
         }
     }
 
-    internal sealed class Source(GameNetworkService game, GameNetworkService.Session session, Scope command) : IShellSource
+    internal sealed class Source(GameNetworkService game, GameNetworkService.Session session, Scope command,
+        long? eventAfter = null) : IShellSource
     {
         private const int DirectoryCandidates = 2048;
+        public long EventReadThrough { get; private set; }
+        public long EventLatest { get; private set; }
 
         /// <summary>The whole shell surface, in one place: help, the <c>commands</c> command and the window's
         /// completion list are generated from it, so a new command cannot be undiscoverable.</summary>
@@ -278,6 +281,7 @@ public static class ShellHost
             ("route", "source", "route <instance>", "Путь до сервиса: узлы и типы связей."),
             ("trace", "source", "trace <node>", "Путь до узла; ticks — задержка в десятых секунды."),
             ("jobs", "source", "jobs", "Свои операции и их исход."),
+            ("events", "source", "events [-key K]", "Подтверждённые события собственных подписок (программы on events)."),
             ("result", "source", "result <operation>", "Результат доставленной операции."),
             ("programs", "source", "programs", "Фоновые программы устройства."),
             ("help", "source", "help [basics|services|scripts|programs|api]", "Темы справки."),
@@ -321,6 +325,7 @@ public static class ShellHost
                 HelpRow("programs", "programs", "Просмотрите состояние фоновых программ на устройстве.", "programs"),
                 HelpRow("programs", "every <секунды>", "Первая строка фонового скрипта задаёт таймер от 10 секунд. Запуск и остановка доступны в редакторе."),
                 HelpRow("programs", "on строка … end", "Правило срабатывает когда источник меняется и условие даёт записи."),
+                HelpRow("programs", "on events [-key K] | where ...", "Программа реагирует на новые подтверждённые сетевые события; $event содержит их поля.", "on events -key oxygen | where pressureKPa -gt 130"),
                 HelpRow("programs", "wait <секунды> / $state", "Приостановите программу или сохраните записи между её проходами.")
             ],
             ["api"] =
@@ -359,6 +364,10 @@ public static class ShellHost
                 } ? null : "api [serviceType [command]]";
             if (name == "nodes")
                 return args.Positional.Count + args.Named.Count == 0 ? null : "nodes takes no arguments";
+            if (name == "events")
+                return args.Positional.Count == 0 && args.Named.All(pair =>
+                    pair is { Key: "key", Value: string key } && ServiceNames.IsValid(key))
+                    ? null : "events [-key <subscription-key>]";
             if (name == "result")
                 return args.Named.Count == 0 && args.Positional is [long and > 0] ? null : "result <operation>";
             if (name == "services")
@@ -498,6 +507,8 @@ public static class ShellHost
                     }))];
                 case "programs":
                     return ShellPrograms.List(session, command);
+                case "events":
+                    return ReadAcknowledgedEvents(arguments, maxRecords);
                 case "jobs":
                     return QueryHost.Jobs(session.Services, command.Initiator, maxRecords, command.DeliveryId is null ? null : command.Instance)
                         .Select(job => Record(("operation", job.Operation), ("instance", job.Instance), ("command", job.Command),
@@ -560,6 +571,53 @@ public static class ShellHost
                 default:
                     return null;
             }
+        }
+
+
+        /// <summary>
+        /// Projected, application-ACKed events from the actor's endpoint, never the provider's.
+        /// Host revisions/cursors make an event-driven program consume each observed batch once.
+        /// JSON payloads are exposed as typed scalar fields, so where/select work without
+        /// service-specific parsing. Complex fields become bounded inert text.
+        /// </summary>
+        private IReadOnlyList<ShellRecord> ReadAcknowledgedEvents(ShellArguments arguments, int maxRecords)
+        {
+            var key = arguments.Named.GetValueOrDefault("key") as string;
+            var current = session.Services.EventRevisionOf(command.Initiator);
+            var start = eventAfter ?? Math.Max(0, current - Math.Min(16, maxRecords));
+            var page = session.Services.AcknowledgedEvents(command.Initiator, start, Math.Min(16, maxRecords));
+            EventReadThrough = page.Through;
+            EventLatest = page.Latest;
+            var result = new List<ShellRecord>();
+            if (page.Overflowed)
+                result.Add(Record(("kind", "overflow"), ("key", key ?? ""), ("instance", ""),
+                    ("schema", ""), ("sequence", page.Through), ("delivery", 0L)));
+            foreach (var item in page.Events)
+            {
+                if (key is not null && item.SubscriptionKey != key)
+                    continue;
+                var fields = new Dictionary<string, object>(StringComparer.Ordinal)
+                {
+                    ["kind"] = "event", ["sequence"] = item.Sequence, ["delivery"] = item.DeliveryId,
+                    ["key"] = item.SubscriptionKey, ["instance"] = item.Instance, ["schema"] = item.Schema
+                };
+                foreach (var field in item.Payload.EnumerateObject().Take(24))
+                {
+                    object? value = field.Value.ValueKind switch
+                    {
+                        JsonValueKind.True => true,
+                        JsonValueKind.False => false,
+                        JsonValueKind.Number when field.Value.TryGetInt64(out var number) => number,
+                        JsonValueKind.Number => field.Value.GetDouble(),
+                        JsonValueKind.String => Printable(field.Value.GetString() ?? ""),
+                        JsonValueKind.Null => "",
+                        _ => Printable(field.Value.GetRawText())
+                    };
+                    fields.TryAdd(field.Name, value);
+                }
+                result.Add(new ShellRecord(fields));
+            }
+            return result;
         }
 
         private static IReadOnlyList<ShellRecord>? Fail(string message, out string? error)
