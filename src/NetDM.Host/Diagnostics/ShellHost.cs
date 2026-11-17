@@ -170,7 +170,7 @@ public static class ShellHost
                 var key = (string)arguments.Positional[0];
                 var receipt = _tools.Execute(_actor, new NetworkToolRequest(NetworkToolKind.Unwatch, key));
                 ShellRecord[] result = [Record(("key", key),
-                    ("status", ServiceNames.Code(receipt.Status)))];
+                    ("status", receipt.Status == ServiceStatus.Ok ? "unwatched" : ServiceNames.Code(receipt.Status)))];
                 Results.AddRange(result);
                 return result;
             }
@@ -215,9 +215,18 @@ public static class ShellHost
                         ? checked((int)(long)requested) : 1;
                     var receipt = _tools.Execute(_actor, new NetworkToolRequest(NetworkToolKind.Watch,
                         instance, Key: key, Projection: projection, Mode: mode, MaxPending: pending));
-                    done.Add(Record(("instance", instance), ("key", key),
-                        ("status", receipt.Status is ServiceStatus.Ok or ServiceStatus.Duplicate
-                            ? "watching" : ServiceNames.Code(receipt.Status)), ("subscription", receipt.Subscription)));
+                    // Return the schema actually authorized by Host, not client-supplied guesses.
+                    // DM may persist this accepted subscription and reconcile it after a Host resync.
+                    // Only confirmed watches carry a restorable declaration.
+                    var accepted = receipt.Status is ServiceStatus.Ok or ServiceStatus.Duplicate;
+                    done.Add(accepted
+                        ? Record(("instance", instance), ("key", key), ("status", "watching"),
+                            ("subscription", receipt.Subscription), ("schema", descriptor.Schema),
+                            ("major", (long)descriptor.Major), ("projection", projection),
+                            ("mode", mode == DeliveryMode.Queue ? "queue" : "latest_value"),
+                            ("pending", (long)(mode == DeliveryMode.Queue ? pending : 1)))
+                        : Record(("instance", instance), ("key", key), ("status", ServiceNames.Code(receipt.Status)),
+                            ("subscription", receipt.Subscription)));
                     continue;
                 }
 
