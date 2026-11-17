@@ -38,7 +38,7 @@ public static class ShellHost
             return NetworkSpace.Answer(game, session, command, arguments.RootElement);
         if (command.Command is "chat_read" or "chat_send")
             return NetworkSpace.Chat(game, session, command, arguments.RootElement, out applied);
-        if (command.Command is "start" or "stop" or "migrate")
+        if (command.Command is "start" or "check" or "stop" or "migrate")
             return ShellPrograms.Answer(session, command, arguments.RootElement, out applied);
         var scope = new Scope(command.InitiatorKey, command.Instance, command.ProviderNode, command.DeliveryId,
             $"{ActionKeyNamespace}.{command.DeliveryId.ToString(CultureInfo.InvariantCulture)}",
