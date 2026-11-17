@@ -1106,7 +1106,7 @@ try {
         return $answer.payload
     }
     $help = Invoke-Shell 'help'
-    Assert-True ($help.status -ceq 'ok' -and $help.count -eq 4 -and $help.rows -clike '*example=help services*') 'shell help lists navigable topics'
+    Assert-True ($help.status -ceq 'ok' -and $help.count -eq 5 -and $help.rows -clike '*example=help services*' -and $help.rows -clike '*example=api*') "shell help lists five navigable topics: $($help | ConvertTo-Json -Compress)"
     $help = Invoke-Shell 'help services'
     Assert-True ($help.status -ceq 'ok' -and $help.rows -clike '*syntax=result <operation>*') 'service help shows result syntax'
     $help = Invoke-Shell 'help missing'
