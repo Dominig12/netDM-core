@@ -662,7 +662,14 @@ static class ServiceSmokeTests
             """[1,2,3]"""
         })
             Check(Schemas.Validate(schema, 0, Json(invalid), out _) == ServiceStatus.InvalidPayload, "reject " + invalid);
-        Check(Schemas.Validate(schema, 1, Sample(1), out _) == ServiceStatus.InvalidPayload, "unknown producer minor");
+        Check(Schemas.Validate(schema, 1, Sample(1), out _) == ServiceStatus.Ok,
+            "minor 1 must accept the original payload without optional fields");
+        var gasSample = Json("""{"pressureKPa":101.3,"temperatureK":293.15,"sampleTick":10,"quality":"current","gasesJson":"{}"}""");
+        Check(Schemas.Validate(schema, 1, gasSample, out _) == ServiceStatus.Ok &&
+              Schemas.Validate(schema, 0, gasSample, out _) == ServiceStatus.InvalidPayload,
+            "new gas composition requires minor 1, not a hidden expansion of minor 0");
+        Check(Schemas.Validate(schema, 2, Sample(1), out _) == ServiceStatus.InvalidPayload,
+            "unknown producer minor must be rejected");
         var panel = JsonDocument.Parse(SchemaRegistry.Project(a!, "panel.v1")).RootElement;
         Check(!panel.TryGetProperty("sampleTick", out _) && panel.GetProperty("pressureKPa").GetDouble() == 101.3,
             "projection discloses only its fields");
