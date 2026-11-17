@@ -281,11 +281,12 @@ public static partial class NetworkSpace
             // routing and validates every proposed hop; a plugin cannot teleport or bypass the network.
             var adjacent = node.Links.Keys.OrderBy(id => id.Value).ToArray();
             var pursuit = behavior.Hostile ? Hunt(world, bot) : null;
-            var observation = new NetworkBotObservation(adjacent, pursuit?.Next,
+            var observation = new NetworkBotObservation(Array.AsReadOnly(adjacent), pursuit?.Next,
                 pursuit?.Reached is not null, Life.BotSerial);
             var snapshot = new NetworkBotState(bot.Id, bot.Node, bot.Moves, bot.Fuel, bot.State);
             var decision = behavior.Decide(snapshot, observation);
-            if (!NetworkBotDecisionPolicy.Allows(bot.Node, behavior.Hostile, observation, decision))
+            if (!NetworkBotDecisionPolicy.Allows(bot.Node, behavior.Hostile, observation, decision) ||
+                (decision.Next is { } proposed && proposed != bot.Node && !node.Links.ContainsKey(proposed)))
             {
                 bot.State = "idle";
                 bot.ThreatSince = 0;
