@@ -103,6 +103,7 @@ CheckRoutingEquivalence();
 CheckRouteCacheBudgets();
 ServiceSmokeTests.Run();
 NetworkToolSmokeTests.Run();
+ProgramWatchSmokeTests.Run();
 CheckAreaWiring();
 CheckForwardingRoles();
 DeviceAttachmentSmokeTests.Run();
