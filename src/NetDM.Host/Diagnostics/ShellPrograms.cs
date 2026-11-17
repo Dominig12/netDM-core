@@ -388,13 +388,16 @@ public static class ShellPrograms
     /// routed publication and a receiver-side DM acknowledgement before a rule can read them.
     /// A missing service is retried on directory changes or after a bounded delay.
     /// </summary>
-    private static void ReconcileWatches(GameNetworkService.Session session, long now)
+    private static void ReconcileWatches(GameNetworkService game, GameNetworkService.Session session, long now)
     {
+        if (game.CapturePowerState(session) is not { } power)
+            return;
         var desired = new Dictionary<(EndpointKey Owner, string Key), ProgramWatch>();
         foreach (var program in Programs.Where(program => !program.Finished && program.Watches.Length > 0))
         {
-            if (session.Services.ResidentCommandNode(program.Owner, program.Provider, program.Instance) is null)
-                continue;
+            if (session.Services.ResidentCommandNode(program.Owner, program.Provider, program.Instance) is not { } origin ||
+                !power.World.Physical.Nodes.ContainsKey(origin) || !power.Wiring.CanExecute(origin))
+                continue; // An offline device cannot maintain active network observations.
             foreach (var declaration in program.Watches)
                 desired[(program.Owner, declaration.SubscriptionKey(program.Id))] = declaration;
         }
@@ -694,7 +697,7 @@ public static class ShellPrograms
         session.Services.SetEventReaders(Programs.Where(program =>
             !program.Finished && program.IsEventRule && session.Services.IsAttached(program.Owner))
             .Select(program => program.Owner));
-        ReconcileWatches(session, now);
+        ReconcileWatches(game, session, now);
         if (Programs.Count == 0)
         {
             Save(); // A removed last program leaves an empty file, not a stale one.
