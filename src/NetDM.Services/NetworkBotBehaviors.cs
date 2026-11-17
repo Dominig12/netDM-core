@@ -6,6 +6,9 @@ namespace NetDM.Services;
 /// Read-only, bounded observation offered to an NPC behavior. No ServiceRuntime, packet send,
 /// arbitrary topology lookup or DM callback is exposed to a behavior.
 /// </summary>
+public readonly record struct NetworkBotState(int Id, NodeId Node, int Moves, long Fuel, string State);
+
+/// <summary>The host fills this with genuine next hops and a routed pursuit step.</summary>
 public sealed record NetworkBotObservation(
     IReadOnlyList<NodeId> Adjacent,
     NodeId? PursuitStep,
@@ -19,6 +22,16 @@ public readonly record struct NetworkBotDecision(
     string? ActivityKind = null,
     string? ActivityText = null);
 
+/// <summary>Enforces a single physical hop and prevents non-hostile engagement.</summary>
+public static class NetworkBotDecisionPolicy
+{
+    public static bool Allows(NodeId current, bool hostile,
+        NetworkBotObservation observation, NetworkBotDecision decision) =>
+        decision.Next is { } next &&
+        (next == current || observation.Adjacent.Contains(next)) &&
+        (!decision.Engage || (hostile && observation.TargetHere && next == current));
+}
+
 /// <summary>
 /// Pluggable, stateless network NPC strategy. Add implementations through DI as
 /// INetworkBotBehavior without changing NetworkSpace or its control-plane switch.
@@ -29,7 +42,7 @@ public interface INetworkBotBehavior
     string Name { get; }
     string Signature { get; }
     bool Hostile { get; }
-    NetworkBotDecision Decide(NetworkBot bot, NetworkBotObservation observation);
+    NetworkBotDecision Decide(NetworkBotState bot, NetworkBotObservation observation);
     string Describe(NodeId node);
 }
 
@@ -44,7 +57,7 @@ public sealed class PatrolBotBehavior(
     public bool Hostile => false;
     public string Describe(NodeId node) => description(node);
 
-    public NetworkBotDecision Decide(NetworkBot bot, NetworkBotObservation observation)
+    public NetworkBotDecision Decide(NetworkBotState bot, NetworkBotObservation observation)
     {
         if (observation.Adjacent.Count == 0)
             return default;
@@ -63,7 +76,7 @@ public sealed class IntruderBotBehavior : INetworkBotBehavior
     public string Signature => "R";
     public bool Hostile => true;
 
-    public NetworkBotDecision Decide(NetworkBot bot, NetworkBotObservation observation) =>
+    public NetworkBotDecision Decide(NetworkBotState bot, NetworkBotObservation observation) =>
         observation.PursuitStep is { } hop
             ? new NetworkBotDecision(hop, Engage: observation.TargetHere)
             : default;
