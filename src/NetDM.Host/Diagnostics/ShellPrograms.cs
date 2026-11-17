@@ -709,7 +709,8 @@ public static class ShellPrograms
                 program.EventCursor = 0;
             var scope = new ShellHost.Scope(program.Owner, program.Instance, origin, null,
                 $"pg.{_stream:N}.{program.Id.ToString(CultureInfo.InvariantCulture)}.{program.Runs.ToString(CultureInfo.InvariantCulture)}.{program.Phase.ToString(CultureInfo.InvariantCulture)}",
-                program.Owner == program.Provider ? program.Provider : null);
+                program.Owner == program.Provider ? program.Provider : null,
+                InvocationHost: program.Provider);
             switch (program.State)
             {
                 case "watching" when program.Every > 0 && now >= program.NextEvaluation:
