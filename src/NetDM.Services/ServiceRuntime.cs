@@ -232,6 +232,7 @@ public sealed class ServiceRuntime
     private readonly Queue<long> _history = new();
     private readonly SortedDictionary<long, DeliveryRecord> _inbox = new();
     private readonly Queue<DeliverySubmission> _outbox = new();
+    private readonly NetworkEventJournal _automationEvents = new();
     private readonly HashSet<string> _hostTypes = new(StringComparer.Ordinal);
     /// <summary>Commands for host-provided services waiting for the Host, in arrival order.</summary>
     private readonly Queue<long> _hostQueue = new();
@@ -258,6 +259,29 @@ public sealed class ServiceRuntime
         foreach (var type in _options.HostProvidedTypes ?? [])
             if (ServiceNames.IsValid(type))
                 _hostTypes.Add(type);
+    }
+
+    /// <summary>Arm only live endpoints that own active event-driven programs (max 64).</summary>
+    public void SetEventReaders(IEnumerable<EndpointKey> owners)
+    {
+        ArgumentNullException.ThrowIfNull(owners);
+        lock (_gate)
+            _automationEvents.SetReaders(owners.Where(owner => Require(owner, out _) == ServiceStatus.Ok));
+    }
+
+    public long EventRevisionOf(EndpointKey owner)
+    {
+        lock (_gate)
+            return Require(owner, out _) == ServiceStatus.Ok ? _automationEvents.Revision(owner) : 0;
+    }
+
+    /// <summary>Only projected events acknowledged by the receiver are visible to that receiver's programs.</summary>
+    public NetworkEventPage AcknowledgedEvents(EndpointKey owner, long afterSequence, int max)
+    {
+        lock (_gate)
+            return Require(owner, out _) == ServiceStatus.Ok
+                ? _automationEvents.Read(owner, Math.Max(0, afterSequence), max)
+                : new NetworkEventPage(0, 0, false, []);
     }
 
     /// <summary>
@@ -1113,6 +1137,9 @@ public sealed class ServiceRuntime
                 _rejected++;
             if (delivery.Kind != DeliveryKind.Command)
             {
+                if (applied && delivery.Kind == DeliveryKind.Event)
+                    _automationEvents.Record(delivery.Recipient, delivery.Id, delivery.SubscriptionKey,
+                        delivery.Instance, delivery.Schema.Id, delivery.Payload);
                 Finish(delivery, applied ? DeliveryState.Applied : DeliveryState.RejectedByWorld, reason);
                 return (ServiceStatus.Ok, View(delivery));
             }
@@ -1365,6 +1392,7 @@ public sealed class ServiceRuntime
 
     private void RemoveEndpoint(EndpointRecord record, string reason)
     {
+        _automationEvents.Remove(record.Key);
         // The receiver outcome is decided first, so it is ReceiverGone rather than Cancelled.
         foreach (var deliveryId in record.Inbound.ToArray())
             Finish(_deliveries[deliveryId], DeliveryState.ReceiverGone, reason);
