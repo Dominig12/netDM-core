@@ -16,6 +16,7 @@ static class ServiceSmokeTests
         CheckSchemas();
         CheckContractModules();
         CheckDeliveryLifecycle();
+        CheckAcknowledgedEventJournal();
         CheckBounds();
         CheckOutboxBackpressure();
         CheckCommands();
@@ -28,6 +29,69 @@ static class ServiceSmokeTests
         Console.WriteLine("P2 service foundation, P4 telemetry snapshot, P7 messenger and P10 directory query checks passed.");
     }
 
+
+
+    /// <summary>Event rules observe actual DM-ACKed packets only, with per-owner isolation.</summary>
+    private static void CheckAcknowledgedEventJournal()
+    {
+        var stand = new Stand();
+        var services = stand.Services;
+        var sensor = new EndpointKey("automation.sensor", 1);
+        var reader = new EndpointKey("automation.reader", 1);
+        var stranger = new EndpointKey("automation.stranger", 1);
+        Check(services.AttachEndpoint(sensor, new NodeId(1)) == ServiceStatus.Ok &&
+            services.AttachEndpoint(reader, new NodeId(3)) == ServiceStatus.Ok &&
+            services.AttachEndpoint(stranger, new NodeId(4), "other") == ServiceStatus.Ok,
+            "attach event sender, subscriber and disconnected stranger");
+        Check(services.RegisterService(sensor, "sensor.auto", "atmos.telemetry", "atmos.sample", 1, 0) ==
+            ServiceStatus.Ok, "register automation sensor");
+        Check(services.Subscribe(reader, "oxygen", "sensor.auto", "atmos.sample", 1, "panel.v1",
+            DeliveryMode.LatestValue, 1).Status == ServiceStatus.Ok, "register automation subscription");
+
+        services.SetEventReaders([reader]);
+        var published = services.Publish(sensor, "sensor.auto", 1, Sample(150), 30, PacketTrafficClass.Background);
+        Check(published.Status == ServiceStatus.Ok, "publish packet for event-driven shell");
+        stand.Settle();
+        var delivered = Inbox(stand, reader.Id, "event").Single();
+        Check(services.EventRevisionOf(reader) == 0 &&
+            services.AcknowledgedEvents(reader, 0, 8).Events.Count == 0, "transport delivery alone does not fire rules");
+        Check(delivered.Payload!.Value.TryGetProperty("pressureKPa", out var pressure) &&
+            pressure.GetDouble() == 150 && !delivered.Payload.Value.TryGetProperty("sampleTick", out _),
+            "subscriber observes only the projection it requested");
+        Check(services.Acknowledge(delivered.DeliveryId, true, null).Status == ServiceStatus.Ok,
+            "DM ACKs the event after applying or capturing");
+        var page = services.AcknowledgedEvents(reader, 0, 8);
+        Check(page.Latest == 1 && page.Through == 1 && page.Events.Count == 1 &&
+            page.Events[0].SubscriptionKey == "oxygen" &&
+            page.Events[0].Payload.GetProperty("pressureKPa").GetDouble() == 150,
+            "ACKed event is exposed once to exactly its receiving endpoint");
+        Check(services.Acknowledge(delivered.DeliveryId, true, null).Status == ServiceStatus.Duplicate &&
+            services.EventRevisionOf(reader) == 1, "repeat ACK never creates another event");
+        Check(services.AcknowledgedEvents(stranger, 0, 8).Events.Count == 0,
+            "different endpoints cannot read other subscriptions");
+
+        // This journal has its own strict memory and reader limits even under bursts.
+        var journal = new NetworkEventJournal();
+        journal.SetReaders([reader]);
+        var bytes = System.Text.Encoding.UTF8.GetBytes("""{"pressureKPa":151.5,"alarm":true}""");
+        journal.Record(stranger, 1, "spy", "sensor.auto", "atmos.sample", bytes);
+        Check(journal.Read(stranger, 0, 16).Events.Count == 0, "unarmed endpoint cannot be observed");
+        for (var i = 1; i <= NetworkEventJournal.MaxEventsPerReader + 9; i++)
+            journal.Record(reader, i, "oxygen", "sensor.auto", "atmos.sample", bytes);
+        var firstPage = journal.Read(reader, 0, 16);
+        Check(firstPage.Overflowed && firstPage.Events.Count == 16 &&
+            firstPage.Events[0].Payload.GetProperty("alarm").GetBoolean() &&
+            firstPage.Through < firstPage.Latest, "overflow is explicit, projected fields remain typed");
+        var rest = journal.Read(reader, firstPage.Through, 16);
+        Check(rest.Events.Count == 16 && rest.Through == rest.Latest,
+            "bounded event batches advance an explicit cursor");
+        journal.SetReaders([]);
+        Check(journal.Revision(reader) == 0 && journal.Read(reader, 0, 16).Events.Count == 0,
+            "removing active program listeners forgets the journal");
+        Check(services.DetachEndpoint(reader) == ServiceStatus.Ok, "detach old subscriber");
+        Check(services.AcknowledgedEvents(reader, 0, 8).Events.Count == 0,
+            "detached endpoint cannot read stale events");
+    }
 
     /// <summary>
     /// A new game feature should be able to introduce a schema and a command without
