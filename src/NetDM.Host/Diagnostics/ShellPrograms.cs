@@ -473,7 +473,9 @@ public static class ShellPrograms
         // A device that keeps the program on its media asks for it on every attach ("ensure"). The program of
         // the same name it already runs is taken over by its current endpoint generation and keeps its state:
         // phase, last observation, runs. Only the same endpoint may take it over, and never an older generation.
-        var ensure = arguments.TryGetProperty("ensure", out var ensureFlag) &&
+        // Compile-only requests cannot claim media ownership or mutate an existing entity,
+        // even if an untrusted caller supplies ensure/entity fields explicitly.
+        var ensure = !checkOnly && arguments.TryGetProperty("ensure", out var ensureFlag) &&
             (ensureFlag.ValueKind == JsonValueKind.True || (ensureFlag.ValueKind == JsonValueKind.Number && ensureFlag.TryGetInt32(out var one) && one == 1));
         var kept = ensure ? Programs.Find(program => !program.Finished && program.Name == name && program.Instance == command.Instance &&
             program.Owner.Id == command.InitiatorKey.Id && program.Provider.Id == command.ProviderKey.Id) : null;
