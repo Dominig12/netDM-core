@@ -264,6 +264,7 @@ public sealed partial class SchemaRegistry
                 new SchemaField("target", SchemaFieldType.Text, false, MaxLength: 20),
                 new SchemaField("label", SchemaFieldType.Text, false, MaxLength: 64),
                 new SchemaField("node", SchemaFieldType.Text, false, MaxLength: 20),
+                new SchemaField("purpose", SchemaFieldType.Text, false, MaxLength: 24),
                 new SchemaField("keys", SchemaFieldType.Text, false, MaxLength: 1024),
                 new SchemaField("masked", SchemaFieldType.Boolean, false),
                 new SchemaField("expires", SchemaFieldType.Integer, false, 0, 1_000_000_000),
@@ -272,7 +273,7 @@ public sealed partial class SchemaRegistry
             ],
             new Dictionary<string, IReadOnlyList<string>>
             {
-                ["full"] = ["status", "reason", "code", "target", "label", "node", "keys", "masked", "expires", "expiresIn", "retryIn"]
+                ["full"] = ["status", "reason", "code", "target", "label", "node", "purpose", "keys", "masked", "expires", "expiresIn", "retryIn"]
             }, MaxPayloadBytes: 2048));
         registry.RegisterCommand("network.shell", "hack_start", "shell.hack_start", 1, "shell.hack", 1, transient: true);
         registry.RegisterCommand("network.shell", "hack_answer", "shell.hack_answer", 1, "shell.hack", 1);

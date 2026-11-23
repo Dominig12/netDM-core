@@ -16,6 +16,7 @@ static class ServiceSmokeTests
         CheckSchemas();
         CheckContractModules();
         CheckDeliveryLifecycle();
+        CheckLatestValueWithOutOfOrderDelivery();
         CheckAcknowledgedEventJournal();
         CheckBounds();
         CheckOutboxBackpressure();
@@ -780,12 +781,15 @@ static class ServiceSmokeTests
         {
             var submissions = Services.TakeSubmissions(1024);
             foreach (var submission in submissions)
-            {
-                var route = Medium.Route(submission.From, submission.To);
-                Services.OnSubmitted(submission.DeliveryId, Packets.Submit(submission.RequestId, route,
-                    submission.Bytes, Tick, submission.TrafficClass, submission.TimeoutTicks));
-            }
+                Submit(submission);
             return submissions.Length;
+        }
+
+        public void Submit(DeliverySubmission submission)
+        {
+            var route = Medium.Route(submission.From, submission.To);
+            Services.OnSubmitted(submission.DeliveryId, Packets.Submit(submission.RequestId, route,
+                submission.Bytes, Tick, submission.TrafficClass, submission.TimeoutTicks));
         }
 
         /// <summary>Routes, advances and repeats until no service packet is waiting.</summary>
@@ -947,6 +951,39 @@ static class ServiceSmokeTests
         stand.Tick += 5;
         stand.Advance(3);
         Check(stand.State(eighth.Deliveries[0]) is DeliveryState.Expired, "deadline expires delivery");
+    }
+
+    private static void CheckLatestValueWithOutOfOrderDelivery()
+    {
+        var stand = new Stand();
+        var services = stand.Services;
+        var sensor = new EndpointKey("latest-sensor", 1);
+        var display = new EndpointKey("latest-display", 1);
+        Check(services.AttachEndpoint(sensor, new NodeId(1)) == ServiceStatus.Ok, "attach latest-value sensor");
+        Check(services.AttachEndpoint(display, new NodeId(3)) == ServiceStatus.Ok, "attach latest-value display");
+        Check(services.RegisterService(sensor, "latest-atmos", "atmos.telemetry", "atmos.sample", 1, 0) == ServiceStatus.Ok,
+            "register latest-value sensor");
+        Check(services.Subscribe(display, "main", "latest-atmos", "atmos.sample", 1, "panel.v1",
+            DeliveryMode.LatestValue, 1).Status == ServiceStatus.Ok, "subscribe to latest sensor value");
+        for (var sequence = 1; sequence <= 3; sequence++)
+            Check(services.Publish(sensor, "latest-atmos", sequence, Sample(100 + sequence), 30,
+                PacketTrafficClass.Background).Status == ServiceStatus.Ok, "publish a sample");
+        var submissions = services.TakeSubmissions(3);
+        Check(submissions.Length == 3, "each publication creates one delivery");
+
+        // Complete the newest route first, then complete both delayed routes around the DM ACK.
+        stand.Submit(submissions[2]);
+        stand.Advance(4);
+        stand.Submit(submissions[1]);
+        stand.Advance(4);
+        var newest = services.Poll(0, 8, 32_768).Items.Single();
+        Check(newest.DeliveryId == submissions[2].DeliveryId && newest.Payload!.Value.GetProperty("pressureKPa").GetDouble() == 103 &&
+            stand.State(submissions[1].DeliveryId) == DeliveryState.Superseded, "late packet cannot replace the newest queued sample");
+        Check(services.Acknowledge(newest.DeliveryId, true, null).Status == ServiceStatus.Ok, "acknowledge the newest sample");
+        stand.Submit(submissions[0]);
+        stand.Advance(4);
+        Check(services.Poll(0, 8, 32_768).Items.Length == 0 &&
+            stand.State(submissions[0].DeliveryId) == DeliveryState.Superseded, "late packet cannot roll back an acknowledged sample");
     }
 
     private static void CheckBounds()

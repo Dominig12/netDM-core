@@ -235,20 +235,24 @@ try {
     $invalid = @{ op = 'world_delta'; snapshotId = 'base'; factSequence = '12'
         changes = @(@{ op = 'add_node'; a = '3'; x = 3; y = 1 }, @{ op = 'remove_node'; a = '4' }) }
     Assert-True (-not (Invoke-Request $invalid '13').ok) 'invalid mixed live delta rejected atomically'
-    Assert-True ((Invoke-Request @{ op = 'heartbeat'; snapshotId = 'base'; factSequence = '11' } '14').ok) 'invalid live delta does not advance sequence'
-    Assert-True ((Get-GameReadiness).Status -eq 200) 'heartbeat restores readiness'
-    $replacement = @{ op = 'snapshot_begin'; snapshotId = 'bad'; chunkCount = 1; factCount = 1; factSequence = '11' }
-    Assert-True ((Invoke-Request $replacement '15').ok) 'begin replacement'
+    Assert-True ((Get-GameReadiness).Status -eq 503) 'invalid world traffic cannot restore readiness'
+    $liveDelta = @{ op = 'world_delta'; snapshotId = 'base'; factSequence = '12'
+        changes = @(@{ op = 'move_node'; a = $b; x = 3; y = 1; z = 1 }) }
+    Assert-True ((Invoke-Request $liveDelta '14').lastFactSequence -ceq '12') 'valid delta advances the published sequence'
+    Assert-True ((Get-GameReadiness).Status -eq 200) 'a committed live delta restores readiness'
+    Assert-True ((Invoke-Request @{ op = 'heartbeat'; snapshotId = 'base'; factSequence = '12' } '15').ok) 'heartbeat uses the new sequence'
+    $replacement = @{ op = 'snapshot_begin'; snapshotId = 'bad'; chunkCount = 1; factCount = 1; factSequence = '12' }
+    Assert-True ((Invoke-Request $replacement '16').ok) 'begin replacement'
     $readiness = Get-GameReadiness
     Assert-True ($readiness.Status -eq 503 -and $readiness.Body.phase -ceq 'syncing') 'replacement snapshot fences readiness'
     $orphan = '[{"op":"connect","a":"1","b":"2"}]'
     $orphanDigest = Get-Digest $orphan
     Assert-True ((Invoke-Request @{ op = 'snapshot_chunk'; snapshotId = 'bad'; chunkIndex = 0
-        factsJson = $orphan; digest = $orphanDigest } '16').ok) 'stage orphan link'
+        factsJson = $orphan; digest = $orphanDigest } '17').ok) 'stage orphan link'
     Assert-True (-not (Invoke-Request @{ op = 'snapshot_commit'; snapshotId = 'bad'
-        digest = (Get-Digest $orphanDigest) } '17').ok) 'invalid references rejected at commit'
-    Assert-True ((Invoke-Request @{ op = 'game_stats' } '18').game.nodes -eq 2) 'invalid replacement leaves previous graph intact'
-    Assert-True ((Invoke-Request @{ op = 'endpoint_attach'; endpoint = 'early'; generation = '1'; a = $a } '19').error -ceq 'game_not_ready') 'services require a published runtime'
+        digest = (Get-Digest $orphanDigest) } '18').ok) 'invalid references rejected at commit'
+    Assert-True ((Invoke-Request @{ op = 'game_stats' } '19').game.nodes -eq 2) 'invalid replacement leaves previous graph intact'
+    Assert-True ((Invoke-Request @{ op = 'endpoint_attach'; endpoint = 'early'; generation = '1'; a = $a } '20').error -ceq 'game_not_ready') 'services require a published runtime'
 
     # P2: one typed service end to end over the simulated wired network.
     $owner.Dispose()

@@ -32,7 +32,7 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
     private readonly SemaphoreSlim _gameOwner = new(1, 1);
     private volatile bool _ipcReady;
     private sealed record SyncState(string Phase, Guid? StreamId = null,
-        long LastFactSequence = 0, long Heartbeat = 0);
+        long LastFactSequence = 0, long LastWorldContact = 0);
     private volatile SyncState _sync = new("disconnected");
 
     public bool IpcReady => _ipcReady;
@@ -52,7 +52,7 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
             state.Phase, state.StreamId, state.LastFactSequence.ToString(CultureInfo.InvariantCulture));
     }
 
-    /// <summary>Admission of network work: published snapshot, fresh heartbeat, living workers.</summary>
+    /// <summary>Admission of network work: published snapshot, recent contact from the game, living workers.</summary>
     private bool NetworkReady => Network().Ready;
 
     private (bool Ready, bool Ipc, bool Workers, bool Heartbeat, SyncState State) Network()
@@ -60,7 +60,8 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
         var state = _sync;
         var ipc = _ipcReady;
         var workers = game.WorkersReady;
-        var heartbeat = state.Heartbeat != 0 && Stopwatch.GetElapsedTime(state.Heartbeat) <= TimeSpan.FromSeconds(5);
+        var heartbeat = state.LastWorldContact != 0 &&
+            Stopwatch.GetElapsedTime(state.LastWorldContact) <= TimeSpan.FromSeconds(5);
         return (ipc && workers && heartbeat && state.Phase == "ready", ipc, workers, heartbeat, state);
     }
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -571,7 +572,7 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
             states.RemoveWhere(removed.Contains);
             seenNodes!.UnionWith(added);
             lastFactSequence = request.FactSequence;
-            _sync = _sync with { LastFactSequence = lastFactSequence };
+            _sync = _sync with { LastFactSequence = lastFactSequence, LastWorldContact = Stopwatch.GetTimestamp() };
             return new PipeResponse(request.Id, true, Applied: result.Applied, Skipped: result.Skipped,
                 LastFactSequence: lastFactSequence);
         }
@@ -648,7 +649,7 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
                 stateRevision++;
             seenNodes!.UnionWith(added);
             lastFactSequence = request.FactSequence;
-            _sync = _sync with { LastFactSequence = lastFactSequence };
+            _sync = _sync with { LastFactSequence = lastFactSequence, LastWorldContact = Stopwatch.GetTimestamp() };
             return new PipeResponse(request.Id, true, Applied: result.Applied, Skipped: result.Skipped,
                 LastFactSequence: lastFactSequence, Result: new { devices = DescribeAttachments(plan) });
         }
@@ -744,7 +745,7 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
             game.ApcBridges = map.Bridges;
             areaUpdate = null;
             lastFactSequence = update.LastSequence;
-            _sync = _sync with { LastFactSequence = lastFactSequence };
+            _sync = _sync with { LastFactSequence = lastFactSequence, LastWorldContact = Stopwatch.GetTimestamp() };
             return new PipeResponse(request.Id, true, Applied: result.Applied, Skipped: result.Skipped,
                 LastFactSequence: lastFactSequence, SnapshotId: publishedSnapshot, UpdateId: update.Id);
         }
@@ -755,7 +756,7 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
             {
                 if (request.SnapshotId != publishedSnapshot || request.FactSequence != lastFactSequence)
                     throw new ArgumentException("Heartbeat does not match the published snapshot.");
-                _sync = _sync with { Heartbeat = Stopwatch.GetTimestamp() };
+                _sync = _sync with { LastWorldContact = Stopwatch.GetTimestamp() };
             }
             return new PipeResponse(request.Id, true, LastFactSequence: lastFactSequence);
         }

@@ -175,6 +175,7 @@ public sealed class ServiceRuntime
         public DeliveryMode Mode;
         public int MaxPending;
         public long Revision;
+        public long LatestPresentedSequence;
         public int Pending;
     }
 
@@ -1258,6 +1259,7 @@ public sealed class ServiceRuntime
         subscription.Projection = projection;
         subscription.Mode = mode;
         subscription.MaxPending = pending;
+        subscription.LatestPresentedSequence = 0;
         subscription.Revision++;
     }
 
@@ -1523,8 +1525,15 @@ public sealed class ServiceRuntime
     private void PresentEvent(DeliveryRecord delivery, EndpointRecord recipient)
     {
         var subscription = _subscriptions[delivery.SubscriptionId];
-        if (subscription.Mode == DeliveryMode.LatestValue)
+        var latestValue = subscription.Mode == DeliveryMode.LatestValue;
+        if (latestValue)
         {
+            // An older packet can complete its route after a newer one has been queued or ACKed.
+            if (delivery.ProducerSequence <= subscription.LatestPresentedSequence)
+            {
+                Finish(delivery, DeliveryState.Superseded, "newer_value");
+                return;
+            }
             foreach (var deliveryId in recipient.Inbound.ToArray())
             {
                 var older = _deliveries[deliveryId];
@@ -1534,13 +1543,17 @@ public sealed class ServiceRuntime
             }
         }
         // Latest-value keeps at most one undelivered value; an older one may still be in DM.
-        if (subscription.Mode == DeliveryMode.Queue && subscription.Pending >= subscription.MaxPending)
+        else if (subscription.Pending >= subscription.MaxPending)
         {
             Finish(delivery, DeliveryState.Busy, "recipient_inbox_full");
             return;
         }
         if (Enqueue(delivery))
+        {
             subscription.Pending++;
+            if (latestValue)
+                subscription.LatestPresentedSequence = delivery.ProducerSequence;
+        }
     }
 
     private string? AccessFailure(DeliveryRecord delivery, EndpointRecord recipient)
