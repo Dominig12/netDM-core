@@ -8,7 +8,8 @@
 
 | Ограничение | Следствие |
 |---|---|
-| Нет C/C++ тулчейна (`cl`, `gcc`, `mingw`, `clang`, `zig`), Docker-демон не используется | `netdm_byond.dll`/`.so` собрать нельзя; моста в дереве нет; **проверка в живом DreamDaemon заблокирована** |
+| ~~Нет C/C++ тулчейна, проверка в живом DreamDaemon заблокирована~~ | **снято 25.11.2026**: `native/byond/build.ps1` скачал закреплённый i686 MinGW-w64 и собрал `netdm_byond.dll` (i386 PE, 748 КБ). `scripts/test-byond-world.ps1` → **`NETDM_WORLD_PASS`**; DM-набор BlueMoon в DreamDaemon → **19 из 22 тестов PASS** (см. §17) |
+| Docker-демон не используется | Linux-прогоны и Compose остаются вне стенда |
 | `netdM-core` без `.sln` | сборка по csproj: `dotnet build src/NetDM.Host -c Release` |
 | Тестовый фреймворк не используется | харнессы — консольные приложения с маркером и кодом возврата |
 
@@ -334,7 +335,29 @@
 
 По пути найдена и исправлена собственная ошибка: первая версия `end_immersions` обходила ассоциативный список так, будто его элементы — погружения, а не значения по ключу-слабой ссылке; исправлено до компиляции.
 
-## 17. Что не сделано и почему
+## 17. Живая приёмка DM-части (25.11.2026)
+
+Впервые на этом стенде собрался нативный мост и отработал живой мир.
+
+| Шаг | Команда | Результат |
+|---|---|---|
+| Сборка моста | `pwsh -File native/byond/build.ps1 -Offline` | `netdm_byond.dll` 747 890 байт, PE machine `0x014C` (i386). Сборка тестового exe падает на гонке `objects.a` в MinGW — на DLL не влияет |
+| Мир-дым | `pwsh -File scripts/test-byond-world.ps1 -BridgeDll native\byond\build\netdm_byond.dll` | **`NETDM_WORLD_PASS`**, включая восстановление research-журнала, переполнение mailbox (1063 команды), APC-топологию и привязку устройств |
+| DM-набор BlueMoon | `pwsh -File scripts/test-bluemoon-unit.ps1 -BuildDirectory C:\nrun\src -BridgeDll <dll> -TestList scripts/bluemoon-netdm-tests.txt` | **19 PASS, 3 FAIL** в герметичном мире `Runtime Station` с живым Host |
+
+Список тестов исправлен (D-08): четыре устаревших пути (`messenger_shadow`, `radio_shadow`, `door_shadow`, `research_shadow`) заменены на реальные (`messenger_authoritative`, `radio_uplink`, `radio_station`, `door_station`), добавлен `network_airlock_panel`.
+
+Прошли в живом мире: `netdm_observe`, `area_map`, `node_attachment`, `topology_view`, `power_state`, `network_diagnostics`, `network_terminal`, `network_cameras`, `network_air_alarm`, `network_airlock_panel`, `network_immersion`, `atmos_telemetry`, `messenger_authoritative`, `radio_uplink`, `radio_station`, `research_authoritative`, `research_p6`, `research_authoritative/outbox`, `verb_proc_ids`.
+
+Три падения и их причина:
+
+| Тест | Причина | Статус |
+|---|---|---|
+| `network_immersion_dive` | персона не восстанавливается после переустановки нейролинка (таймаут 20 с, `netdm_observe.dm:2715`). **Проверено экспериментом: падает и при выключенном хуке NETRUN**, то есть дефект существовал до этой работы | известный дефект, зафиксирован |
+| `door_station` | «The station needs door buttons: 2» — на герметичной карте `Runtime Station` нет кнопок blast-дверей | окружение, не код |
+| `network_life_physical` | «An agent on the APC pings it» — население сети не засеяно в этом профиле (`NETDM_NET_LIFE` выключен) | окружение, не код |
+
+## 18. Что не сделано и почему
 
 | Пункт | Состояние | Условие |
 |---|---|---|
@@ -347,7 +370,7 @@
 | DM-адаптер NETRUN (объявление хостов из мира, клиентские команды) | не начато | этап N3/N4 |
 | Время NETRUN = квант транспорта, а не время мира из DM | осознанно | заменить на время, которое присылает DM, при интеграции N3 |
 
-## 18. Технический долг и нарушения, найденные аудитом
+## 19. Технический долг и нарушения, найденные аудитом
 
 Ссылки на файлы и строки — в [t0-audit.md](t0-audit.md) и [migration-matrix.md](migration-matrix.md). Здесь только то, что нужно закрыть, и в каком этапе.
 
