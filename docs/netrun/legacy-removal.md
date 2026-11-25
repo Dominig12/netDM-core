@@ -8,6 +8,7 @@
 |---|---|---|---|
 | Четыре несуществующих пути в списке DM-тестов (`messenger_shadow`, `radio_shadow`, `door_shadow`, `research_shadow`) | `netDM-core/scripts/bluemoon-netdm-tests.txt` | §21.1: список проверок должен запускать реальные тесты | живой прогон: тесты находятся и проходят |
 | Дублирующие `null`-поля в запросе персоны | `MOLOT:code/modules/netdm/network_space.dm` | §6.4: ошибка не должна быть тишиной | живой тест `network_immersion_dive` — PASS |
+| Заглушка `set_authoritative()` у дверей (мёртвый код, вызовов нет) | `MOLOT:code/modules/netdm/door_control_shadow.dm` | ADR-0007: иллюзия переключаемости | DM-сборка 0/0; живой прогон `network_airlock_panel`, `netrun_client`, `netrun_adapter` — PASS, `clean_run.lk: True` |
 
 ## В работе — следующий этап чистки
 
@@ -15,7 +16,7 @@
 
 | # | Что снимается | Почему легаси | Риск | Проверка |
 |---|---|---|---|---|
-| L-1 | Заглушки `set_authoritative()` в `door_control_shadow.dm`, `messenger_shadow.dm` | Иллюзия переключаемости: режим всё равно авторитетный, переключатель ничего не делает | низкий | DM-сборка + `door_station`, `messenger_authoritative` |
+| L-1 | Заглушки `set_authoritative()` у мессенджера (дверная снята) | Дверная удалена как мёртвый код; у мессенджера и радио вызов остаётся живым, поэтому их переключатели снимаются вместе с refactor-ом пилотов (L-3, L-4) | низкий | DM-сборка + `messenger_authoritative`, `radio_uplink` |
 | L-2 | Сравнительные счётчики shadow-пилота в `atmos_telemetry.dm` (`report`, `legacy`/`netdm` наборы, `state()`) | Пилот своё отработал, измерения записаны; в игре счётчики не читаются, но считаются на каждом отчёте | средний | DM-сборка + `atmos_telemetry` |
 | L-3 | Аналитический охват радио (`radio_shadow` выборка 4/с, `radio_reach`), если он больше не нужен как измерение | Считает гипотетическое покрытие передачи; авторитетная доставка идёт через `radio_uplink` | средний: `radio_reach` — ещё и C#-op | DM-сборка + `radio_uplink`, `radio_station` |
 | L-4 | Сравнение «legacy vs network» в `messenger_shadow.dm` | После перехода на авторитетный сервер сравнение не имеет второй стороны | средний | `messenger_authoritative` |
