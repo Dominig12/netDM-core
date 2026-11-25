@@ -2024,6 +2024,14 @@ try {
         execution = $deckHost; target = $deckHost; key = 'nr-scan-1' } }
     Assert-True ($scan.result.status -ceq 'committed' -and $scan.result.result -match 'netrun\.deck') 'discovery is served from the same pipeline'
 
+    $knowledge = Invoke-Next @{ op = 'netrun_knowledge'; payload = @{ principal = 'op-netrun'; limit = 16 } }
+    $knownDeck = $knowledge.result.entries | Where-Object { $_.host -eq $deckHost } | Select-Object -First 1
+    Assert-True ($knowledge.ok -and $null -ne $knownDeck -and $knownDeck.level -ceq 'observed' -and
+        -not $knownDeck.stale) "the scan recorded what the observer now knows: $($knowledge | ConvertTo-Json -Compress -Depth 4)"
+    $unseen = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'net.inspect'
+        execution = $deckHost; target = 65535; key = 'nr-unseen' } }
+    Assert-True ($unseen.result.status -ceq 'forbidden') 'a target the observer was never granted is refused, not described'
+
     $state = Invoke-Next @{ op = 'netrun_state'; payload = @{ limit = 16 } }
     $deckState = $state.result.hosts | Where-Object { $_.host -eq $deckHost } | Select-Object -First 1
     Assert-True ($state.ok -and $null -ne $deckState -and $deckState.bufferCu -lt 8) "the buffer reflects spent compute: $($deckState | ConvertTo-Json -Compress)"

@@ -7,6 +7,7 @@ public sealed record NetRunRuntimeOptions(
     int MaxEffects = 16_384,
     int MaxOperations = 16_384,
     int MaxPrincipals = 65_536,
+    int MaxKnowledgePerObserver = 1_024,
     bool RegisterMvpEffects = true,
     bool RegisterBuiltinActions = true);
 
@@ -44,9 +45,11 @@ public sealed class NetRunRuntime
         Resources = new ResourceLedger(clock, new ResourceLedgerOptions(_options.MaxReservations));
         Authority = new CapabilityAuthority(clock, new CapabilityAuthorityOptions(_options.MaxGrants));
         Effects = new EffectRegistry(clock, new EffectRegistryOptions(_options.MaxEffects));
+        Knowledge = new KnowledgeStore(clock, new KnowledgeOptions(MaxPerObserver: _options.MaxKnowledgePerObserver));
         Actions = new ActionPipeline(clock, Hosts, Resources, Authority,
             new ActionPipelineOptions(MaxOperations: _options.MaxOperations));
         Actions.AttachEffects(Effects);
+        Actions.AttachKnowledge(Knowledge);
         if (_options.RegisterMvpEffects)
         {
             foreach (var definition in EffectRegistry.MvpDefaults())
@@ -63,6 +66,8 @@ public sealed class NetRunRuntime
     public CapabilityAuthority Authority { get; }
 
     public EffectRegistry Effects { get; }
+
+    public KnowledgeStore Knowledge { get; }
 
     public ActionPipeline Actions { get; }
 
@@ -119,6 +124,7 @@ public sealed class NetRunRuntime
         Resources.Detach(host.Id);
         Authority.RevokeTarget(host.Id);
         Effects.RemoveTarget(host.Id);
+        Knowledge.Forget(host.Id);
         Actions.CancelTarget(host.Id, "target_destroyed");
         return result;
     }
@@ -138,6 +144,7 @@ public sealed class NetRunRuntime
         Resources.AdvanceTo(now);
         var expiredReservations = Math.Max(0, before - Resources.ActiveCount);
         var effects = Effects.Tick(now);
+        Knowledge.Prune();
         var operations = Actions.ExpirePrepared(now) + Actions.ExpireRemote(now);
         var published = PublishEvents();
         return new NetRunTickResult(now, expiredReservations, effects, operations, published);

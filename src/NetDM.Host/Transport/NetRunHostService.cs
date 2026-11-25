@@ -241,6 +241,18 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
             return _runtime.Hosts.Get(host);
     }
 
+    /// <summary>What one principal knows, freshest first. Age and staleness are computed by the caller.</summary>
+    public KnowledgeRecord[] Knowledge(string principalName, int limit)
+    {
+        lock (_gate)
+            return _principals.TryGetValue(principalName, out var principal)
+                ? _runtime.Knowledge.Known(principal, limit)
+                : [];
+    }
+
+    /// <summary>Whether a record is older than the freshness window, using the domain clock.</summary>
+    public bool IsStale(KnowledgeRecord record) => _runtime.Knowledge.IsStale(record);
+
     /// <summary>Recent operations, newest first.</summary>
     public ActionOutcome[] RecentOperations(int limit)
     {

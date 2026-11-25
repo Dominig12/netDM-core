@@ -130,6 +130,12 @@ public interface INetRunWorldReader
     /// selector can never reveal a hidden object through a count or an error (PRIM-002, AT-12).
     /// </summary>
     HostSnapshot[] VisibleHosts(PrincipalId principal, int limit);
+
+    /// <summary>What this observer actually holds about a host; <see cref="KnowledgeLevel.Unknown"/> otherwise.</summary>
+    KnowledgeLevel KnowledgeOf(PrincipalId principal, HostId host);
+
+    /// <summary>Whether the observer holds the level and the record is still fresh enough to act on.</summary>
+    bool Knows(PrincipalId principal, HostId host, KnowledgeLevel level);
 }
 
 /// <summary>Write side offered to an action at commit time. Everything goes through the registered domains.</summary>
@@ -149,6 +155,9 @@ public interface INetRunMutationScope
 
     /// <summary>Records a domain event after the authoritative change; the owner publishes it.</summary>
     void Emit(string topic, string payload);
+
+    /// <summary>Stores what the acting principal has just learned, for example from a scan.</summary>
+    void Remember(HostId host, KnowledgeLevel level, int confidence);
 }
 
 /// <summary>
@@ -306,6 +315,7 @@ public sealed class ActionPipeline(
     private readonly SortedSet<(long At, ulong Operation)> _prepared = [];
     private readonly Queue<ActionEvent> _events = new();
     private EffectRegistry? _effects;
+    private KnowledgeStore? _knowledge;
     private INetRunTransport? _transport;
     private ulong _nextOperation;
 
@@ -324,6 +334,10 @@ public sealed class ActionPipeline(
     /// </summary>
     public void AttachTransport(INetRunTransport transport) =>
         _transport = transport ?? throw new ArgumentNullException(nameof(transport));
+
+    /// <summary>Connects the per-observer knowledge store so perception actions can read and record it.</summary>
+    public void AttachKnowledge(KnowledgeStore knowledge) =>
+        _knowledge = knowledge ?? throw new ArgumentNullException(nameof(knowledge));
 
     /// <summary>Registers an action. A conflicting duplicate fails at composition time, not at run time.</summary>
     public void Register(IGameAction action)
@@ -416,11 +430,10 @@ public sealed class ActionPipeline(
         if (_retired.Contains((request.Principal.Value, request.IdempotencyKey)))
             return new PrepareOutcome(ActionStatus.UnknownOutcome, OperationId.None, null, Reason: "idempotency_window_expired");
 
+        // A missing target is not refused here yet: the action validates first, so that "you may not see it"
+        // and "it does not exist" produce the same answer and an error cannot reveal a hidden object (§6.4).
         var targetHost = _hosts.Get(request.TargetHost);
-        if (targetHost is null)
-            return new PrepareOutcome(ActionStatus.TargetDestroyed, OperationId.None, null, Reason: "target");
-
-        var profile = targetHost.Security?.Profile ?? SecurityProfile.Standard;
+        var profile = targetHost?.Security?.Profile ?? SecurityProfile.Standard;
         var authorization = _authority.Authorize(request.Principal, request.TargetHost,
             descriptor.RequiredCapability, descriptor.ServiceKey, profile);
         if (!authorization.Allowed)
@@ -441,6 +454,11 @@ public sealed class ActionPipeline(
             Record(operationId, descriptor, request, digest, OperationState.Failed, validation.Reason ?? validation.Status.ToString());
             return new PrepareOutcome(validation.Status, operationId, null, Reason: validation.Reason);
         }
+
+        // An action that passed validation and then finds no host could only be one that does not check its
+        // own target; refuse it instead of spending anything.
+        if (targetHost is null)
+            return new PrepareOutcome(ActionStatus.TargetDestroyed, OperationId.None, null, Reason: "target");
 
         var cooldownKey = CooldownKey(request.Principal, descriptor);
         if (_cooldowns.TryGetValue(cooldownKey, out var readyAt) && readyAt > now)
@@ -817,6 +835,12 @@ public sealed class ActionPipeline(
 
         public EffectInstance[] Effects(HostId target, int limit) => pipeline.EffectsReader(target, limit);
 
+        public KnowledgeLevel KnowledgeOf(PrincipalId principal, HostId host) =>
+            pipeline._knowledge?.Level(principal, host) ?? KnowledgeLevel.Unknown;
+
+        public bool Knows(PrincipalId principal, HostId host, KnowledgeLevel level) =>
+            pipeline._knowledge?.Holds(principal, host, level) ?? false;
+
         public HostSnapshot[] VisibleHosts(PrincipalId principal, int limit)
         {
             if (principal.IsNone || limit <= 0)
@@ -869,6 +893,9 @@ public sealed class ActionPipeline(
             ?? new EffectResult(EffectStatus.UnknownKind, null);
 
         public void Emit(string topic, string payload) => pipeline.EmitEvent(topic, payload);
+
+        public void Remember(HostId host, KnowledgeLevel level, int confidence) =>
+            pipeline._knowledge?.Remember(context.Principal, host, level, confidence);
     }
 
     private void EmitEvent(string topic, string payload)

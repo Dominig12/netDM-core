@@ -19,10 +19,17 @@ public sealed class InspectAction : IGameAction
 
     public string ContentDigest => "net.inspect";
 
-    public ActionValidation Validate(in ActionContext context, INetRunWorldReader world) =>
-        world.Host(context.TargetHost) is null
-            ? new ActionValidation(ActionStatus.TargetDestroyed, "unknown_host")
-            : ActionValidation.Pass;
+    /// <summary>
+    /// Inspecting is reading what you already know about. A host the observer never discovered answers the
+    /// same way as one that does not exist, so the action cannot be used to probe for hidden objects.
+    /// </summary>
+    public ActionValidation Validate(in ActionContext context, INetRunWorldReader world)
+    {
+        if (context.TargetHost != context.ExecutionHost &&
+            !world.Knows(context.Principal, context.TargetHost, KnowledgeLevel.Observed))
+            return new ActionValidation(ActionStatus.InvalidState, "not_known");
+        return ActionValidation.Pass;
+    }
 
     public ActionExecution Commit(in ActionContext context, INetRunMutationScope scope)
     {
@@ -31,6 +38,8 @@ public sealed class InspectAction : IGameAction
             return new ActionExecution(ActionStatus.TargetDestroyed, "unknown_host");
         var resources = scope.World.Resources(host.Id);
         var effects = scope.World.Effects(host.Id, 8);
+        // A successful inspection re-confirms the record: fresh knowledge is what the projection shows.
+        scope.Remember(host.Id, KnowledgeLevel.Observed, 100);
         var payload = JsonSerializer.Serialize(new
         {
             id = host.Id.Value,
@@ -95,6 +104,10 @@ public sealed class ScanAction : IGameAction
             found.Add((host.Id.Value, host.Generation.Value, host.Name, host.Class.ToString(),
                 host.Network?.Domain ?? string.Empty, host.Powered));
         }
+        // A scan is how knowledge begins: every host it reaches becomes observed by this principal.
+        foreach (var host in found)
+            scope.Remember(new HostId(host.Id), KnowledgeLevel.Observed, 80);
+        scope.Remember(context.ExecutionHost, KnowledgeLevel.Observed, 100);
         var payload = JsonSerializer.Serialize(new
         {
             domain = domain ?? string.Empty,

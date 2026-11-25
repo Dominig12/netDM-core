@@ -14,7 +14,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
     [
         "netrun_principal", "netrun_host", "netrun_destroy", "netrun_lifecycle",
         "netrun_grant", "netrun_revoke", "netrun_actions", "netrun_execute", "netrun_complete",
-        "netrun_state"
+        "netrun_knowledge", "netrun_state"
     ];
 
     // NETRUN administration has to work while the map snapshot is still being synchronized: the domain
@@ -32,6 +32,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         "netrun_actions" => Actions(payload),
         "netrun_execute" => ExecuteAction(payload),
         "netrun_complete" => CompleteAction(payload),
+        "netrun_knowledge" => KnowledgeProjection(payload),
         "netrun_state" => State(payload),
         _ => new HostIpcResult(false, "unknown_operation", null)
     };
@@ -260,6 +261,31 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
                 status = ActionStatus.Rejected;
                 return false;
         }
+    }
+
+    /// <summary>
+    /// What one observer knows, with the age of every record and whether it is still fresh. This is the
+    /// projection the client renders for the map: stale knowledge is shown as stale, never as live data.
+    /// </summary>
+    private HostIpcResult KnowledgeProjection(JsonElement? payload)
+    {
+        if (payload is not { ValueKind: JsonValueKind.Object } body || Text(body, "principal") is not { Length: > 0 } name)
+            return new HostIpcResult(false, "invalid_request", null);
+        var limit = Clamp(Integer(body, "limit"), 1, 512, 128);
+        var now = netrun.State(1).NowMilliseconds;
+        var records = netrun.Knowledge(name, limit);
+        return new HostIpcResult(true, null, new
+        {
+            count = records.Length,
+            entries = records.Select(record => new
+            {
+                host = record.Host.Value,
+                level = record.Level.ToString().ToLowerInvariant(),
+                confidence = record.Confidence,
+                ageMs = record.AgeMilliseconds(now),
+                stale = netrun.IsStale(record)
+            }).ToArray()
+        });
     }
 
     private HostIpcResult State(JsonElement? payload)

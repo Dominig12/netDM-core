@@ -28,6 +28,8 @@ internal static class Program
             EffectTests.Run();
         if (Matches("remote"))
             RemoteActionTests.Run();
+        if (Matches("knowledge"))
+            KnowledgeTests.Run();
 
         Console.WriteLine($"All NetRun.Core checks passed ({Count} assertions).");
         return Environment.ExitCode;
