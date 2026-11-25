@@ -398,6 +398,17 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
                     lastAction = program.LastAction,
                     lastOutcome = program.LastOutcome
                 }).ToArray(),
+                lives = _runtime.Lives.All(operationLimit).Select(core => new
+                {
+                    identity = core.Identity.Value,
+                    host = core.Host.Value,
+                    generation = core.HostGeneration.Value,
+                    control = core.ControlGeneration,
+                    integrity = core.Integrity,
+                    state = core.State.ToString().ToLowerInvariant(),
+                    migrating = core.Migrating,
+                    destination = core.MigrationDestination.Value
+                }).ToArray(),
                 presets = ProgramPresets.All.Select(preset => new
                 {
                     name = preset.Name,

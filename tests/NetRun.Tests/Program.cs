@@ -36,6 +36,8 @@ internal static class Program
             ProgramTests.Run();
         if (Matches("source"))
             ProgramSourceTests.Run();
+        if (Matches("life"))
+            DigitalLifeTests.Run();
 
         Console.WriteLine($"All NetRun.Core checks passed ({Count} assertions).");
         return Environment.ExitCode;

@@ -54,6 +54,7 @@ public sealed class NetRunRuntime
         Actions.AttachKnowledge(Knowledge);
         // Programs run through the same pipeline, so they need it to exist first.
         Programs = new ProgramScheduler(clock, Actions, new ProgramOptions(MaxPrograms: _options.MaxPrograms));
+        Lives = new DigitalLifeRegistry(clock, Hosts, Resources);
         if (_options.RegisterMvpEffects)
         {
             foreach (var definition in EffectRegistry.MvpDefaults())
@@ -75,6 +76,9 @@ public sealed class NetRunRuntime
 
     /// <summary>The bounded executor of user programs (§17.3). It runs through the same action pipeline.</summary>
     public ProgramScheduler Programs { get; }
+
+    /// <summary>Digital lives and their cores (§13.4). One identity has exactly one active controlling core.</summary>
+    public DigitalLifeRegistry Lives { get; }
 
     public ActionPipeline Actions { get; }
 
@@ -134,6 +138,7 @@ public sealed class NetRunRuntime
         Knowledge.Forget(host.Id);
         Actions.CancelTarget(host.Id, "target_destroyed");
         Programs.CancelHost(host.Id);
+        Lives.OnHostDestroyed(host.Id);
         return result;
     }
 
@@ -155,6 +160,7 @@ public sealed class NetRunRuntime
         Knowledge.Prune();
         var operations = Actions.ExpirePrepared(now) + Actions.ExpireRemote(now);
         Programs.Reap();
+        Lives.Tick();
         var instructions = Programs.Advance(now);
         var published = PublishEvents();
         return new NetRunTickResult(now, expiredReservations, effects, operations, published, instructions);
