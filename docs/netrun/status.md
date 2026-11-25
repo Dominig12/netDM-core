@@ -112,6 +112,7 @@
 | `dotnet run --project tests/NetRun.Tests -c Release` | PASS, 160 утверждений (добавлен раздел `remote actions`) |
 | `dotnet run --project tests/NetDM.SmokeTests -c Release` | PASS |
 | `pwsh -NoProfile -File tests/host-ipc.ps1` | PASS дважды подряд, `NETDM_IPC_PASS`, код 0 |
+| `pwsh -File scripts/check-all.ps1 -Only host` | PASS целиком: Host build 6 с, Smoke tests 8 с, NETRUN domain tests 3 с, Host IPC 119 с; exit 0 |
 
 Сценарий в `tests/host-ipc.ps1`: провайдер `nr-door` публикует `machine.door`; NETRUN-хост двери объявляет этот сервис; оператору выдаётся Execution на кибердеке и Control на двери; `netrun_execute` действия `device.door.open` проходит сеть и попадает в `delivery_poll` как команда `set_state` с `press=nr<операция>`; провайдер подтверждает `applied`; `netrun_complete` переводит операцию в `committed`; повторный отчёт даёт `invalid_state`; повторное нажатие внутри cooldown даёт `cooldown`.
 
