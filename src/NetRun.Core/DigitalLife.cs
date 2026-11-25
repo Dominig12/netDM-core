@@ -445,6 +445,23 @@ public sealed class DigitalLifeRegistry(
         return lost;
     }
 
+    /// <summary>Cores one principal controls, bounded. A life belongs to its controller, not to the observer.</summary>
+    public DigitalCoreSnapshot[] ControlledBy(PrincipalId controller, int limit)
+    {
+        if (controller.IsNone)
+            return [];
+        var result = new List<DigitalCoreSnapshot>();
+        foreach (var record in _cores.Values.OrderBy(record => record.Identity.Value))
+        {
+            if (result.Count >= limit)
+                break;
+            if (record.Controller != controller)
+                continue;
+            result.Add(record.Snapshot());
+        }
+        return result.ToArray();
+    }
+
     /// <summary>Bounded listing for the client, oldest identity first.</summary>
     public DigitalCoreSnapshot[] All(int limit)
     {

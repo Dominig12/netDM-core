@@ -694,6 +694,10 @@ public sealed class ActionPipeline(
         return cancelled;
     }
 
+    /// <summary>The principal that started an operation, or none when it is not this runtime's.</summary>
+    public PrincipalId OwnerOf(OperationId id) =>
+        _operations.TryGetValue(id.Value, out var record) ? record.Principal : PrincipalId.None;
+
     public ActionOutcome? Operation(OperationId id)
     {
         if (!_operations.TryGetValue(id.Value, out var record))
@@ -717,6 +721,12 @@ public sealed class ActionPipeline(
         }
         return result;
     }
+
+    /// <summary>
+    /// Records an event a program produced after its own committed step. It goes through the same queue and the
+    /// same topic counters as the events of actions, so a program cannot invent a system event (PRIM-004).
+    /// </summary>
+    public void PublishProgramEvent(string topic, string payload) => EmitEvent(topic, payload);
 
     /// <summary>Drains the events produced by committed actions. The owner publishes them after commit.</summary>
     public ActionEvent[] DrainEvents()
@@ -914,6 +924,7 @@ public sealed class ActionPipeline(
     {
         if (string.IsNullOrEmpty(topic))
             return;
+        // An event that cannot be delivered is never dropped in silence: the caller sees the bounded result.
         _events.Enqueue(new ActionEvent(topic, payload, OperationId.None, _clock.NowMilliseconds));
         while (_events.Count > _options.MaxPendingEvents)
             _events.Dequeue();

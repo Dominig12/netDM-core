@@ -208,7 +208,11 @@ public sealed class HostRegistry(ISimulationClock clock, HostRegistryOptions? op
     public HostResult Destroy(HostId id, HostGeneration generation)
     {
         if (!_byId.TryGetValue(id.Value, out var record))
-            return new HostResult(HostStatus.UnknownHost, null);
+        {
+            // Destroying something that is already gone is the state the caller asked for: idempotent, not an
+            // error, so a lost reply does not look like a failure (HOST-001).
+            return new HostResult(HostStatus.Duplicate, null);
+        }
         if (record.Generation != generation)
             return new HostResult(HostStatus.StaleGeneration, record.Snapshot());
         _byId.Remove(id.Value);

@@ -96,7 +96,8 @@ public sealed record ProgramOptions(
     int MaxDepth = 6,
     int MaxSteps = 256,
     int MaxRepeatCount = 1_000,
-    long MaxWaitMilliseconds = 300_000);
+    long MaxWaitMilliseconds = 300_000,
+    long OperationTimeoutMilliseconds = 30_000);
 
 /// <summary>
 /// The bounded executor of §17.3 and SCRIPT-002. A program gets an instruction budget per tick, runs through
@@ -123,6 +124,8 @@ public sealed class ProgramScheduler(ISimulationClock clock, ActionPipeline acti
         public int Instructions;
         public int CompletedRuns;
         public long ResumeAt;
+        /// <summary>When an accepted operation must be reported as unknown instead of waiting forever.</summary>
+        public long OperationDeadline;
         public long StartedAt = createdAt;
         public string? Fault;
         public string? LastAction;
@@ -219,6 +222,15 @@ public sealed class ProgramScheduler(ISimulationClock clock, ActionPipeline acti
                     continue;
                 instance.State = ProgramState.Running;
             }
+            if (instance.State == ProgramState.WaitingForOperation)
+            {
+                // An answer that never comes becomes an unknown outcome and faults the program: it must not hold
+                // its slot and its owner forever (SVC-002, §6.2).
+                if (instance.OperationDeadline > nowMilliseconds)
+                    continue;
+                Fault(instance, "unknown_outcome");
+                continue;
+            }
             if (instance.State != ProgramState.Running)
                 continue;
             executed += Run(instance, ref budget, nowMilliseconds);
@@ -282,6 +294,9 @@ public sealed class ProgramScheduler(ISimulationClock clock, ActionPipeline acti
                 instance.Frames.Add(new Frame(step.Body!, step.Count));
                 return true;
             case StepKind.Emit:
+                // A program event is recorded through the ordinary path, so it is delivered or visible in the
+                // topic counters instead of reporting a success that never happened (PRIM-004).
+                _actions.PublishProgramEvent(step.Topic, instance.Definition.Id);
                 instance.LastAction = $"emit:{step.Topic}";
                 instance.LastOutcome = "ok";
                 return true;
@@ -317,6 +332,7 @@ public sealed class ProgramScheduler(ISimulationClock clock, ActionPipeline acti
             case ActionStatus.Accepted:
                 instance.State = ProgramState.WaitingForOperation;
                 instance.ResumeAt = now;
+                instance.OperationDeadline = now + _options.OperationTimeoutMilliseconds;
                 return false;
             case ActionStatus.Committed:
             case ActionStatus.Prepared:
@@ -410,6 +426,25 @@ public sealed class ProgramScheduler(ISimulationClock clock, ActionPipeline acti
                 instance.Instructions, instance.CompletedRuns, instance.Fault, instance.LastAction,
                 instance.LastOutcome)
             : null;
+
+    /// <summary>Programs one principal owns, bounded. Another owner's processes are not visible.</summary>
+    public ProgramSnapshot[] OwnedBy(PrincipalId owner, int limit)
+    {
+        if (owner.IsNone)
+            return [];
+        var result = new List<ProgramSnapshot>();
+        foreach (var instance in _programs.Values.OrderBy(instance => instance.Id.Value))
+        {
+            if (result.Count >= limit)
+                break;
+            if (instance.Owner != owner)
+                continue;
+            result.Add(new ProgramSnapshot(instance.Id, instance.Owner, instance.Definition.Id,
+                instance.State, instance.Instructions, instance.CompletedRuns, instance.Fault,
+                instance.LastAction, instance.LastOutcome));
+        }
+        return result.ToArray();
+    }
 
     /// <summary>Bounded listing for the client, newest last.</summary>
     public ProgramSnapshot[] All(int limit)

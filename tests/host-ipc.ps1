@@ -2074,6 +2074,9 @@ try {
     Assert-True (($panel.result.links | Where-Object { $_.a -ne $null }) -eq $null -or $panel.result.links.Count -ge 0) 'links are a bounded list'
     $foreign = Invoke-Next @{ op = 'netrun_panel'; payload = @{ principal = 'op-other'; hosts = 16 } }
     Assert-True ($foreign.ok -and $foreign.result.hosts.Count -eq 0) 'an observer without knowledge gets an empty panel'
+    # G-006: another observer sees its own history only, never somebody else's operations or programs.
+    Assert-True ($foreign.result.operations.Count -eq 0 -and $foreign.result.programs.Count -eq 0 -and
+        $foreign.result.lives.Count -eq 0) "a foreign observer gets none of the first operator's state: $($foreign | ConvertTo-Json -Compress -Depth 3)"
 
     # The device adapter's contract: a service the world accepted becomes a host, and the operator of that
     # device gets the rights of its own equipment — use it, see around it, read itself. Nothing more.

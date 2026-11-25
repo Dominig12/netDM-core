@@ -133,6 +133,31 @@ internal static class ProgramTests
         Equal(accepted, capped.Programs.CancelOwner(capActor), "cancelling the owner releases every program");
         Equal(0, capped.Programs.Count, "no program survives its owner's session");
 
+        // An event a program emits goes through the ordinary path: it is counted, not claimed.
+        var emitter = runtime.Programs.Start(actor, new ProgramDefinition("emitter", deck.Id,
+            [ProgramStep.Emit("program.test.done"), ProgramStep.Stop()]));
+        Equal(ProgramStatus.Ok, emitter.Status, "the emitting program is accepted");
+        runtime.Tick();
+        runtime.PublishEvents();
+        Check(runtime.PublishedTopicCounts(64).Any(entry => entry.Topic == "program.test.done"),
+            "a program event reaches the topic counters instead of a fake success");
+
+        // A program waiting for a remote answer is not left waiting forever: the timeout faults it.
+        runtime.Actions.AttachTransport(new FakeTransport());
+        runtime.Actions.Register(new RemoteProbeAction("remote.for.program", computeCost: 1));
+        var remote = runtime.Programs.Start(actor, new ProgramDefinition("remote", deck.Id,
+            [ProgramStep.Invoke("remote.for.program", deck.Id), ProgramStep.Stop()]));
+        Equal(ProgramStatus.Ok, remote.Status, "the remote program is accepted");
+        runtime.Tick();
+        Equal(ProgramState.WaitingForOperation, runtime.Programs.Peek(remote.Process)!.State,
+            "an accepted remote action suspends the program");
+        clock.Advance(31_000);
+        runtime.Tick();
+        var expired = runtime.Programs.Peek(remote.Process);
+        Check(expired is null || expired.State == ProgramState.Faulted,
+            "an answer that never comes faults the program instead of holding its slot");
+        Check(expired is null || expired.Fault == "unknown_outcome", "the fault names the unknown outcome");
+
         // The run is observable: a program is a process with state, counters and its last action.
         var observed = runtime.Programs.Start(actor, new ProgramDefinition("observed", deck.Id,
             [ProgramStep.Invoke("net.inspect", deck.Id)]));

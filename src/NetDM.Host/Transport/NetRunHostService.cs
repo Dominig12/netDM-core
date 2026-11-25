@@ -351,8 +351,15 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
         lock (_gate)
         {
             var views = View(principalName, hostLimit);
-            var operations = _runtime.Actions.Recent(operationLimit);
             var principal = _principals.TryGetValue(principalName, out var known) ? known : PrincipalId.None;
+            // Only this observer's own history: another runner's operations, programs and lives are its own
+            // business (G-006). Recent() is bounded, so filtering after it cannot return somebody else's result.
+            var operations = principal.IsNone
+                ? []
+                : _runtime.Actions.Recent(operationLimit * 4)
+                    .Where(operation => _runtime.Actions.OwnerOf(operation.OperationId) == principal)
+                    .Take(operationLimit)
+                    .ToArray();
             var records = principal.IsNone ? [] : _runtime.Knowledge.Known(principal, hostLimit);
             var stale = 0;
             foreach (var record in records)
@@ -387,7 +394,7 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
                     reason = operation.Reason,
                     result = operation.Result
                 }).ToArray(),
-                programs = _runtime.Programs.All(operationLimit).Select(program => new
+                programs = _runtime.Programs.OwnedBy(principal, operationLimit).Select(program => new
                 {
                     process = program.Process.Value,
                     definition = program.DefinitionId,
@@ -398,7 +405,7 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
                     lastAction = program.LastAction,
                     lastOutcome = program.LastOutcome
                 }).ToArray(),
-                lives = _runtime.Lives.All(operationLimit).Select(core => new
+                lives = _runtime.Lives.ControlledBy(principal, operationLimit).Select(core => new
                 {
                     identity = core.Identity.Value,
                     host = core.Host.Value,

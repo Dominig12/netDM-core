@@ -43,8 +43,10 @@ internal static class HostLifecycleTests
         Equal(HostStatus.Ok, retired.Status, "destruction with the current generation succeeds");
         Check(hosts.Get(first.Host.Id) is null, "a destroyed host is gone");
         Check(hosts.IsRetired("apc.1"), "a destroyed name is remembered as retired");
-        Equal(HostStatus.UnknownHost, hosts.Destroy(first.Host.Id, first.Host.Generation).Status,
-            "destroying twice does not create or revive anything");
+        // HOST-001: destruction is idempotent, so a lost reply does not look like a failure.
+        Equal(HostStatus.Duplicate, hosts.Destroy(first.Host.Id, first.Host.Generation).Status,
+            "destroying twice reports the state the caller asked for");
+        Check(hosts.Get(first.Host.Id) is null, "a repeated destroy revives nothing");
 
         var reborn = hosts.Register(definition);
         Equal(HostStatus.Ok, reborn.Status, "a retired name may be registered again as a new instance");
