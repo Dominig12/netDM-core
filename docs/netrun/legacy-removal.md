@@ -10,6 +10,17 @@
 | Дублирующие `null`-поля в запросе персоны | `MOLOT:code/modules/netdm/network_space.dm` | §6.4: ошибка не должна быть тишиной | живой тест `network_immersion_dive` — PASS |
 | Заглушка `set_authoritative()` у дверей (мёртвый код, вызовов нет) | `MOLOT:code/modules/netdm/door_control_shadow.dm` | ADR-0007: иллюзия переключаемости | DM-сборка 0/0; живой прогон `network_airlock_panel`, `netrun_client`, `netrun_adapter` — PASS, `clean_run.lk: True` |
 
+## Сделано в этом заходе
+
+| # | Что снято | Доказательство | Проверка |
+|---|---|---|---|
+| L-2 | `authoritative_station()` (76 строк) — helper, чей тип `radio_station` не имеет своего `Run()` и наследует аудит карты; запись удалена из списка тестов | функция не вызывалась ниоткуда, а документация ссылалась на неё как на проверку авторитетного радио | живой прогон: список грузится без `Unknown test` |
+| L-5 (первая половина) | `NETDM_RADIO_MODE`, поле `authoritative`, `set_authoritative()` | при дефолтном `shadow` `rx_instances` пуст, `uplink()` возвращал TRUE без доставки, и `send_to_receivers` не запускал legacy — **речь пропадала молча** | `radio_uplink` PASS: `receivers_offered=5 uplinks=3 sent=6 relayed=1 heard=1`, без единого вызова `set_authoritative` |
+| L-5 (поведение) | `no_receiver` больше не выдаёт себя за успех | при отсутствии сетевого приёмника передача возвращается физической цепи, а не исчезает | тот же прогон, `no_receiver=0` |
+
+Герметичная DM-сборка: 0 ошибок, 0 предупреждений, `UNIT_DMB_READY`. Живой прогон `radio_uplink`, `messenger_authoritative`, `netrun_client` — PASS, `clean_run.lk: True`.
+
+Осталось по L-5: снять теневую выборку (`ask`/`answered`/`latencies`, 4 запроса в секунду к Host) и C#-`radio_reach` (107 строк + регистрация op), которые после снятия режима остались без потребителя.
 ## Очередь снятия (проверено чтением обоих репозиториев, 25.11.2026)
 
 Порядок — от безопасного к рискованному. Везде проверка по ADR-0007 §3.

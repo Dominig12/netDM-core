@@ -16,7 +16,6 @@
 /datum/unit_test/netdm_observe/area_map/atmos_telemetry
 /datum/unit_test/netdm_observe/area_map/messenger_authoritative
 /datum/unit_test/netdm_observe/area_map/radio_uplink
-/datum/unit_test/netdm_observe/area_map/radio_station
 /datum/unit_test/netdm_observe/area_map/door_station
 /datum/unit_test/netdm_observe/research_authoritative
 /datum/unit_test/netdm_observe/research_p6
