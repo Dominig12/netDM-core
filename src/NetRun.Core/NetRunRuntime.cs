@@ -138,7 +138,7 @@ public sealed class NetRunRuntime
         Resources.AdvanceTo(now);
         var expiredReservations = Math.Max(0, before - Resources.ActiveCount);
         var effects = Effects.Tick(now);
-        var operations = Actions.ExpirePrepared(now);
+        var operations = Actions.ExpirePrepared(now) + Actions.ExpireRemote(now);
         var published = PublishEvents();
         return new NetRunTickResult(now, expiredReservations, effects, operations, published);
     }

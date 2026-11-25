@@ -91,7 +91,40 @@
 
 Фактический прогон: `pwsh -NoProfile -File tests/host-ipc.ps1` завершился `NETDM_IPC_PASS` и кодом 0 в двух прогонах из трёх. В неудачном прогоне упало не NETRUN-утверждение, а ранее существовавшее время-зависимое (`presence answered at netshell.apc2`, в другом прогоне `shell line answered: programs | where name -eq burst-6`). Известная нестабильность зафиксирована в `docs/implementation-status.ru.md` ещё до этих изменений; набор NETRUN-утверждений проходит каждый раз, когда до него доходит исполнение.
 
-## 3. Что не сделано и почему
+## 3. N3. Первое действие до физического мира — частично выполнено
+
+Реализовано и проверено:
+
+| Что | Где | Поведение |
+|---|---|---|
+| Удалённые действия | `NetRun.Core/Actions.cs` (`IRemoteGameAction`, `INetRunDispatchScope`, `INetRunTransport`, `ActionStatus.Accepted`) | `Commit` удалённого действия только отправляет намерение; операция остаётся `Accepted` до отчёта цели; попадание в commit = подтверждение цели, а не отправка |
+| Транспортный шов | `NetDM.Host/Transport/NetRunHostService.cs` | `INetRunTransport` поверх `GameNetworkService.Invoke`: домен не знает про NETDM, composition root передаёт транспорт; отказ допуска (`Forbidden`, `UnknownService`, `UnknownNode`, `Busy`, `IdempotencyConflict`) отображается в статус действия и освобождает резерв |
+| Привязка субъекта к сети | `netrun_execute { endpoint, generation }`, `NetRunHostService.BindEndpoint` | удалённое действие идёт от имени эндпойнта оператора, поэтому транспорт и домен авторизуют одну и ту же личность |
+| Завершение и неизвестный исход | `netrun_complete`, `ActionPipeline.Complete`, `ExpireRemote` | повторный отчёт не меняет ничего; ответ, не пришедший за `RemoteTimeoutMilliseconds`, становится `UnknownOutcome` и никогда не переигрывается |
+| Сервисы в модели хоста | `ServicesComponent` | хост объявляет, какие контракты публикует; действие не выдумывает имя инстанса |
+| Встроенные физические действия | `device.door.open`, `device.door.close` | общий cooldown `device.door`, стоимость 2 CU + 1 RAM; локальный commit запрещён — дверь меняет только её собственный обработчик |
+| Порядок конвейера | `ActionPipeline.Prepare` | валидация теперь идёт до проверки cooldown, чтобы причиной отказа был реальный тупик (нет сервиса, цель уничтожена), а не «перезарядка» |
+
+Проверки:
+
+| Проверка | Результат |
+|---|---|
+| `dotnet run --project tests/NetRun.Tests -c Release` | PASS, 160 утверждений (добавлен раздел `remote actions`) |
+| `dotnet run --project tests/NetDM.SmokeTests -c Release` | PASS |
+| `pwsh -NoProfile -File tests/host-ipc.ps1` | PASS дважды подряд, `NETDM_IPC_PASS`, код 0 |
+
+Сценарий в `tests/host-ipc.ps1`: провайдер `nr-door` публикует `machine.door`; NETRUN-хост двери объявляет этот сервис; оператору выдаётся Execution на кибердеке и Control на двери; `netrun_execute` действия `device.door.open` проходит сеть и попадает в `delivery_poll` как команда `set_state` с `press=nr<операция>`; провайдер подтверждает `applied`; `netrun_complete` переводит операцию в `committed`; повторный отчёт даёт `invalid_state`; повторное нажатие внутри cooldown даёт `cooldown`.
+
+Осталось по N3:
+
+| Пункт | Почему не сделано |
+|---|---|
+| DM-сторона: дверь получает команду и вызывает `netrun_complete` | нужен живой мир; проверить нельзя (нет моста), поэтому не пишем непроверяемый DM-код |
+| Вынос игровых контрактов в `NetRun.Content` через `IServiceContractModule` | D-07; чисто структурная работа, ждёт этап с DM-интеграцией |
+| Закрытие обхода леджера (`research_disks.dm:11`) | D-02; правка DM, требует проверки в мире |
+| Возврат legacy-поведения радио/PDA/кнопок при выключенном netDM | D-01; правка DM, требует проверки в мире |
+
+## 4. Что не сделано и почему
 
 | Пункт | Состояние | Условие |
 |---|---|---|
@@ -104,7 +137,7 @@
 | DM-адаптер NETRUN (объявление хостов из мира, клиентские команды) | не начато | этап N3/N4 |
 | Время NETRUN = квант транспорта, а не время мира из DM | осознанно | заменить на время, которое присылает DM, при интеграции N3 |
 
-## 4. Технический долг и нарушения, найденные аудитом
+## 5. Технический долг и нарушения, найденные аудитом
 
 Ссылки на файлы и строки — в [t0-audit.md](t0-audit.md) и [migration-matrix.md](migration-matrix.md). Здесь только то, что нужно закрыть, и в каком этапе.
 

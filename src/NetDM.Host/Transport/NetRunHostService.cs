@@ -1,3 +1,6 @@
+using System.Text.Json;
+using NetDM.Core;
+using NetDM.Services;
 using NetRun.Core;
 
 namespace NetDM.Host.Transport;
@@ -8,7 +11,7 @@ namespace NetDM.Host.Transport;
 /// single logical writer is what keeps its composed invariants true. The gate is never held across an
 /// await or IPC I/O.
 /// </summary>
-internal sealed class NetRunHostService : BackgroundService
+internal sealed class NetRunHostService : BackgroundService, INetRunTransport
 {
     /// <summary>NETRUN reads the same monotonic quantum clock as the transport, in milliseconds.</summary>
     private sealed class QuantumClock(GameNetworkService game) : ISimulationClock
@@ -18,15 +21,21 @@ internal sealed class NetRunHostService : BackgroundService
 
     private readonly NetRunRuntime _runtime;
     private readonly ISimulationClock _clock;
+    private readonly GameNetworkService _game;
     private readonly Dictionary<string, PrincipalId> _principals = new(StringComparer.Ordinal);
+    private readonly Dictionary<ulong, EndpointKey> _endpoints = [];
     private readonly object _gate = new();
     private long _ticks;
 
+    // Lock order: this gate, then the transport session gate, then the service runtime gate. Nothing in
+    // the transport knows about NETRUN, so the order cannot be reversed.
     public NetRunHostService(GameNetworkService game)
     {
         ArgumentNullException.ThrowIfNull(game);
+        _game = game;
         _clock = new QuantumClock(game);
         _runtime = new NetRunRuntime(_clock);
+        _runtime.Actions.AttachTransport(this);
     }
 
     public long TickCount => Volatile.Read(ref _ticks);
@@ -104,6 +113,70 @@ internal sealed class NetRunHostService : BackgroundService
     {
         lock (_gate)
             return _runtime.Actions.Catalogue(limit);
+    }
+
+    /// <summary>
+    /// Binds a principal to the network endpoint that speaks for it. A remote action travels as that
+    /// endpoint, so the transport authorizes the same identity the domain authorized. The endpoint itself
+    /// is attached to a node by the world, not here.
+    /// </summary>
+    public ServiceStatus BindEndpoint(PrincipalId principal, EndpointKey endpoint)
+    {
+        if (principal.IsNone || string.IsNullOrEmpty(endpoint.Id))
+            return ServiceStatus.InvalidRequest;
+        lock (_gate)
+            _endpoints[principal.Value] = endpoint;
+        return ServiceStatus.Ok;
+    }
+
+    /// <summary>
+    /// Carries a remote action over NETDM. Admission here means the command was accepted by the service
+    /// runtime for physical delivery; it does not mean the door moved (G-001, SVC-002).
+    /// </summary>
+    public RemoteDispatch Send(in ActionContext context, string serviceType, string instance, string command,
+        string idempotencyKey, string argumentsJson)
+    {
+        EndpointKey initiator;
+        lock (_gate)
+        {
+            if (!_endpoints.TryGetValue(context.Principal.Value, out initiator))
+                return new RemoteDispatch(ActionStatus.Forbidden, "no_endpoint");
+        }
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(argumentsJson);
+        }
+        catch (JsonException)
+        {
+            return new RemoteDispatch(ActionStatus.InvalidRequest, "arguments");
+        }
+        using (document)
+        {
+            var result = _game.Invoke(initiator, instance, command, idempotencyKey, document.RootElement,
+                null, PacketTrafficClass.Interactive);
+            return result.Status switch
+            {
+                ServiceStatus.Ok => new RemoteDispatch(ActionStatus.Accepted),
+                ServiceStatus.Duplicate => new RemoteDispatch(ActionStatus.Accepted, "duplicate"),
+                ServiceStatus.Forbidden => new RemoteDispatch(ActionStatus.Forbidden, "forbidden"),
+                ServiceStatus.UnknownEndpoint => new RemoteDispatch(ActionStatus.Forbidden, "unknown_endpoint"),
+                ServiceStatus.UnknownNode => new RemoteDispatch(ActionStatus.TargetDestroyed, "no_route"),
+                ServiceStatus.UnknownService => new RemoteDispatch(ActionStatus.TargetDestroyed, "unknown_service"),
+                ServiceStatus.UnknownCommand => new RemoteDispatch(ActionStatus.InvalidState, "unknown_command"),
+                ServiceStatus.IdempotencyConflict => new RemoteDispatch(ActionStatus.IdempotencyConflict, "idempotency"),
+                ServiceStatus.Busy => new RemoteDispatch(ActionStatus.Rejected, "busy"),
+                ServiceStatus.LimitExceeded => new RemoteDispatch(ActionStatus.LimitExceeded, "limit"),
+                _ => new RemoteDispatch(ActionStatus.Rejected, result.Status.ToString())
+            };
+        }
+    }
+
+    /// <summary>Finalizes an accepted remote operation with what the world reported.</summary>
+    public ActionOutcome Complete(OperationId operation, ActionStatus status, string? reason, string? result)
+    {
+        lock (_gate)
+            return _runtime.Actions.Complete(operation, status, reason, result);
     }
 
     /// <summary>Runs one registered action through the pipeline for a named principal.</summary>

@@ -38,6 +38,27 @@ public sealed record StorageComponent(long Bytes);
 public sealed record SecurityComponent(SecurityProfile Profile, int MaxServices, int MaxPresences);
 
 /// <summary>
+/// The contracts a host offers, as service type to instance name. A caller addresses the instance it may
+/// use without inventing one: an action that needs a door asks the host which door it actually publishes.
+/// </summary>
+public sealed record ServicesComponent(IReadOnlyDictionary<string, string> Instances)
+{
+    public bool TryInstance(string serviceType, out string instance) =>
+        Instances.TryGetValue(serviceType, out instance!);
+
+    /// <summary>Stable text of the declaration, independent of dictionary insertion order.</summary>
+    public string Canonical()
+    {
+        var keys = Instances.Keys.ToArray();
+        Array.Sort(keys, StringComparer.Ordinal);
+        var text = new StringBuilder(64);
+        foreach (var key in keys)
+            text.Append(key).Append('=').Append(Instances[key]).Append(';');
+        return text.ToString();
+    }
+}
+
+/// <summary>
 /// A host as it is declared to the registry. Immutable: changing what a host is means registering a
 /// new definition for a new generation, never mutating a live record behind its readers' backs.
 /// </summary>
@@ -48,18 +69,20 @@ public sealed record HostDefinition(
     ComputeComponent? Compute = null,
     MemoryComponent? Memory = null,
     StorageComponent? Storage = null,
-    SecurityComponent? Security = null)
+    SecurityComponent? Security = null,
+    ServicesComponent? Services = null)
 {
     /// <summary>
     /// Stable digest of the declaration; two registrations with the same digest are idempotent. Computed
     /// on read so a record copy made with <c>with</c> never carries a stale digest.
     /// </summary>
-    public string Digest => DigestOf(Name, Class, Network, Compute, Memory, Storage, Security);
+    public string Digest => DigestOf(Name, Class, Network, Compute, Memory, Storage, Security, Services);
 
     private static string DigestOf(string hostName, HostClass hostClass, NetworkComponent? network,
-        ComputeComponent? compute, MemoryComponent? memory, StorageComponent? storage, SecurityComponent? security)
+        ComputeComponent? compute, MemoryComponent? memory, StorageComponent? storage,
+        SecurityComponent? security, ServicesComponent? services)
     {
-        var text = new StringBuilder(160)
+        var text = new StringBuilder(192)
             .Append(hostName).Append('|').Append((byte)hostClass).Append('|')
             .Append(network is null
                 ? "-"
@@ -69,6 +92,8 @@ public sealed record HostDefinition(
             .Append(memory?.Slots ?? -1).Append('|')
             .Append(storage?.Bytes ?? -1).Append('|')
             .Append(security is null ? "-" : $"{(byte)security.Profile},{security.MaxServices},{security.MaxPresences}")
+            .Append('|')
+            .Append(services?.Canonical() ?? "-")
             .ToString();
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
     }
@@ -85,6 +110,7 @@ public sealed record HostSnapshot(
     MemoryComponent? Memory,
     StorageComponent? Storage,
     SecurityComponent? Security,
+    ServicesComponent? Services,
     bool Powered,
     bool Operational,
     long RegisteredAtMilliseconds)
@@ -123,7 +149,7 @@ public sealed class HostRegistry(ISimulationClock clock, HostRegistryOptions? op
 
         public HostSnapshot Snapshot() => new(Id, Generation, Definition.Name, Definition.Class,
             Definition.Network, Definition.Compute, Definition.Memory, Definition.Storage,
-            Definition.Security, Powered, Operational, RegisteredAt);
+            Definition.Security, Definition.Services, Powered, Operational, RegisteredAt);
     }
 
     private readonly HostRegistryOptions _options = options ?? new HostRegistryOptions();

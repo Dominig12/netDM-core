@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 
 namespace NetRun.Core;
@@ -120,5 +121,66 @@ public static class BuiltinActions
         ArgumentNullException.ThrowIfNull(pipeline);
         pipeline.Register(new InspectAction());
         pipeline.Register(new ScanAction());
+        // The first operation that reaches the physical world. Two actions rather than one parameterised
+        // command, so a context menu, a hotkey and a preset can all name exactly what they will do.
+        pipeline.Register(new DoorOpenAction());
+        pipeline.Register(new DoorCloseAction());
+    }
+}
+
+/// <summary>Opens a door through its own handler. A door is physical, so the effect happens at the target.</summary>
+public sealed class DoorOpenAction() : RemoteDoorAction(open: true);
+
+/// <summary>Closes and bolts a door through its own handler.</summary>
+public sealed class DoorCloseAction() : RemoteDoorAction(open: false);
+
+/// <summary>Shared implementation of the door commands; only the requested state differs.</summary>
+public abstract class RemoteDoorAction(bool open) : IRemoteGameAction
+{
+    public const string ServiceType = "machine.door";
+
+    public ActionDescriptor Descriptor { get; } = new(
+        open ? "device.door.open" : "device.door.close", 1, ActionKind.Command, ActionCategory.Connectivity,
+        CapabilityCategory.Control, "device.door", ComputeCost: 2, MemoryCost: 1, CooldownMilliseconds: 1_000,
+        RangeHops: 8, DisplayName: open ? "Открыть дверь" : "Закрыть дверь",
+        Documentation: open
+            ? "Открывает шлюз через его штатный обработчик. Требует права управления на хосте двери."
+            : "Закрывает и запирает шлюз через его штатный обработчик. Требует права управления на хосте двери.",
+        Parameters: [new ActionParameter("press", ParameterType.Text, false, "Идентификатор нажатия")],
+        ServiceKey: RemoteDoorAction.ServiceType);
+
+    public string ContentDigest => open ? "door|open" : "door|close";
+
+    public ActionValidation Validate(in ActionContext context, INetRunWorldReader world)
+    {
+        var host = world.Host(context.TargetHost);
+        if (host is null)
+            return new ActionValidation(ActionStatus.TargetDestroyed, "unknown_host");
+        if (!host.Available)
+            return new ActionValidation(ActionStatus.HostUnavailable, "target_offline");
+        return host.Services is not null && host.Services.TryInstance(RemoteDoorAction.ServiceType, out _)
+            ? ActionValidation.Pass
+            : new ActionValidation(ActionStatus.InvalidState, "no_door_service");
+    }
+
+    /// <summary>A door is physical: only its own handler may change it, so a local commit is refused.</summary>
+    public ActionExecution Commit(in ActionContext context, INetRunMutationScope scope) =>
+        new(ActionStatus.Rejected, "remote_only");
+
+    public RemoteDispatch Dispatch(in ActionContext context, INetRunDispatchScope scope)
+    {
+        var host = scope.TargetHostSnapshot;
+        if (host?.Services is null || !host.Services.TryInstance(RemoteDoorAction.ServiceType, out var instance))
+            return RemoteDispatch.Rejected(ActionStatus.InvalidState, "no_door_service");
+        var arguments = JsonSerializer.Serialize(new
+        {
+            press = string.Create(CultureInfo.InvariantCulture, $"nr{context.OperationId.Value}"),
+            state = open ? "open" : "closed",
+            bolted = !open
+        });
+        // The transport names an operation with its own alphabet (letters, digits, dot, dash, underscore),
+        // so the idempotency key is built in that alphabet rather than reusing the internal notation.
+        return scope.Send(RemoteDoorAction.ServiceType, instance, "set_state",
+            string.Create(CultureInfo.InvariantCulture, $"nr-{context.OperationId.Value}"), arguments);
     }
 }

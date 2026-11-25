@@ -94,7 +94,7 @@ public readonly record struct ActionRequest(
 
 public enum ActionStatus : byte
 {
-    Ok, Committed, Prepared, Cancelled,
+    Ok, Committed, Prepared, Accepted, Cancelled,
     UnknownAction, Forbidden, InvalidRequest, InvalidState,
     TargetDestroyed, HostUnavailable, InsufficientCompute, InsufficientMemory,
     Cooldown, Duplicate, IdempotencyConflict, LimitExceeded, Rejected, UnknownOutcome
@@ -168,6 +168,58 @@ public interface IGameAction
     ActionExecution Commit(in ActionContext context, INetRunMutationScope scope);
 }
 
+/// <summary>How a remote action reports what the transport accepted. Acceptance is not execution.</summary>
+public readonly record struct RemoteDispatch(ActionStatus Status, string? Reason = null, string? Result = null)
+{
+    public bool Accepted => Status is ActionStatus.Accepted or ActionStatus.Committed;
+
+    public static RemoteDispatch Rejected(ActionStatus status, string reason) => new(status, reason);
+}
+
+/// <summary>
+/// The write side of a remote command: the action states the intent and the adapter carries it over
+/// NETDM. The pipeline never talks to the transport itself, which is what keeps the game layer free of
+/// transport knowledge (ADR-0001) while still using the single transport for every remote effect.
+/// </summary>
+public interface INetRunDispatchScope
+{
+    HostId TargetHost { get; }
+
+    /// <summary>What the domain knows about the target at dispatch time. Null when it was destroyed.</summary>
+    HostSnapshot? TargetHostSnapshot { get; }
+
+    PrincipalId Principal { get; }
+
+    long NowMilliseconds { get; }
+
+    /// <summary>
+    /// Sends a command to one service instance of the target. Arguments are the canonical JSON object of
+    /// the service schema. A refusal here means nothing was sent, so the caller can release its reserves.
+    /// </summary>
+    RemoteDispatch Send(string serviceType, string instance, string command, string idempotencyKey,
+        string argumentsJson);
+}
+
+/// <summary>
+/// The transport side of remote actions, supplied by the composition root. It is the only place where
+/// NETRUN meets NETDM: admission over the service runtime, never a direct call to a game object.
+/// </summary>
+public interface INetRunTransport
+{
+    RemoteDispatch Send(in ActionContext context, string serviceType, string instance, string command,
+        string idempotencyKey, string argumentsJson);
+}
+
+/// <summary>
+/// An action whose authoritative change happens at the target rather than in the caller's process. Its
+/// commit only dispatches; the operation stays accepted until the target acknowledges, and a lost answer
+/// ends as an unknown outcome instead of being repeated (SVC-002, §6.2).
+/// </summary>
+public interface IRemoteGameAction : IGameAction
+{
+    RemoteDispatch Dispatch(in ActionContext context, INetRunDispatchScope scope);
+}
+
 /// <summary>An operation that passed validation and holds its reserves, waiting for commit or cancellation.</summary>
 public sealed record PreparedAction(
     OperationId OperationId,
@@ -195,7 +247,8 @@ public sealed record ActionPipelineOptions(
     int MaxOperations = 16_384,
     long PrepareLifetimeMilliseconds = 5_000,
     int MaxRetiredIdempotencyKeys = 16_384,
-    int MaxPendingEvents = 256);
+    int MaxPendingEvents = 256,
+    long RemoteTimeoutMilliseconds = 30_000);
 
 /// <summary>Result of the prepare step: either a pending operation or the reason it did not start.</summary>
 public sealed record PrepareOutcome(ActionStatus Status, OperationId OperationId, PreparedAction? Prepared,
@@ -232,11 +285,12 @@ public sealed class ActionPipeline(
         public string? Reason;
         public string? Result;
         public long CompletedAt;
+        public long InTransitDeadline;
     }
 
     private enum OperationState : byte
     {
-        Created, Preparing, InTransit, Executing, Committed, Completed, Cancelled, Failed
+        Created, Preparing, InTransit, Executing, Committed, Completed, Cancelled, Failed, UnknownOutcome
     }
 
     private readonly ISimulationClock _clock = clock ?? throw new ArgumentNullException(nameof(clock));
@@ -252,6 +306,7 @@ public sealed class ActionPipeline(
     private readonly SortedSet<(long At, ulong Operation)> _prepared = [];
     private readonly Queue<ActionEvent> _events = new();
     private EffectRegistry? _effects;
+    private INetRunTransport? _transport;
     private ulong _nextOperation;
 
     public int ActionCount => _actions.Count;
@@ -262,6 +317,13 @@ public sealed class ActionPipeline(
 
     /// <summary>Connects the effect registry so actions can read and apply effects through the pipeline.</summary>
     public void AttachEffects(EffectRegistry effects) => _effects = effects ?? throw new ArgumentNullException(nameof(effects));
+
+    /// <summary>
+    /// Connects the transport that carries remote commands. The composition root supplies it; the domain
+    /// never references NETDM directly, it only states the intent and reports what the transport accepted.
+    /// </summary>
+    public void AttachTransport(INetRunTransport transport) =>
+        _transport = transport ?? throw new ArgumentNullException(nameof(transport));
 
     /// <summary>Registers an action. A conflicting duplicate fails at composition time, not at run time.</summary>
     public void Register(IGameAction action)
@@ -364,10 +426,6 @@ public sealed class ActionPipeline(
         if (!authorization.Allowed)
             return new PrepareOutcome(ActionStatus.Forbidden, OperationId.None, null, Reason: authorization.Status.ToString());
 
-        var cooldownKey = CooldownKey(request.Principal, descriptor);
-        if (_cooldowns.TryGetValue(cooldownKey, out var readyAt) && readyAt > now)
-            return new PrepareOutcome(ActionStatus.Cooldown, OperationId.None, null, readyAt - now, "cooldown");
-
         if (_operations.Count >= _options.MaxOperations)
             EvictOldestOperation();
 
@@ -375,12 +433,18 @@ public sealed class ActionPipeline(
         var context = new ActionContext(operationId, request.Principal, request.ExecutionHost, request.TargetHost,
             request.Entity, request.Process, request.Correlation, now);
 
+        // Validate before the cooldown: a wrong target or missing service is the real reason an attempt
+        // cannot work, and reporting "cooldown" instead would hide it (SVC-001, §6.4).
         var validation = action.Validate(context, new WorldReader(this, now));
         if (!validation.Succeeded)
         {
             Record(operationId, descriptor, request, digest, OperationState.Failed, validation.Reason ?? validation.Status.ToString());
             return new PrepareOutcome(validation.Status, operationId, null, Reason: validation.Reason);
         }
+
+        var cooldownKey = CooldownKey(request.Principal, descriptor);
+        if (_cooldowns.TryGetValue(cooldownKey, out var readyAt) && readyAt > now)
+            return new PrepareOutcome(ActionStatus.Cooldown, OperationId.None, null, readyAt - now, "cooldown");
 
         var compute = Reserve(request.ExecutionHost, request.Principal, ResourceKind.Compute, descriptor.ComputeCost);
         if (compute.Status != ReservationStatus.Ok)
@@ -425,6 +489,41 @@ public sealed class ActionPipeline(
         }
 
         record.State = OperationState.Executing;
+        _prepared.Remove((prepared.PrepareExpiresAtMilliseconds, operationId.Value));
+
+        // A remote action only dispatches here. Its authoritative change happens at the target, so the
+        // operation stays accepted until the target answers or the deadline passes.
+        if (prepared.Action is IRemoteGameAction remote)
+        {
+            if (_transport is null)
+            {
+                ReleaseReserves(prepared);
+                record.State = OperationState.Failed;
+                record.Reason = "no_transport";
+                record.CompletedAt = _clock.NowMilliseconds;
+                return new ActionOutcome(ActionStatus.InvalidState, operationId, descriptor.Kind,
+                    descriptor.Category, Reason: "no_transport");
+            }
+            var dispatched = remote.Dispatch(prepared.Context,
+                new DispatchScope(this, prepared.Context, _transport, _hosts.Get(prepared.Context.TargetHost)));
+            if (!dispatched.Accepted)
+            {
+                ReleaseReserves(prepared);
+                record.State = OperationState.Failed;
+                record.Reason = dispatched.Reason ?? dispatched.Status.ToString();
+                record.CompletedAt = _clock.NowMilliseconds;
+                return new ActionOutcome(dispatched.Status, operationId, descriptor.Kind, descriptor.Category,
+                    Reason: record.Reason);
+            }
+            ConsumeReserves(prepared);
+            record.State = OperationState.InTransit;
+            record.Result = dispatched.Result;
+            record.InTransitDeadline = _clock.NowMilliseconds + _options.RemoteTimeoutMilliseconds;
+            StartCooldown(prepared.Context.Principal, descriptor);
+            return new ActionOutcome(ActionStatus.Accepted, operationId, descriptor.Kind, descriptor.Category,
+                Result: dispatched.Result);
+        }
+
         var executed = prepared.Action.Commit(prepared.Context, new MutationScope(this, prepared.Context));
         if (!executed.Succeeded)
         {
@@ -432,7 +531,6 @@ public sealed class ActionPipeline(
             record.State = OperationState.Failed;
             record.Reason = executed.Reason ?? executed.Status.ToString();
             record.CompletedAt = _clock.NowMilliseconds;
-            _prepared.Remove((prepared.PrepareExpiresAtMilliseconds, operationId.Value));
             return new ActionOutcome(executed.Status, operationId, descriptor.Kind, descriptor.Category,
                 Reason: record.Reason);
         }
@@ -441,12 +539,60 @@ public sealed class ActionPipeline(
         record.State = OperationState.Committed;
         record.Result = executed.Result;
         record.CompletedAt = _clock.NowMilliseconds;
-        _prepared.Remove((prepared.PrepareExpiresAtMilliseconds, operationId.Value));
-        if (descriptor.CooldownMilliseconds > 0)
-            _cooldowns[CooldownKey(prepared.Context.Principal, descriptor)] =
-                _clock.NowMilliseconds + descriptor.CooldownMilliseconds;
+        StartCooldown(prepared.Context.Principal, descriptor);
         return new ActionOutcome(ActionStatus.Committed, operationId, descriptor.Kind, descriptor.Category,
             Result: executed.Result);
+    }
+
+    /// <summary>
+    /// Finalizes an accepted remote operation with what the target reported. A lost or timed-out answer is
+    /// never turned into a success, and the same answer applied twice changes nothing.
+    /// </summary>
+    public ActionOutcome Complete(OperationId id, ActionStatus status, string? reason = null, string? result = null)
+    {
+        var kind = ActionKind.Command;
+        var category = ActionCategory.Execution;
+        if (!_operations.TryGetValue(id.Value, out var record))
+            return new ActionOutcome(ActionStatus.InvalidState, id, kind, category, Reason: "unknown_operation");
+        kind = record.Descriptor.Kind;
+        category = record.Descriptor.Category;
+        if (record.State != OperationState.InTransit)
+            return new ActionOutcome(ActionStatus.InvalidState, id, kind, category, Reason: "not_in_transit");
+        record.State = status switch
+        {
+            ActionStatus.Committed or ActionStatus.Ok => OperationState.Committed,
+            ActionStatus.Cancelled => OperationState.Cancelled,
+            _ => OperationState.Failed
+        };
+        record.Reason = reason;
+        record.Result = result ?? record.Result;
+        record.CompletedAt = _clock.NowMilliseconds;
+        return new ActionOutcome(status, id, kind, category, Reason: reason, Result: record.Result);
+    }
+
+    /// <summary>
+    /// Ends accepted operations whose answer never arrived as an unknown outcome. They are never repeated:
+    /// the caller learns that the effect may or may not have happened.
+    /// </summary>
+    public int ExpireRemote(long nowMilliseconds)
+    {
+        var expired = 0;
+        foreach (var record in _operations.Values.ToArray())
+        {
+            if (record.State != OperationState.InTransit || record.InTransitDeadline > nowMilliseconds)
+                continue;
+            record.State = OperationState.UnknownOutcome;
+            record.Reason = "unknown_outcome";
+            record.CompletedAt = nowMilliseconds;
+            expired++;
+        }
+        return expired;
+    }
+
+    private void StartCooldown(PrincipalId principal, ActionDescriptor descriptor)
+    {
+        if (descriptor.CooldownMilliseconds > 0)
+            _cooldowns[CooldownKey(principal, descriptor)] = _clock.NowMilliseconds + descriptor.CooldownMilliseconds;
     }
 
     /// <summary>Cancels a prepared operation before commit. Its reserves return and its cooldown never starts.</summary>
@@ -655,7 +801,9 @@ public sealed class ActionPipeline(
     {
         OperationState.Committed or OperationState.Completed => ActionStatus.Committed,
         OperationState.Cancelled => ActionStatus.Cancelled,
-        OperationState.Preparing or OperationState.Executing or OperationState.InTransit => ActionStatus.Prepared,
+        OperationState.InTransit => ActionStatus.Accepted,
+        OperationState.UnknownOutcome => ActionStatus.UnknownOutcome,
+        OperationState.Preparing or OperationState.Executing => ActionStatus.Prepared,
         _ => ActionStatus.Rejected
     };
 
@@ -687,6 +835,22 @@ public sealed class ActionPipeline(
             }
             return visible.ToArray();
         }
+    }
+
+    private sealed class DispatchScope(ActionPipeline pipeline, ActionContext context, INetRunTransport transport,
+        HostSnapshot? target) : INetRunDispatchScope
+    {
+        public HostId TargetHost => context.TargetHost;
+
+        public HostSnapshot? TargetHostSnapshot => target;
+
+        public PrincipalId Principal => context.Principal;
+
+        public long NowMilliseconds => pipeline._clock.NowMilliseconds;
+
+        public RemoteDispatch Send(string serviceType, string instance, string command, string idempotencyKey,
+            string argumentsJson) =>
+            transport.Send(context, serviceType, instance, command, idempotencyKey, argumentsJson);
     }
 
     private sealed class MutationScope(ActionPipeline pipeline, ActionContext context) : INetRunMutationScope

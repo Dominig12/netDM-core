@@ -13,7 +13,8 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
     public IReadOnlyCollection<string> Operations { get; } =
     [
         "netrun_principal", "netrun_host", "netrun_destroy", "netrun_lifecycle",
-        "netrun_grant", "netrun_revoke", "netrun_actions", "netrun_execute", "netrun_state"
+        "netrun_grant", "netrun_revoke", "netrun_actions", "netrun_execute", "netrun_complete",
+        "netrun_state"
     ];
 
     // NETRUN administration has to work while the map snapshot is still being synchronized: the domain
@@ -30,6 +31,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         "netrun_revoke" => Revoke(payload),
         "netrun_actions" => Actions(payload),
         "netrun_execute" => ExecuteAction(payload),
+        "netrun_complete" => CompleteAction(payload),
         "netrun_state" => State(payload),
         _ => new HostIpcResult(false, "unknown_operation", null)
     };
@@ -81,7 +83,26 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
                 Clamp(Integer(body, "maxPresences"), 0, 64, 1));
         }
 
-        var definition = new HostDefinition(name, hostClass, network, compute, memory, storage, security);
+        ServicesComponent? services = null;
+        if (body.TryGetProperty("services", out var servicesJson) && servicesJson.ValueKind == JsonValueKind.Object)
+        {
+            var map = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var property in servicesJson.EnumerateObject())
+            {
+                if (property.Value.ValueKind != JsonValueKind.String)
+                    return new HostIpcResult(false, "invalid_services", null);
+                var instance = property.Value.GetString();
+                if (property.Name.Length is 0 or > 64 || string.IsNullOrEmpty(instance) || instance.Length > 64)
+                    return new HostIpcResult(false, "invalid_services", null);
+                map[property.Name] = instance;
+            }
+            if (map.Count is > 16)
+                return new HostIpcResult(false, "invalid_services", null);
+            if (map.Count > 0)
+                services = new ServicesComponent(map);
+        }
+
+        var definition = new HostDefinition(name, hostClass, network, compute, memory, storage, security, services);
         var result = netrun.RegisterHost(definition);
         return result.Host is { } host
             ? new HostIpcResult(result.Succeeded, result.Succeeded ? null : StatusCode(result.Status),
@@ -176,6 +197,19 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
             return new HostIpcResult(false, "invalid_request", null);
         if (Integer(body, "execution") is not { } execution || Integer(body, "target") is not { } target)
             return new HostIpcResult(false, "invalid_request", null);
+        // A remote action travels as the endpoint that speaks for the principal. Binding is optional so a
+        // local query still works for an operator that has not spoken on the network yet.
+        if (Text(body, "endpoint") is { Length: > 0 and <= 64 } endpointId)
+        {
+            if (Integer(body, "generation") is not { } generationValue || generationValue <= 0)
+                return new HostIpcResult(false, "invalid_request", null);
+            var subject = netrun.Principal(principalName);
+            if (subject.IsNone)
+                return new HostIpcResult(false, "limit_exceeded", null);
+            var bound = netrun.BindEndpoint(subject, new NetDM.Services.EndpointKey(endpointId, (ulong)generationValue));
+            if (bound != NetDM.Services.ServiceStatus.Ok)
+                return new HostIpcResult(false, bound.ToString().ToLowerInvariant(), null);
+        }
         var outcome = netrun.Execute(principalName, actionId, new HostId((ulong)execution), new HostId((ulong)target), key);
         return new HostIpcResult(true, null, new
         {
@@ -185,6 +219,47 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
             reason = outcome.Reason,
             result = outcome.Result
         });
+    }
+
+    private HostIpcResult CompleteAction(JsonElement? payload)
+    {
+        if (payload is not { ValueKind: JsonValueKind.Object } body)
+            return new HostIpcResult(false, "invalid_request", null);
+        if (Integer(body, "operation") is not { } operation || operation <= 0)
+            return new HostIpcResult(false, "invalid_request", null);
+        if (!TryActionStatus(Text(body, "status"), out var status))
+            return new HostIpcResult(false, "invalid_status", null);
+        var outcome = netrun.Complete(new OperationId((ulong)operation), status, Text(body, "reason"),
+            Text(body, "result"));
+        return new HostIpcResult(true, null, new
+        {
+            status = StatusCode(outcome.Status),
+            operation = outcome.OperationId.Value,
+            reason = outcome.Reason,
+            result = outcome.Result
+        });
+    }
+
+    private static bool TryActionStatus(string? name, out ActionStatus status)
+    {
+        switch (name?.ToLowerInvariant())
+        {
+            case "committed" or "applied" or "ok":
+                status = ActionStatus.Committed;
+                return true;
+            case "cancelled" or "cancelled_by_target":
+                status = ActionStatus.Cancelled;
+                return true;
+            case "failed" or "rejected" or "rejected_by_world":
+                status = ActionStatus.Rejected;
+                return true;
+            case "unknown" or "unknown_outcome":
+                status = ActionStatus.UnknownOutcome;
+                return true;
+            default:
+                status = ActionStatus.Rejected;
+                return false;
+        }
     }
 
     private HostIpcResult State(JsonElement? payload)

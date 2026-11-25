@@ -26,6 +26,8 @@ internal static class Program
             ActionTests.Run();
         if (Matches("effects"))
             EffectTests.Run();
+        if (Matches("remote"))
+            RemoteActionTests.Run();
 
         Console.WriteLine($"All NetRun.Core checks passed ({Count} assertions).");
         return Environment.ExitCode;

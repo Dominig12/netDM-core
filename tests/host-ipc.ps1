@@ -2042,6 +2042,73 @@ try {
         execution = $deckHost; target = $deckHost; key = 'nr-inspect-3' } }
     Assert-True ($gone.result.status -ceq 'target_destroyed') 'a destroyed host is not a valid target'
 
+    # A reconnect drops the published snapshot by design, so transport commands need a new one to be
+    # admitted at all. Publish the same map again before testing a path that goes over the network.
+    Assert-True ((Invoke-Next @{ op = 'snapshot_begin'; snapshotId = 'dmg2'; profile = 'apc_map'
+        chunkCount = 1; factCount = $mapFacts.Count; factSequence = '0' }).ok) 'post-reconnect snapshot begin'
+    Assert-True ((Invoke-Next @{ op = 'snapshot_chunk'; snapshotId = 'dmg2'; chunkIndex = 0; factsJson = $chain
+        digest = $chainDigest }).ok) 'post-reconnect snapshot chunk'
+    Assert-True ((Invoke-Next @{ op = 'snapshot_commit'; snapshotId = 'dmg2'
+        digest = (Get-Digest $chainDigest) }).ok) 'post-reconnect snapshot commit'
+    $nrReady = Invoke-Next @{ op = 'snapshot_ready'; snapshotId = 'dmg2'; factSequence = '0' }
+    Assert-True ($nrReady.ok) 'post-reconnect snapshot ready'
+    $session['streamId'] = $nrReady.streamId
+    Assert-True ((Invoke-Next @{ op = 'heartbeat'; snapshotId = 'dmg2'; factSequence = '0' }).ok) 'post-reconnect heartbeat'
+
+    # NETRUN → NETDM → provider: a NETRUN action does not move a door by itself. It states the intent as
+    # the operator's own endpoint, the service runtime admits it for physical delivery, and the operation
+    # stays accepted until the world reports back. This is the whole path, end to end.
+    $nrDoor = @{ endpoint = 'nr-door'; generation = '1' }
+    $nrDoorAttach = Invoke-Next (@{ op = 'endpoint_attach'; a = '2'; domain = 'station' } + $nrDoor)
+    Assert-True ($nrDoorAttach.ok) "the door provider joins the network: $($nrDoorAttach | ConvertTo-Json -Compress -Depth 4)"
+    Assert-True ((Invoke-Next (@{ op = 'service_register'; instance = 'door.nr'; serviceType = 'machine.door'
+        schema = 'machine.door_state'; major = 1 } + $nrDoor)).ok) 'the door publishes its contract'
+    $nrOperator = @{ endpoint = 'nr-op'; generation = '1' }
+    Assert-True ((Invoke-Next (@{ op = 'endpoint_attach'; a = '1'; domain = 'station' } + $nrOperator)).ok) 'the operator joins the network'
+
+    $nrDoorHost = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.door'; class = 'Terminal'
+        capacityCu = 2; rateCu = 1; services = @{ 'machine.door' = 'door.nr' } } }
+    Assert-True ($nrDoorHost.ok -and $nrDoorHost.result.status -ceq 'ok') 'a door host declares the service it publishes'
+    $nrDoorId = $nrDoorHost.result.host
+    $nrDeck = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.deck2'; class = 'Cyberdeck'
+        capacityCu = 20; rateCu = 5; memorySlots = 4 } }
+    $nrDeckId = $nrDeck.result.host
+    Assert-True ($nrDeck.ok -and $nrDeckId -gt 0) 'the operator declares a deck'
+
+    Assert-True ((Invoke-Next @{ op = 'netrun_grant'; payload = @{ subject = 'op-netrun'; host = $nrDeckId
+        category = 'Execution'; lifetimeMs = 120000 } }).ok) 'execution on the deck is granted'
+    Assert-True ((Invoke-Next @{ op = 'netrun_grant'; payload = @{ subject = 'op-netrun'; host = $nrDoorId
+        category = 'Control'; service = 'machine.door'; lifetimeMs = 120000 } }).ok) 'control of the door is granted'
+
+    $doorSent = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'device.door.open'
+        execution = $nrDeckId; target = $nrDoorId; key = 'nr-door-1'; endpoint = 'nr-op'; generation = 1 } }
+    Assert-True ($doorSent.result.status -ceq 'accepted') "the door action is dispatched over the network: $($doorSent | ConvertTo-Json -Compress -Depth 4)"
+    $doorOperation = $doorSent.result.operation
+
+    $delivered = $null
+    for ($poll = 0; $poll -lt 40 -and $null -eq $delivered; $poll++) {
+        $page = (Invoke-Next @{ op = 'delivery_poll'; afterSequence = '0'; limit = 32 }).result
+        $delivered = $page.items | Where-Object { $_.recipient -ceq 'nr-door' -and $_.kind -ceq 'command' -and
+            $_.instance -ceq 'door.nr' -and $_.command -ceq 'set_state' } | Select-Object -First 1
+        if ($null -eq $delivered) { Start-Sleep -Milliseconds 100 }
+    }
+    Assert-True ($null -ne $delivered -and $delivered.payload.press -ceq "nr$doorOperation" -and
+        $delivered.payload.state -ceq 'open') "the door receives the NETRUN intent as a real command: $($delivered | ConvertTo-Json -Compress -Depth 4)"
+    Assert-True ((Invoke-Next @{ op = 'delivery_ack'; acks = @(@{ deliveryId = $delivered.deliveryId; applied = $true }) }).ok) 'the door confirms that it applied the command'
+
+    $stillPending = Invoke-Next @{ op = 'netrun_state'; payload = @{ limit = 16 } }
+    Assert-True ((Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'device.door.open'
+        execution = $nrDeckId; target = $nrDoorId; key = 'nr-door-2' } }).result.status -ceq 'cooldown') 'the cooldown of the door action runs on game time'
+    $finished = Invoke-Next @{ op = 'netrun_complete'; payload = @{ operation = $doorOperation; status = 'committed' } }
+    Assert-True ($finished.result.status -ceq 'committed') 'the world report finishes the accepted operation'
+    Assert-True ((Invoke-Next @{ op = 'netrun_complete'; payload = @{ operation = $doorOperation; status = 'committed' } }).result.status -ceq 'invalid_state') 'a second report for the same operation changes nothing'
+    Assert-True ($null -ne $stillPending.result) 'the domain stayed readable through the whole exchange'
+
+    # A principal that has not declared an endpoint cannot reach the world: the domain refuses before sending.
+    $unbound = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-other'; action = 'device.door.open'
+        execution = $nrDeckId; target = $nrDoorId; key = 'nr-door-3' } }
+    Assert-True ($unbound.result.status -ceq 'forbidden') 'an action without an execution right is refused'
+
     Write-Host 'NETDM_IPC_PASS'
 }
 finally {
