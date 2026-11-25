@@ -128,6 +128,16 @@ static class ServiceSmokeTests
             duplicateRejected = true;
         }
         Check(duplicateRejected, "duplicate feature contracts must be rejected, not overwritten");
+
+        // The stable protocol is registered through the same modules a feature uses, so a game module is not
+        // a second-class contract and the built-in set can be verified in isolation (ARCH-002).
+        var isolated = new SchemaRegistry();
+        foreach (var module in SchemaRegistry.BuiltinContractModules)
+            module.Register(isolated);
+        Check(SchemaRegistry.BuiltinContractModules.Count >= 10, "every built-in domain is a module");
+        Check(isolated.FindCommand("machine.door", "set_state") is not null && isolated.Find("atmos.sample", 1) is not null &&
+            isolated.FindCommand("network.shell", "run") is not null,
+            "the built-in modules register the stable protocol on their own");
     }
 
     private sealed class ExampleFeatureContracts : IServiceContractModule

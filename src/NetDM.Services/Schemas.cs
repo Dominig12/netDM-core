@@ -79,16 +79,10 @@ public sealed partial class SchemaRegistry
     public static SchemaRegistry CreateDefault(IEnumerable<IServiceContractModule>? extensions = null)
     {
         var registry = new SchemaRegistry();
-        RegisterAtmos(registry);
-        RegisterMachines(registry);
-        RegisterCameras(registry);
-        RegisterResearch(registry);
-        RegisterMessenger(registry);
-        RegisterRadio(registry);
-        RegisterDiagnostics(registry);
-        RegisterQueries(registry);
-        RegisterShell(registry);
-        RegisterDirectory(registry);
+        // The stable protocol is registered through the same extension point a game module uses, so the
+        // built-in set is not a privileged path (ARCH-002).
+        foreach (var module in BuiltinContractModules)
+            module.Register(registry);
         // Game-specific modules are added after the stable built-in protocol.
         // Duplicate schemas or commands are rejected by Register/RegisterCommand.
         if (extensions is not null)

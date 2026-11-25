@@ -167,7 +167,15 @@
 
 Проверки: `dotnet run --project tests/NetDM.SmokeTests -c Release` — PASS (`Airtime table bounds passed.`); `pwsh -File scripts/check-all.ps1 -Only host` — PASS целиком (Host build 3 с, Smoke 6 с, NETRUN domain 2 с, Host IPC 121 с).
 
-## 6. Что не сделано и почему
+## 6. Точка расширения контрактов — механизм сделан реальным (D-07, частично)
+
+`SchemaRegistry.CreateDefault` больше не содержит привилегированного списка: встроенные контракты зарегистрированы теми же `IServiceContractModule`, что и любой игровой модуль (`SchemaRegistry.BuiltinContractModules`, 10 модулей). Новый сервис добавляется регистрацией модуля в composition root, а не правкой реестра.
+
+Проверки: `ServiceSmokeTests` — «every built-in domain is a module», «the built-in modules register the stable protocol on their own» (`machine.door/set_state`, `atmos.sample`, `network.shell/run`), «duplicate feature contracts must be rejected, not overwritten».
+
+Осталось: перенос самих игровых контрактов SS13 из `NetDM.Services/Contracts` в `NetRun.Content` — это меняет размещение модулей, а не механизм, и делается вместе с DM-интеграцией.
+
+## 7. Что не сделано и почему
 
 | Пункт | Состояние | Условие |
 |---|---|---|
@@ -180,7 +188,7 @@
 | DM-адаптер NETRUN (объявление хостов из мира, клиентские команды) | не начато | этап N3/N4 |
 | Время NETRUN = квант транспорта, а не время мира из DM | осознанно | заменить на время, которое присылает DM, при интеграции N3 |
 
-## 7. Технический долг и нарушения, найденные аудитом
+## 8. Технический долг и нарушения, найденные аудитом
 
 Ссылки на файлы и строки — в [t0-audit.md](t0-audit.md) и [migration-matrix.md](migration-matrix.md). Здесь только то, что нужно закрыть, и в каком этапе.
 
@@ -192,7 +200,7 @@
 | D-04 | Погружение не снимается при остановке подсистемы (`netdm_observe.dm:198-219`) | §13 | N4 |
 | D-05 | `inspect()` диагностики недостижим из игры | §16.2 | N4 |
 | D-06 | Неограниченные структуры NETDM | ARCH-004 | **закрыто** (см. §5); `_endpointGenerations` остаётся намеренно — см. там же |
-| D-07 | `IServiceContractModule` не подключён, контракты SS13 зашиты в `SchemaRegistry.CreateDefault` | ARCH-002 | N3 |
+| D-07 | Контракты SS13 зашиты в `SchemaRegistry.CreateDefault` | ARCH-002 | **механизм закрыт** (§6); перенос контрактов в `NetRun.Content` — вместе с DM-интеграцией |
 | D-08 | Устаревший список `scripts/bluemoon-netdm-tests.txt` (5 из 23 путей не существуют) | §21.1 | N2 |
 | D-09 | Смешанная таксономия ошибок IPC (`ex.Message` рядом с `snake_case`) | §6.4 | N2 |
 | D-10 | Бенчмарки в production-бинаре и на HTTP-поверхности | §18.3 | N2 |
