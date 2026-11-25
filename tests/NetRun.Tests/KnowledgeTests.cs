@@ -54,12 +54,20 @@ internal static class KnowledgeTests
         var known = Execute(runtime, actor, deck.Id, relay.Id, "k-known", inspect);
         Equal(ActionStatus.Committed, known.Status, "a host the observer knows may be inspected");
         Check(known.Result!.Contains("relay.1", StringComparison.Ordinal), "the answer carries the state of the host");
+        Equal(KnowledgeLevel.Identified, runtime.Knowledge.Level(actor, relay.Id),
+            "a successful inspection establishes the identity of the host");
+
+        // Observation only raises what is known; a later scan never demotes an identified host.
+        clock.Advance(2_100);
+        Execute(runtime, actor, deck.Id, deck.Id, "k-scan-1b", scan);
+        Equal(KnowledgeLevel.Identified, runtime.Knowledge.Level(actor, relay.Id),
+            "a scan does not lower an established identity");
 
         // Knowledge ages: it stays remembered but is no longer fresh enough to act on.
         clock.Advance(runtime.Knowledge.StaleAfterMilliseconds + 1);
         var record = runtime.Knowledge.Lookup(actor, relay.Id)!;
         Check(runtime.Knowledge.IsStale(record), "an old record is marked stale");
-        Equal(KnowledgeLevel.Observed, record.Level, "a stale record still remembers what was learned");
+        Equal(KnowledgeLevel.Identified, record.Level, "a stale record still remembers what was learned");
         Check(!runtime.Knowledge.Holds(actor, relay.Id, KnowledgeLevel.Observed), "stale knowledge does not authorize an action");
 
         // Re-confirming makes it fresh again without raising the level.

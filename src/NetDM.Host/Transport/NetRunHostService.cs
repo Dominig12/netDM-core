@@ -253,6 +253,44 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
     /// <summary>Whether a record is older than the freshness window, using the domain clock.</summary>
     public bool IsStale(KnowledgeRecord record) => _runtime.Knowledge.IsStale(record);
 
+    /// <summary>
+    /// What one observer may see of the digital world: only hosts it holds knowledge of, never the name of a
+    /// host it has merely scanned, and never a hidden host at all. This is the projection the client draws
+    /// (UI-003, AT-12); a developer can still read the unfiltered state separately.
+    /// </summary>
+    public ObservationView[] View(string principalName, int limit)
+    {
+        lock (_gate)
+        {
+            if (!_principals.TryGetValue(principalName, out var principal))
+                return [];
+            var records = _runtime.Knowledge.Known(principal, limit);
+            var views = new List<ObservationView>(records.Length);
+            var now = _runtime.NowMilliseconds;
+            foreach (var record in records)
+            {
+                var host = _runtime.Hosts.Get(record.Host);
+                if (host is null)
+                    continue;
+                var resources = _runtime.Resources.Snapshot(host.Id);
+                var identified = record.Level >= KnowledgeLevel.Identified;
+                views.Add(new ObservationView(
+                    host.Id.Value,
+                    identified ? host.Name : string.Empty,
+                    host.Class.ToString(),
+                    record.Level.ToString().ToLowerInvariant(),
+                    record.Confidence,
+                    record.AgeMilliseconds(now),
+                    _runtime.Knowledge.IsStale(record),
+                    host.Powered && host.Operational,
+                    resources?.BufferCu ?? 0,
+                    _runtime.Effects.On(host.Id, 8).Length,
+                    identified));
+            }
+            return views.ToArray();
+        }
+    }
+
     /// <summary>Recent operations, newest first.</summary>
     public ActionOutcome[] RecentOperations(int limit)
     {
@@ -273,6 +311,11 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
         return created;
     }
 }
+
+/// <summary>One host as an observer may see it. A name appears only when the identity was established.</summary>
+internal sealed record ObservationView(
+    ulong Host, string Name, string HostClass, string Level, int Confidence, long AgeMs, bool Stale,
+    bool Available, double BufferCu, int Effects, bool Identified);
 
 internal sealed record HostStateView(
     ulong Host, ulong Generation, string Name, string HostClass, bool Powered, bool Operational,

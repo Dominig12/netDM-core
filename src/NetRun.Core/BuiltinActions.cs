@@ -39,7 +39,7 @@ public sealed class InspectAction : IGameAction
         var resources = scope.World.Resources(host.Id);
         var effects = scope.World.Effects(host.Id, 8);
         // A successful inspection re-confirms the record: fresh knowledge is what the projection shows.
-        scope.Remember(host.Id, KnowledgeLevel.Observed, 100);
+        scope.Remember(host.Id, KnowledgeLevel.Identified, 100);
         var payload = JsonSerializer.Serialize(new
         {
             id = host.Id.Value,

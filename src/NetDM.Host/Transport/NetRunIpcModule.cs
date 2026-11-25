@@ -14,7 +14,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
     [
         "netrun_principal", "netrun_host", "netrun_destroy", "netrun_lifecycle",
         "netrun_grant", "netrun_revoke", "netrun_actions", "netrun_execute", "netrun_complete",
-        "netrun_knowledge", "netrun_state"
+        "netrun_knowledge", "netrun_view", "netrun_state"
     ];
 
     // NETRUN administration has to work while the map snapshot is still being synchronized: the domain
@@ -33,6 +33,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         "netrun_execute" => ExecuteAction(payload),
         "netrun_complete" => CompleteAction(payload),
         "netrun_knowledge" => KnowledgeProjection(payload),
+        "netrun_view" => ObservationProjection(payload),
         "netrun_state" => State(payload),
         _ => new HostIpcResult(false, "unknown_operation", null)
     };
@@ -286,6 +287,19 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
                 stale = netrun.IsStale(record)
             }).ToArray()
         });
+    }
+
+    /// <summary>
+    /// The player-facing projection of the digital world. It shows only what the observer learned, never the
+    /// identity of a host it has only scanned, and nothing at all about hosts it cannot discover.
+    /// </summary>
+    private HostIpcResult ObservationProjection(JsonElement? payload)
+    {
+        if (payload is not { ValueKind: JsonValueKind.Object } body || Text(body, "principal") is not { Length: > 0 } name)
+            return new HostIpcResult(false, "invalid_request", null);
+        var limit = Clamp(Integer(body, "limit"), 1, 256, 64);
+        var views = netrun.View(name, limit);
+        return new HostIpcResult(true, null, new { count = views.Length, hosts = views });
     }
 
     private HostIpcResult State(JsonElement? payload)

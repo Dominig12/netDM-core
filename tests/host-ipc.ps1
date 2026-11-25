@@ -2026,11 +2026,28 @@ try {
 
     $knowledge = Invoke-Next @{ op = 'netrun_knowledge'; payload = @{ principal = 'op-netrun'; limit = 16 } }
     $knownDeck = $knowledge.result.entries | Where-Object { $_.host -eq $deckHost } | Select-Object -First 1
-    Assert-True ($knowledge.ok -and $null -ne $knownDeck -and $knownDeck.level -ceq 'observed' -and
+    Assert-True ($knowledge.ok -and $null -ne $knownDeck -and $knownDeck.level -ceq 'identified' -and
         -not $knownDeck.stale) "the scan recorded what the observer now knows: $($knowledge | ConvertTo-Json -Compress -Depth 4)"
     $unseen = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'net.inspect'
         execution = $deckHost; target = 65535; key = 'nr-unseen' } }
     Assert-True ($unseen.result.status -ceq 'forbidden') 'a target the observer was never granted is refused, not described'
+
+    # A host that was only scanned is visible but anonymous: the name appears once the identity is
+    # established by an inspection. This is the projection the client draws, not a developer dump.
+    $other = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.other'; class = 'Relay'
+        capacityCu = 4; rateCu = 1 } }
+    $otherHost = $other.result.host
+    Assert-True ((Invoke-Next @{ op = 'netrun_grant'; payload = @{ subject = 'op-netrun'; host = $otherHost
+        category = 'Discovery'; lifetimeMs = 60000 } }).ok) 'discovery of the second host is granted'
+    Start-Sleep -Milliseconds 2100
+    Assert-True ((Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'net.scan'
+        execution = $deckHost; target = $deckHost; key = 'nr-scan-2' } }).result.status -ceq 'committed') 'the second scan runs after its cooldown'
+    $view = Invoke-Next @{ op = 'netrun_view'; payload = @{ principal = 'op-netrun'; limit = 16 } }
+    $seenDeck = $view.result.hosts | Where-Object { $_.host -eq $deckHost } | Select-Object -First 1
+    $seenOther = $view.result.hosts | Where-Object { $_.host -eq $otherHost } | Select-Object -First 1
+    Assert-True ($view.ok -and $null -ne $seenDeck -and $seenDeck.identified -and $seenDeck.name -ceq 'netrun.deck') "an inspected host is shown by its name: $($view | ConvertTo-Json -Compress -Depth 4)"
+    Assert-True ($null -ne $seenOther -and -not $seenOther.identified -and [string]::IsNullOrEmpty($seenOther.name) -and
+        $seenOther.level -ceq 'observed') "a scanned host is shown without its identity: $($seenOther | ConvertTo-Json -Compress)"
 
     $state = Invoke-Next @{ op = 'netrun_state'; payload = @{ limit = 16 } }
     $deckState = $state.result.hosts | Where-Object { $_.host -eq $deckHost } | Select-Object -First 1
