@@ -427,6 +427,24 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
                 if (Integer(body, "identity") is not { } identityValue || identityValue <= 0)
                     return new HostIpcResult(false, "invalid_request", null);
                 var identity = new IdentityId((ulong)identityValue);
+                if (action == "backups")
+                {
+                    var (backups, listing) = netrun.LifeBackups(identity, Clamp(Integer(body, "limit"), 1, 32, 8));
+                    return listing.Core is null
+                        ? new HostIpcResult(false, StatusCode(listing.Status), new { status = StatusCode(listing.Status) })
+                        : new HostIpcResult(true, null, new
+                        {
+                            status = "ok",
+                            backups = backups.Select(backup => new
+                            {
+                                id = backup.Id,
+                                host = backup.StoredOn.Value,
+                                integrity = backup.Integrity,
+                                control = backup.ControlGeneration,
+                                takenAt = backup.TakenAtMilliseconds
+                            }).ToArray()
+                        });
+                }
                 if (action == "backup")
                 {
                     if (Integer(body, "host") is not { } storage || storage <= 0)
@@ -444,6 +462,8 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
                         (ulong)Clamp(Integer(body, "control"), 0, int.MaxValue, 0), Text(body, "reason"));
                     return LifeOutcome(identity, result);
                 }
+                if (action == "backups")
+                    return new HostIpcResult(true, null, new { status = "ok", backups = Array.Empty<object>() });
                 if (action is "restore" or "restore_backup")
                 {
                     if (Integer(body, "host") is not { } host || host <= 0)

@@ -2155,6 +2155,8 @@ stop
     Assert-True (($aborted.ok -and $aborted.result.state -ceq 'idle' -and $aborted.result.host -eq $lifeDeckId) -or (-not $aborted.ok -and $aborted.result.status -ceq 'nottraveling')) "the presence is grounded after the attempt: $($aborted | ConvertTo-Json -Compress -Depth 4)"
     $backup = Invoke-Next @{ op = 'netrun_life'; payload = @{ action = 'backup'; identity = $lifeId; host = $lifeServerId } }
     Assert-True ($backup.ok -and $backup.result.backup -gt 0) 'a backup is stored on a host with storage'
+    $listed = Invoke-Next @{ op = 'netrun_life'; payload = @{ action = 'backups'; identity = $lifeId } }
+    Assert-True ($listed.ok -and $listed.result.backups.Count -ge 1 -and $listed.result.backups[0].integrity -gt 0) "the stored copy is listed for a restore: $($listed | ConvertTo-Json -Compress -Depth 4)"
 
     Assert-True ((Invoke-Next @{ op = 'netrun_life'; payload = @{ action = 'migrate'; identity = $lifeId
         destination = $lifeServerId } }).ok) 'the move begins'

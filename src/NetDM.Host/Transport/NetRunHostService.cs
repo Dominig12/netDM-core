@@ -392,6 +392,18 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
             return _runtime.Presences.Get(identity);
     }
 
+    /// <summary>The backups one identity holds, newest first. The window needs them to offer a restore.</summary>
+    public (NetRun.Core.CoreBackup[] Backups, LifeResult Result) LifeBackups(IdentityId identity, int limit)
+    {
+        lock (_gate)
+        {
+            var core = _runtime.Lives.Get(identity);
+            return core is null
+                ? ([], new LifeResult(LifeStatus.UnknownIdentity, null))
+                : (_runtime.Lives.Backups(identity, limit), new LifeResult(LifeStatus.Ok, core));
+        }
+    }
+
     public LifeResult RestoreLife(IdentityId identity, HostId host, int integrity)
     {
         lock (_gate)
@@ -402,6 +414,22 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
     {
         lock (_gate)
             return _runtime.Lives.RestoreFromBackup(identity, backup, host, integrity);
+    }
+
+    /// <summary>Backups of the observer's own core, newest first, bounded for the window.</summary>
+    private object[] BackupsFor(PrincipalId principal, int limit)
+    {
+        var cores = _runtime.Lives.ControlledBy(principal, 1);
+        if (cores.Length == 0)
+            return [];
+        return _runtime.Lives.Backups(cores[0].Identity, limit).Select(backup => (object)new
+        {
+            id = backup.Id,
+            host = backup.StoredOn.Value,
+            integrity = backup.Integrity,
+            control = backup.ControlGeneration,
+            takenAt = backup.TakenAtMilliseconds
+        }).ToArray();
     }
 
     /// <summary>Reads the current effect list of a host, for projections.</summary>
@@ -560,6 +588,8 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
                     hops = presence.Hops,
                     arriveAt = presence.ArriveAtMilliseconds
                 }).FirstOrDefault(),
+                // The backups of the observer's own core: what it may restore, and when each copy was taken.
+                backups = BackupsFor(principal, 8),
                 lives = _runtime.Lives.ControlledBy(principal, operationLimit).Select(core => new
                 {
                     identity = core.Identity.Value,
