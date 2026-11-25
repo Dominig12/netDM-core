@@ -1059,7 +1059,7 @@ try {
     }
     $schema = Read-QueryInstance 'schema' 'door.a' 'schema-visible'
     Assert-True ($schema.status -ceq 'complete' -and $schema.instance -ceq 'door.a' -and $schema.serviceType -ceq 'machine.door' -and
-        $schema.schema -ceq 'machine.door_state' -and $schema.major -eq 1 -and $schema.minor -eq 0 -and $schema.commands -ceq 'set_state') 'query reads the registered contract'
+        $schema.schema -ceq 'machine.door_state' -and $schema.major -eq 1 -and $schema.minor -eq 0 -and $schema.commands -ceq 'set_state,control') 'query reads the registered contract'
     $idle = Read-QueryInstance 'state' 'door.a' 'state-idle'
     Assert-True ($idle.status -ceq 'complete' -and $idle.publication -ceq 'idle' -and $idle.sequence -ceq '0') 'the new service has not published'
     $doorState = @{ press = 'ipc-test'; state = 'closed'; changed = $true }
