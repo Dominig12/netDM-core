@@ -719,6 +719,11 @@ static class ServiceSmokeTests
         Check(rogueScan.Operations.Length == 1, "another domain discovers only open services");
         Check(services.Discover(console, "atmos.telemetry", "scan-1", PacketTrafficClass.Interactive).Status ==
             ServiceStatus.IdempotencyConflict, "scan key identifies its service type");
+        // A scan memo describes a moment, not the round: after its window the same key scans again.
+        stand.Tick += 301;
+        Check(services.Discover(console, "machine.control", "scan-1", PacketTrafficClass.Interactive).Status ==
+            ServiceStatus.Ok, "a scan key retires after its retention window");
+
         var newConsole = console with { Generation = 2 };
         Check(services.AttachEndpoint(newConsole, new NodeId(1)) == ServiceStatus.Ok &&
             services.Discover(newConsole, "machine.control", "scan-1", PacketTrafficClass.Interactive).Status ==

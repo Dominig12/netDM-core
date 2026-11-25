@@ -58,6 +58,7 @@ public sealed record ServiceRuntimeOptions(
     int MaxQueuePending = 16, int DeliveryHistory = 8_192, int EnvelopeBytes = 96,
     int DefaultTimeoutTicks = 50, int MaxTimeoutTicks = 900, int AckTimeoutTicks = 600,
     int MaxOperations = 16_384, int MaxActiveOperationsPerEndpoint = 8, int MaxPendingCommandsPerProvider = 16,
+    long ScanRetentionTicks = 300,
     int MaxDiscoverFanout = 16, int MaxResultAttempts = 3, int ResultTimeoutTicks = 50,
     IReadOnlyList<string>? HostProvidedTypes = null, int MaxHostCommands = 256);
 
@@ -229,7 +230,7 @@ public sealed class ServiceRuntime
     private readonly Dictionary<long, OperationRecord> _operations = new();
     private readonly Dictionary<(string Instance, string Key), long> _operationKeys = new();
     private readonly Queue<(long Id, long Expires)> _transientOperations = new();
-    private readonly Dictionary<(EndpointKey Requester, string Scan), (string ServiceType, long[] Operations)> _scans = new();
+    private readonly Dictionary<(EndpointKey Requester, string Scan), (string ServiceType, long[] Operations, long ExpiresAt)> _scans = new();
     private readonly Queue<long> _history = new();
     private readonly SortedDictionary<long, DeliveryRecord> _inbox = new();
     private readonly Queue<DeliverySubmission> _outbox = new();
@@ -911,6 +912,7 @@ public sealed class ServiceRuntime
             var status = Require(requester, out var record);
             if (status != ServiceStatus.Ok)
                 return new DiscoverResult(status, []);
+            ExpireScans();
             if (_scans.TryGetValue((requester, scanKey), out var previous))
                 return previous.ServiceType == serviceType
                     ? new DiscoverResult(ServiceStatus.Duplicate, previous.Operations)
@@ -931,9 +933,31 @@ public sealed class ServiceRuntime
                 operations[i] = StartOperation(record!, candidates[i], definition, canonical!, "", _options.DefaultTimeoutTicks,
                     trafficClass, false).Id;
             }
-            _scans.Add((requester, scanKey), (serviceType, operations));
+            _scans.Add((requester, scanKey), (serviceType, operations, _clock() + _options.ScanRetentionTicks));
             return new DiscoverResult(ServiceStatus.Ok, operations);
         }
+    }
+
+    /// <summary>
+    /// Drops scan records whose retention window passed. A repeated scan key is idempotent only inside that
+    /// window; afterwards it is a new scan, so the memo cannot accumulate for the lifetime of the round.
+    /// </summary>
+    private void ExpireScans()
+    {
+        if (_scans.Count == 0)
+            return;
+        var now = _clock();
+        List<(EndpointKey Requester, string Scan)>? expired = null;
+        foreach (var (key, value) in _scans)
+        {
+            if (value.ExpiresAt > now)
+                continue;
+            (expired ??= []).Add(key);
+        }
+        if (expired is null)
+            return;
+        foreach (var key in expired)
+            _scans.Remove(key);
     }
 
     /// <summary>

@@ -154,7 +154,20 @@
 
 Нестабильность `host-ipc.ps1` — известная и ранее существовавшая: в разных прогонах падают разные shell- и presence-утверждения (`presence answered at netshell.apc2`, `shell program burst-6`, `run answered at netshell.apc3`, `shell line answered: $a = self $b | count`). Наборы NETRUN проходят каждый раз, когда до них доходит исполнение. Это записано как технический долг, а не как пройденная проверка.
 
-## 5. Что не сделано и почему
+## 5. ARCH-004: ограничение роста структур — выполнено
+
+Аудит показал три структуры без верхней границы и одну, которая растёт по замыслу. Закрыто:
+
+| Структура | Было | Стало | Проверка |
+|---|---|---|---|
+| `SharedMediumNetwork._airtime` | запись на каждый `(channel, z)`, когда-либо использованный; записи не удалялись | таблица описывает только текущий тик: при переходе на новый тик очищается; верхняя граница `MaxAirtimeDomains = 4096`, сверх неё — `ChannelBusy` | `AirtimeBoundsChecks`: 8 каналов за тик → 8 слотов; новый тик → 1; передача на старый тик отвергается и считается в `RejectedOldTick` |
+| `NetworkRuntime._traffic` | сэмплер 1 из 16 добавлял запись на узел и не ограничивался | при достижении `MaxTrafficEntries = 4096` сэмплер начинает заново | существующие проверки маршрутизации и метрик |
+| `ServiceRuntime._scans` | memo сканирований жил весь раунд и расходовал квоту операций | запись живёт `ScanRetentionTicks = 300` (30 с игрового времени); после окна тот же ключ сканирует заново | `ServiceSmokeTests`: `a scan key retires after its retention window` |
+| `ServiceRuntime._endpointGenerations` | растёт по числу различных id эндпойнтов | **остаётся намеренно**: это защита от повторного использования идентификатора, размер ограничен `MaxEndpoints` | комментарий в коде и эта запись |
+
+Проверки: `dotnet run --project tests/NetDM.SmokeTests -c Release` — PASS (`Airtime table bounds passed.`); `pwsh -File scripts/check-all.ps1 -Only host` — PASS целиком (Host build 3 с, Smoke 6 с, NETRUN domain 2 с, Host IPC 121 с).
+
+## 6. Что не сделано и почему
 
 | Пункт | Состояние | Условие |
 |---|---|---|
@@ -167,7 +180,7 @@
 | DM-адаптер NETRUN (объявление хостов из мира, клиентские команды) | не начато | этап N3/N4 |
 | Время NETRUN = квант транспорта, а не время мира из DM | осознанно | заменить на время, которое присылает DM, при интеграции N3 |
 
-## 6. Технический долг и нарушения, найденные аудитом
+## 7. Технический долг и нарушения, найденные аудитом
 
 Ссылки на файлы и строки — в [t0-audit.md](t0-audit.md) и [migration-matrix.md](migration-matrix.md). Здесь только то, что нужно закрыть, и в каком этапе.
 
@@ -178,7 +191,7 @@
 | D-03 | `ui_data` отдаёт всем окнам глобальный журнал инцидентов и население сети (`network_space.dm:1234`, `netdm_observe.dm:858-863`) | UI-003, AT-12 | N4 |
 | D-04 | Погружение не снимается при остановке подсистемы (`netdm_observe.dm:198-219`) | §13 | N4 |
 | D-05 | `inspect()` диагностики недостижим из игры | §16.2 | N4 |
-| D-06 | Неограниченные структуры NETDM: `SharedMediumNetwork._airtime`, `NetworkRuntime._traffic`, `ServiceRuntime._endpointGenerations`, `_scans` | ARCH-004 | отдельный этап N2 |
+| D-06 | Неограниченные структуры NETDM | ARCH-004 | **закрыто** (см. §5); `_endpointGenerations` остаётся намеренно — см. там же |
 | D-07 | `IServiceContractModule` не подключён, контракты SS13 зашиты в `SchemaRegistry.CreateDefault` | ARCH-002 | N3 |
 | D-08 | Устаревший список `scripts/bluemoon-netdm-tests.txt` (5 из 23 путей не существуют) | §21.1 | N2 |
 | D-09 | Смешанная таксономия ошибок IPC (`ex.Message` рядом с `snake_case`) | §6.4 | N2 |

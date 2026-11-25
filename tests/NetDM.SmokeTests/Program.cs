@@ -94,6 +94,7 @@ CheckInteractiveRerouteQos();
 CheckRerouteAdaptiveBackoff();
 await CheckDedicatedPacketTicksAsync();
 CheckSpatialRadioAirtime();
+AirtimeBoundsChecks.Run();
 CheckInteractiveAirtimeQos();
 CheckLiveGameDenseTopology();
 CheckRadioSafety();

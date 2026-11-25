@@ -130,6 +130,8 @@ public sealed partial class SharedMediumNetwork
     // allocation size is bounded by occupied airtime regions, not elapsed time.
     private readonly Dictionary<RadioMediumCell, (long Used, long Background)> _spatialAirtime = new();
     private long _spatialTick = -1;
+    /// <summary>The tick the channel-wide airtime table belongs to. Older entries are dead weight and go.</summary>
+    private long _airtimeTick = -1;
     private long _spatialHops, _spatialBusy, _spatialBytes, _spatialCellReservations;
     private long _interactiveHopTransmissions, _backgroundHopTransmissions;
     private long _interactiveHopBytes, _backgroundHopBytes, _protectedBackgroundDeferrals;
@@ -184,6 +186,22 @@ public sealed partial class SharedMediumNetwork
     public long BytesPerTick => _bytesPerTick;
     public SharedRadioSearchMode SearchMode => _searchMode;
     public RadioAirtimeScope AirtimeScope => _airtimeScope;
+
+    /// <summary>Channels that currently hold airtime in this tick. Bounded by <see cref="MaxAirtimeDomains"/>.</summary>
+    public int ActiveAirtimeDomains
+    {
+        get
+        {
+            lock (_airtimeLock)
+                return _airtime.Count;
+        }
+    }
+
+    /// <summary>
+    /// Upper bound of distinct (channel, level) airtime slots in one tick. A world that would need more has
+    /// more channels than the simulation can serve in a single tick, and refusing is honest backpressure.
+    /// </summary>
+    public const int MaxAirtimeDomains = 4_096;
     public SharedMediumSnapshot Snapshot => Volatile.Read(ref _current);
 
     public SharedMediumStatistics Stats()
@@ -918,9 +936,18 @@ public sealed partial class SharedMediumNetwork
                 _bytesPerTick * (100 - interactiveReservePercent) / 100);
             if (_airtimeScope == RadioAirtimeScope.ChannelWide)
             {
+                if (tick < _airtimeTick) return RadioHopOutcome.OldTick;
+                // The table only ever describes the current tick. Advancing it drops every idle channel
+                // instead of keeping one entry per channel ever used (ARCH-004).
+                if (tick > _airtimeTick)
+                {
+                    _airtimeTick = tick;
+                    _airtime.Clear();
+                }
+                if (!_airtime.ContainsKey(domain) && _airtime.Count >= MaxAirtimeDomains)
+                    return RadioHopOutcome.ChannelBusy;
                 var slot = _airtime.TryGetValue(domain, out var existing)
                     ? existing : (Tick: -1L, Used: 0L, Background: 0L);
-                if (slot.Tick > tick) return RadioHopOutcome.OldTick;
                 if (bytes > _bytesPerTick) return RadioHopOutcome.PacketTooLarge;
                 var used = slot.Tick == tick ? slot.Used : 0L;
                 var background = slot.Tick == tick ? slot.Background : 0L;
@@ -1089,16 +1116,26 @@ public sealed partial class SharedMediumNetwork
         Interlocked.Add(ref _attemptedWirelessHops, radioHops);
         lock (_airtimeLock)
         {
+            if (tick < _airtimeTick)
+            {
+                RegisterRejection(payloadBytes, ref _rejectedOldTick);
+                return false;
+            }
+            if (tick > _airtimeTick)
+            {
+                _airtimeTick = tick;
+                _airtime.Clear();
+            }
             // Never partially debit a multi-hop transfer.
             foreach (var (domain, bytes) in needed)
             {
-                var slot = _airtime.TryGetValue(domain, out var existing)
-                    ? existing : (Tick: -1L, Used: 0L, Background: 0L);
-                if (slot.Tick > tick)
+                if (!_airtime.ContainsKey(domain) && _airtime.Count >= MaxAirtimeDomains)
                 {
-                    RegisterRejection(payloadBytes, ref _rejectedOldTick);
+                    RegisterRejection(payloadBytes, ref _rejectedCapacity);
                     return false;
                 }
+                var slot = _airtime.TryGetValue(domain, out var existing)
+                    ? existing : (Tick: -1L, Used: 0L, Background: 0L);
                 // A single transfer consumes one airtime allocation PER radio hop.
                 // Distinguish packets that can never fit from temporary saturation.
                 if (bytes > _bytesPerTick)
