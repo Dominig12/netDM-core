@@ -11,7 +11,7 @@ namespace NetDM.Host.Transport;
 /// single logical writer is what keeps its composed invariants true. The gate is never held across an
 /// await or IPC I/O.
 /// </summary>
-internal sealed class NetRunHostService : BackgroundService, INetRunTransport
+internal sealed class NetRunHostService : BackgroundService, INetRunTransport, IHopDistance
 {
     /// <summary>NETRUN reads the same monotonic quantum clock as the transport, in milliseconds.</summary>
     private sealed class QuantumClock(GameNetworkService game) : ISimulationClock
@@ -36,6 +36,7 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
         _clock = new QuantumClock(game);
         _runtime = new NetRunRuntime(_clock);
         _runtime.Actions.AttachTransport(this);
+        _runtime.Actions.AttachRange(this);
     }
 
     public long TickCount => Volatile.Read(ref _ticks);
@@ -219,6 +220,23 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
                 return ProgramStatus.NotRunning;
             return _runtime.Programs.Cancel(process).Status;
         }
+    }
+
+    /// <summary>
+    /// Distance in hops as the transport sees it. A host that declares no network position cannot be placed,
+    /// so its distance is unknown and the pipeline allows the action for the host it is launched from; two
+    /// placed hosts are measured on the published graph, and an unreachable pair is refused.
+    /// </summary>
+    public int Distance(HostId from, HostId to)
+    {
+        if (from == to)
+            return 0;
+        var fromNode = _runtime.Hosts.Get(from)?.Network?.Node;
+        var toNode = _runtime.Hosts.Get(to)?.Network?.Node;
+        if (fromNode is null || toNode is null)
+            return 0;
+        var route = Router.Find(_game.Snapshot.Physical, fromNode.Value, toNode.Value);
+        return route.Found ? route.Path.Count - 1 : -1;
     }
 
     /// <summary>Finalizes an accepted remote operation with what the world reported.</summary>

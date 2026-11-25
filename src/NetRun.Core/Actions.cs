@@ -96,7 +96,7 @@ public enum ActionStatus : byte
 {
     Ok, Committed, Prepared, Accepted, Cancelled,
     UnknownAction, Forbidden, InvalidRequest, InvalidState,
-    TargetDestroyed, HostUnavailable, InsufficientCompute, InsufficientMemory,
+    TargetDestroyed, HostUnavailable, OutOfRange, InsufficientCompute, InsufficientMemory,
     Cooldown, Duplicate, IdempotencyConflict, LimitExceeded, Rejected, UnknownOutcome
 }
 
@@ -324,6 +324,7 @@ public sealed class ActionPipeline(
     private EffectRegistry? _effects;
     private KnowledgeStore? _knowledge;
     private INetRunTransport? _transport;
+    private IHopDistance? _hops;
     private ulong _nextOperation;
 
     public int ActionCount => _actions.Count;
@@ -341,6 +342,12 @@ public sealed class ActionPipeline(
     /// </summary>
     public void AttachTransport(INetRunTransport transport) =>
         _transport = transport ?? throw new ArgumentNullException(nameof(transport));
+
+    /// <summary>
+    /// Connects the transport's idea of distance, so an action cannot reach further than it declares. Without it
+    /// the declared range is not enforced, which is why the composition root always attaches it.
+    /// </summary>
+    public void AttachRange(IHopDistance hops) => _hops = hops ?? throw new ArgumentNullException(nameof(hops));
 
     /// <summary>Connects the per-observer knowledge store so perception actions can read and record it.</summary>
     public void AttachKnowledge(KnowledgeStore knowledge) =>
@@ -470,6 +477,18 @@ public sealed class ActionPipeline(
         var cooldownKey = CooldownKey(request.Principal, descriptor);
         if (_cooldowns.TryGetValue(cooldownKey, out var readyAt) && readyAt > now)
             return new PrepareOutcome(ActionStatus.Cooldown, OperationId.None, null, readyAt - now, "cooldown");
+
+        // Reach is a property of the action, not a suggestion: a target the transport cannot reach, or one
+        // further than the declared range, is refused before anything is spent (PRIM-003, §8.2).
+        if (_hops is not null)
+        {
+            var hops = _hops.Distance(request.ExecutionHost, request.TargetHost);
+            if (hops < 0)
+                return new PrepareOutcome(ActionStatus.OutOfRange, OperationId.None, null, Reason: "no_route");
+            if (hops > descriptor.RangeHops)
+                return new PrepareOutcome(ActionStatus.OutOfRange, OperationId.None, null,
+                    Reason: "range");
+        }
 
         var compute = Reserve(request.ExecutionHost, request.Principal, ResourceKind.Compute, descriptor.ComputeCost);
         if (compute.Status != ReservationStatus.Ok)

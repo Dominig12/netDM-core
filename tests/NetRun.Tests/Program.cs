@@ -33,6 +33,8 @@ internal static class Program
             RemoteActionTests.Run();
         if (Matches("knowledge"))
             KnowledgeTests.Run();
+        if (Matches("range"))
+            RangeTests.Run();
         if (Matches("breach"))
             BreachTests.Run();
         if (Matches("program"))
