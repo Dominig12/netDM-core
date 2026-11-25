@@ -42,5 +42,17 @@ public sealed partial class SchemaRegistry
             MaxPayloadBytes: 256));
         registry.RegisterCommand("machine.door", "set_state", "machine.door_set", 1, "machine.door_state", 1);
 
+        // The device UI uses a world-issued ticket. The result confirms that the action was queued.
+        registry.Register(new SchemaDefinition("machine.door_control_request", 1, 0,
+        [
+            new SchemaField("ticket", SchemaFieldType.Text, true, MaxLength: 40),
+            new SchemaField("action", SchemaFieldType.Enum, true, Values: ["open", "close", "bolt", "unbolt"])
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["ticket", "action"] }, MaxPayloadBytes: 128));
+        registry.Register(new SchemaDefinition("machine.door_control_accepted", 1, 0,
+        [
+            new SchemaField("ticket", SchemaFieldType.Text, true, MaxLength: 40),
+            new SchemaField("accepted", SchemaFieldType.Boolean, true)
+        ], new Dictionary<string, IReadOnlyList<string>> { ["full"] = ["ticket", "accepted"] }, MaxPayloadBytes: 128));
+        registry.RegisterCommand("machine.door", "control", "machine.door_control_request", 1, "machine.door_control_accepted", 1);
     }
 }

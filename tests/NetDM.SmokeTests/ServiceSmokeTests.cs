@@ -304,6 +304,24 @@ static class ServiceSmokeTests
             "the button learns the door changed");
         Check(services.Operation(button, lost.Operation!.OperationId).Operation!.Outcome == CommandOutcome.NotApplied &&
             Inbox(stand, "door-2", "command").Length == 0, "a door out of reach gets nothing");
+
+        var operatorEndpoint = new EndpointKey("door-ui-operator", 1);
+        Check(services.AttachEndpoint(operatorEndpoint, new NodeId(1)) == ServiceStatus.Ok, "attach the door UI operator");
+        Check(services.Invoke(operatorEndpoint, "door.1", "control", "ui-1", Json("""{"ticket":"t-1","action":"toggle"}"""), 20,
+            PacketTrafficClass.Interactive).Status == ServiceStatus.InvalidPayload, "the door UI accepts only named state changes");
+        var control = services.Invoke(operatorEndpoint, "door.1", "control", "ui-1",
+            Json("""{"action":"bolt","ticket":"t-1"}"""), 20, PacketTrafficClass.Interactive);
+        Check(control.Status == ServiceStatus.Ok, "an operator action shares the same registered door");
+        stand.Settle();
+        var command = Inbox(stand, "door-1", "command").Single(item => item.OperationId == control.Operation!.OperationId);
+        Check(command.Schema == "machine.door_control_request" && command.Payload!.Value.GetRawText() == """{"ticket":"t-1","action":"bolt"}""",
+            "the door receives the normalized ticket and action without a button press");
+        Check(services.Acknowledge(command.DeliveryId, true, null, Json("""{"ticket":"t-1","accepted":1}""")).Status ==
+            ServiceStatus.Ok, "the door confirms queuing the operator action");
+        stand.Settle();
+        var queued = Inbox(stand, operatorEndpoint.Id, "result").Single();
+        Check(queued.Schema == "machine.door_control_accepted" && queued.Payload!.Value.GetProperty("accepted").GetBoolean(),
+            "the operator receives a typed acceptance rather than the state-change result");
     }
 
     /// <summary>

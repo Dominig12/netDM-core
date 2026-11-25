@@ -1642,9 +1642,26 @@ end
     }
     # From APC 3 one hop reaches APC 2 and itself; from APC 2 it would be all three.
     Assert-True ($fromPresence.status -ceq 'complete' -and $fromPresence.nodes -eq 2) "a scan starts where the presence stands: $($fromPresence | ConvertTo-Json -Compress)"
+    $visit = @{ presence = $entered.presence; generation = $entered.generation }
+    $inbox = Invoke-ShellAt 'netshell.apc2' 'chat_read' $visit '4'
+    Assert-True ($inbox.status -ceq 'ok' -and $inbox.scope -and $inbox.node -ceq '3') 'chat reads the current network visit'
+    $chat = Invoke-ShellAt 'netshell.apc2' 'chat_send' @{ scope = $inbox.scope; text = 'test delivery' } '4'
+    Assert-True ($chat.status -ceq 'sent') 'the network visit accepts a chat message'
+    $inbox = Invoke-ShellAt 'netshell.apc2' 'chat_read' $visit '4'
+    $message = $inbox.messages | ConvertFrom-Json
+    Assert-True ($message.text -ceq 'test delivery' -and $message.own) 'accepted chat reply publishes the message'
+
+    $challenge = Invoke-ShellAt 'netshell.apc2' 'hack_start' @{ node = '3' } '4'
+    Assert-True ($challenge.status -ceq 'challenge' -and $challenge.code) 'the active presence can challenge a known node'
+    $key = Invoke-ShellAt 'netshell.apc2' 'hack_answer' @{ code = $challenge.code } '4'
+    Assert-True ($key.status -ceq 'ok' -and $key.node -ceq '3') 'the verified challenge grants a node key'
+    $access = Invoke-ShellAt 'netshell.apc2' 'hack_use' @{ node = '3'; purpose = 'breaker' } '4'
+    Assert-True ($access.status -ceq 'ok' -and $access.purpose -ceq 'breaker') 'a routed key reply preserves the authorized purpose'
+
     $away = Invoke-ShellAt 'netshell.apc2' 'detach' @{} '4'
     Assert-True ($away.status -ceq 'suspended' -and $away.reason -ceq 'operator_away') "closing the window suspends the presence: $($away | ConvertTo-Json -Compress)"
     Assert-True ((Invoke-ShellAt 'netshell.apc2' 'act' @{ line = 'self' } '4').status -ceq 'suspended') 'a suspended presence does not act'
+    Assert-True ((Invoke-ShellAt 'netshell.apc2' 'hack_keys' @{} '4').status -ceq 'suspended') 'a suspended presence cannot use the intrusion handlers'
     $resumed = Invoke-ShellAt 'netshell.apc2' 'enter' @{} '4'
     Assert-True ($resumed.status -ceq 'resumed' -and $resumed.state -ceq 'active' -and $resumed.presence -eq $entered.presence) "entering again resumes it: $($resumed | ConvertTo-Json -Compress)"
     Assert-True ((Invoke-Next @{ op = 'world_delta'; snapshotId = 'svc3'; factSequence = '5'

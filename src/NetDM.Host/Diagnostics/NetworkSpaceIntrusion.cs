@@ -38,28 +38,27 @@ public static partial class NetworkSpace
 
     private static JsonElement Refusal(string status) => JsonSerializer.SerializeToElement(new { status });
 
-    /// <summary>Hack commands: start, answer, key ring, using a key, and the anonymity mask.</summary>
-    private static JsonElement HackCommand(GameNetworkService game, GameNetworkService.Session session, HostCommand command,
-        JsonElement arguments, long now)
+    private static void RegisterIntrusionCommands(Dictionary<string, SpaceCommand> commands)
     {
-        if (Controlled(game, session, command, now, out var refusal) is not { } presence)
-            return Refusal(refusal!);
-        var owner = presence.Owner;
-        return command.Command switch
+        commands.Add("hack_start", IntrusionReply(static (context, presence) =>
+            StartHack(context.Session, presence, context.Arguments, context.Now)));
+        commands.Add("hack_answer", IntrusionReply(static (context, presence) =>
+            AnswerHack(presence, context.Arguments, context.Now)));
+        commands.Add("hack_keys", IntrusionReply(static (context, presence) => JsonSerializer.SerializeToElement(new
         {
-            "hack_start" => StartHack(game, session, presence, arguments, now),
-            "hack_answer" => AnswerHack(presence, arguments, now),
-            "hack_keys" => JsonSerializer.SerializeToElement(new
-            {
-                status = "ok", keys = KeysText(owner, now), masked = presence.Masked
-            }),
-            "hack_use" => UseKey(presence, arguments, now),
-            "mask" => ToggleMask(presence, arguments, now),
-            _ => Refusal("invalid_request"),
-        };
+            status = "ok", keys = KeysText(presence.Owner, context.Now), masked = presence.Masked
+        })));
+        commands.Add("hack_use", IntrusionReply(static (context, presence) =>
+            UseKey(presence, context.Arguments, context.Now)));
+        commands.Add("mask", IntrusionReply(static (context, presence) =>
+            ToggleMask(presence, context.Arguments, context.Now)));
     }
 
-    private static JsonElement StartHack(GameNetworkService game, GameNetworkService.Session session, Presence presence,
+    private static SpaceCommand IntrusionReply(Func<CommandContext, Presence, JsonElement> handler) =>
+        Reply(context => Controlled(context.Game, context.Session, context.Request, context.Now, out var refusal) is { } presence
+            ? handler(context, presence) : Refusal(refusal!));
+
+    private static JsonElement StartHack(GameNetworkService.Session session, Presence presence,
         JsonElement arguments, long now)
     {
         if (!arguments.TryGetProperty("node", out var nodeValue) ||

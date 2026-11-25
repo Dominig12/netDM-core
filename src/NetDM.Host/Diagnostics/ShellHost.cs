@@ -31,13 +31,9 @@ public static class ShellHost
 
     internal static JsonElement Answer(GameNetworkService game, GameNetworkService.Session session, HostCommand command, out Action? applied)
     {
-        applied = null;
         using var arguments = JsonDocument.Parse(command.Arguments);
-        if (command.Command is "scan" or "knowledge" or "enter" or "detach" or "leave" or "presence" or "act" or "move"
-            or "preview_move" or "abort_move" or "poll_alarm" or "alarm_action" or "persona" or "life" or "hack_start" or "hack_answer" or "hack_keys" or "hack_use" or "mask")
-            return NetworkSpace.Answer(game, session, command, arguments.RootElement);
-        if (command.Command is "chat_read" or "chat_send")
-            return NetworkSpace.Chat(game, session, command, arguments.RootElement, out applied);
+        if (NetworkSpace.TryAnswer(game, session, command, arguments.RootElement, out var reply, out applied))
+            return reply;
         if (command.Command is "start" or "check" or "stop" or "migrate")
             return ShellPrograms.Answer(session, command, arguments.RootElement, out applied);
         var scope = new Scope(command.InitiatorKey, command.Instance, command.ProviderNode, command.DeliveryId,

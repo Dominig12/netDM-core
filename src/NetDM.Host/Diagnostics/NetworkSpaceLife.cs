@@ -30,6 +30,13 @@ public static partial class NetworkSpace
 
     private static readonly NetworkLifeRuntime Life = new();
 
+    private static void RegisterLifeCommands(Dictionary<string, SpaceCommand> commands)
+    {
+        commands.Add("persona", Reply(static context => PersonaCommand(context.Request, context.Arguments)));
+        commands.Add("life", Reply(static context => LifeCommand(context.Request, context.Arguments,
+            KnowledgeOf(context.Request.InitiatorKey, context.Session.Packets.ReceiptStreamId, context.Now), context.Now)));
+    }
+
     private static void EnsureLifeSession(Guid stream)
     {
         if (Life.EnsureSession(stream))

@@ -285,9 +285,9 @@ public static partial class NetworkSpace
     /// <c>move {to}</c> (Р4): the presence leaves its host for another device's shell that the operator may
     /// see and call, over a route that exists now. It is on its way for one second per hop, at most 15 s.
     /// </summary>
-    private static JsonElement Move(GameNetworkService game, GameNetworkService.Session session, HostCommand command, JsonElement arguments,
-        long now, bool preview)
+    private static JsonElement Move(CommandContext context, bool preview)
     {
+        var (game, session, command, arguments, now) = context;
         var to = arguments.GetProperty("to").GetString() ?? "";
         JsonElement Refusal(string status, Presence? current) => preview
             ? JsonSerializer.SerializeToElement(new { status, target = to })
@@ -389,82 +389,93 @@ public static partial class NetworkSpace
         return result;
     }
 
-    private static JsonElement PresenceCommand(GameNetworkService game, GameNetworkService.Session session, HostCommand command,
-        JsonElement arguments, long now)
+    private static JsonElement ReadPresence(CommandContext context)
     {
-        Presences.TryGetValue(command.InitiatorKey, out var presence);
-        if (presence is not null && presence.Ended && command.Command is "enter")
-            presence = null; // An ended presence is reported until the operator enters again.
-        switch (command.Command)
+        var (game, session, command, arguments, now) = context;
+        var presence = Presences.GetValueOrDefault(command.InitiatorKey);
+        var state = game.CapturePowerState(session);
+        if (presence is { Ended: false })
+            Settle(session, state, presence, now);
+        var snapshot = Describe(presence is null ? "none" : presence.Ended ? "ended" : "present", presence);
+        if (arguments.TryGetProperty("others", out var others) && others.GetBoolean())
+            snapshot["others"] = state is { } powerState ? OtherPresences(session, command, presence, powerState) : "";
+        return JsonSerializer.SerializeToElement(snapshot);
+    }
+
+    private static JsonElement EnterPresence(CommandContext context)
+    {
+        var (game, session, command, _, now) = context;
+        if (Presences.GetValueOrDefault(command.InitiatorKey) is { Ended: false } existing)
         {
-            case "presence":
-                var state = game.CapturePowerState(session);
-                if (presence is { Ended: false })
-                    Settle(session, state, presence, now);
-                var snapshot = Describe(presence is null ? "none" : presence.Ended ? "ended" : "present", presence);
-                if (arguments.TryGetProperty("others", out var others) && others.GetBoolean())
-                    snapshot["others"] = state is { } powerState ? OtherPresences(session, command, presence, powerState) : "";
-                return JsonSerializer.SerializeToElement(snapshot);
-            case "enter":
-                if (presence is not null)
-                {
-                    // One presence per operator: entering again resumes it where it stands. A severed link
-                    // (an intrusion) is resumed only by this explicit enter, never by a background pass.
-                    var resumed = presence.Away;
-                    presence.Away = false;
-                    presence.Intruded = false;
-                    Settle(session, game.CapturePowerState(session), presence, now);
-                    return JsonSerializer.SerializeToElement(Describe(resumed ? "resumed" : "present", presence));
-                }
-                if (Presences.Values.Count(other => !other.Ended) >= MaxPresences ||
-                    Presences.Values.Count(other => !other.Ended && other.Instance == command.Instance) >= MaxPresencesPerHost)
-                    return JsonSerializer.SerializeToElement(Describe("limit_exceeded", null));
-                foreach (var ended in Presences.Where(pair => pair.Value.Ended).Select(pair => pair.Key).ToArray())
-                    if (Presences.Count >= MaxPresences)
-                        Presences.Remove(ended);
-                presence = new Presence
-                {
-                    Id = ++_nextPresence, Owner = command.InitiatorKey, Provider = command.ProviderKey, Instance = command.Instance,
-                    Node = command.ProviderNode
-                };
-                Presences[command.InitiatorKey] = presence;
-                Settle(session, game.CapturePowerState(session), presence, now);
-                if (LifeEnabled)
-                    Record("operator", presence.Node, OperatorName(presence), "оператор вошёл в сеть");
-                return JsonSerializer.SerializeToElement(Describe("entered", presence));
-            case "detach":
-                if (presence is null || presence.Ended)
-                    return JsonSerializer.SerializeToElement(Describe(presence is null ? "none" : "ended", presence));
-                if (!presence.Away)
-                {
-                    if (LifeEnabled)
-                        Record("operator", presence.Node, OperatorName(presence), "оператор покинул сеть");
-                    presence.Away = true;
-                    presence.AwaySince = now;
-                }
-                Settle(session, game.CapturePowerState(session), presence, now);
-                return JsonSerializer.SerializeToElement(Describe("suspended", presence));
-            case "abort_move":
-                if (presence is null || presence.Ended)
-                    return JsonSerializer.SerializeToElement(Describe("no_presence", presence));
-                var power = game.CapturePowerState(session);
-                Settle(session, power, presence, now);
-                if (!presence.Moving)
-                    return JsonSerializer.SerializeToElement(Describe("not_moving", presence));
-                if (command.ProviderNode != presence.Node && NetworkDiagnostics.Trace(session.Medium.Snapshot,
-                    command.ProviderNode, presence.Node, QueryHost.ReachBudget).State != NetworkDiagnostics.Reachable)
-                    return JsonSerializer.SerializeToElement(Describe("out_of_reach", presence));
-                presence.Moving = false;
-                presence.Path = [];
-                presence.Notice = "returned: cancelled";
-                Settle(session, power, presence, now);
-                return JsonSerializer.SerializeToElement(Describe("cancelled", presence));
-            default: // leave
-                if (presence is null || presence.Ended)
-                    return JsonSerializer.SerializeToElement(Describe(presence is null ? "none" : "ended", presence));
-                End(presence, "left");
-                return JsonSerializer.SerializeToElement(Describe("left", presence));
+            // Explicit entry resumes the same presence, including after an intrusion.
+            var resumed = existing.Away;
+            existing.Away = false;
+            existing.Intruded = false;
+            Settle(session, game.CapturePowerState(session), existing, now);
+            return JsonSerializer.SerializeToElement(Describe(resumed ? "resumed" : "present", existing));
         }
+
+        if (Presences.Values.Count(other => !other.Ended) >= MaxPresences ||
+            Presences.Values.Count(other => !other.Ended && other.Instance == command.Instance) >= MaxPresencesPerHost)
+            return JsonSerializer.SerializeToElement(Describe("limit_exceeded", null));
+        foreach (var ended in Presences.Where(pair => pair.Value.Ended).Select(pair => pair.Key).ToArray())
+            if (Presences.Count >= MaxPresences)
+                Presences.Remove(ended);
+        var presence = new Presence
+        {
+            Id = ++_nextPresence, Owner = command.InitiatorKey, Provider = command.ProviderKey, Instance = command.Instance,
+            Node = command.ProviderNode
+        };
+        Presences[command.InitiatorKey] = presence;
+        Settle(session, game.CapturePowerState(session), presence, now);
+        if (LifeEnabled)
+            Record("operator", presence.Node, OperatorName(presence), "оператор вошёл в сеть");
+        return JsonSerializer.SerializeToElement(Describe("entered", presence));
+    }
+
+    private static JsonElement DetachPresence(CommandContext context)
+    {
+        var (game, session, command, _, now) = context;
+        var presence = Presences.GetValueOrDefault(command.InitiatorKey);
+        if (presence is null || presence.Ended)
+            return JsonSerializer.SerializeToElement(Describe(presence is null ? "none" : "ended", presence));
+        if (!presence.Away)
+        {
+            if (LifeEnabled)
+                Record("operator", presence.Node, OperatorName(presence), "оператор покинул сеть");
+            presence.Away = true;
+            presence.AwaySince = now;
+        }
+        Settle(session, game.CapturePowerState(session), presence, now);
+        return JsonSerializer.SerializeToElement(Describe("suspended", presence));
+    }
+
+    private static JsonElement AbortMove(CommandContext context)
+    {
+        var (game, session, command, _, now) = context;
+        var presence = Presences.GetValueOrDefault(command.InitiatorKey);
+        if (presence is null || presence.Ended)
+            return JsonSerializer.SerializeToElement(Describe("no_presence", presence));
+        var power = game.CapturePowerState(session);
+        Settle(session, power, presence, now);
+        if (!presence.Moving)
+            return JsonSerializer.SerializeToElement(Describe("not_moving", presence));
+        if (!CanControlFrom(session.Medium.Snapshot, command.ProviderNode, presence.Node))
+            return JsonSerializer.SerializeToElement(Describe("out_of_reach", presence));
+        presence.Moving = false;
+        presence.Path = [];
+        presence.Notice = "returned: cancelled";
+        Settle(session, power, presence, now);
+        return JsonSerializer.SerializeToElement(Describe("cancelled", presence));
+    }
+
+    private static JsonElement LeavePresence(CommandContext context)
+    {
+        var presence = Presences.GetValueOrDefault(context.Request.InitiatorKey);
+        if (presence is null || presence.Ended)
+            return JsonSerializer.SerializeToElement(Describe(presence is null ? "none" : "ended", presence));
+        End(presence, "left");
+        return JsonSerializer.SerializeToElement(Describe("left", presence));
     }
 
     /// <summary>Live counts on already known nodes. A private shell never discloses its occupants.</summary>
@@ -506,7 +517,6 @@ public static partial class NetworkSpace
     private static bool CanControlFrom(SharedMediumSnapshot world, NodeId entry, NodeId host) => entry == host ||
         NetworkDiagnostics.Trace(world, entry, host, QueryHost.ReachBudget).State == NetworkDiagnostics.Reachable;
 
-    /// <summary>A presence can read its own inbox and speak only during its current visit to the node.</summary>
     /// <summary>P13.6: the wire ids of the nodes this operator has learned; used by the shell's `nodes` and completion.</summary>
     internal static IReadOnlyList<string> KnownNodeIds(EndpointKey owner, Guid stream, int max)
     {
@@ -517,13 +527,17 @@ public static partial class NetworkSpace
             .Select(key => key[2..]).Take(max).ToArray();
     }
 
-    internal static JsonElement Chat(GameNetworkService game, GameNetworkService.Session session, HostCommand command,
-        JsonElement arguments, out Action? applied)
+    private static JsonElement ReadChat(CommandContext context, out Action? applied) => Chat(context, read: true, out applied);
+
+    private static JsonElement SendChat(CommandContext context, out Action? applied) => Chat(context, read: false, out applied);
+
+    /// <summary>A presence can read its own inbox and speak only during its current visit to the node.</summary>
+    private static JsonElement Chat(CommandContext context, bool read, out Action? applied)
     {
         applied = null;
         static JsonElement Refuse(string status) => JsonSerializer.SerializeToElement(new { status });
 
-        var now = Environment.TickCount64;
+        var (game, session, command, arguments, now) = context;
         if (_presenceStream != session.Packets.ReceiptStreamId || game.CapturePowerState(session) is null)
             return Refuse("stale_chat");
         if (Controlled(game, session, command, now, out var refusal) is not { } presence)
@@ -534,7 +548,7 @@ public static partial class NetworkSpace
         var sharedChannel = arguments.TryGetProperty("channel", out var channelFlag) && channelFlag.ValueKind == JsonValueKind.True;
         if (sharedChannel)
         {
-            if (command.Command == "chat_read")
+            if (read)
             {
                 PruneChannel(now);
                 return JsonSerializer.SerializeToElement(new
@@ -552,7 +566,7 @@ public static partial class NetworkSpace
             applied = () => DeliverChannel(game, session, presence, channelMessage);
             return JsonSerializer.SerializeToElement(new { status = "sent", channel = true });
         }
-        if (command.Command == "chat_read")
+        if (read)
         {
             if (arguments.GetProperty("presence").GetDouble() != presence.Id ||
                 arguments.GetProperty("generation").GetDouble() != presence.Generation)
@@ -660,8 +674,9 @@ public static partial class NetworkSpace
     }
 
     /// <summary><c>act {line}</c>: the line runs at the presence's host, with the operator's rights.</summary>
-    private static JsonElement Act(GameNetworkService game, GameNetworkService.Session session, HostCommand command, JsonElement arguments, long now)
+    private static JsonElement Act(CommandContext context)
     {
+        var (game, session, command, arguments, now) = context;
         if (Controlled(game, session, command, now, out var refusal) is not { } presence)
             return JsonSerializer.SerializeToElement(new { status = refusal, count = 0, fuel = 0, rows = "", error = refusal!.Replace('_', ' ') });
         var scope = new ShellHost.Scope(presence.Owner, presence.Instance, presence.Node, null, ActionKey(presence),
@@ -674,12 +689,12 @@ public static partial class NetworkSpace
     private static string ActionKey(Presence presence) =>
         $"pr.{_presenceStream:N}.{presence.Id.ToString(CultureInfo.InvariantCulture)}.{(++_actSerial).ToString(CultureInfo.InvariantCulture)}";
 
-    private static JsonElement AlarmCommand(GameNetworkService game, GameNetworkService.Session session, HostCommand command, JsonElement arguments, long now)
+    private static JsonElement AlarmCommand(CommandContext context, bool read)
     {
+        var (game, session, command, arguments, now) = context;
         if (Controlled(game, session, command, now, out var refusal) is not { } presence)
             return JsonSerializer.SerializeToElement(new { status = refusal, count = 0, fuel = 0, rows = "" });
         var instance = arguments.GetProperty("instance").GetString()!;
-        var read = command.Command == "poll_alarm";
         var verb = read ? "read" : "set_alert";
         var payload = read ? JsonSerializer.SerializeToElement(new { reason = "inspect" }) : JsonSerializer.SerializeToElement(new
         {
@@ -695,30 +710,41 @@ public static partial class NetworkSpace
         return JsonSerializer.SerializeToElement(new { status = "ok", count = 1, fuel = 0, rows });
     }
 
-    internal static JsonElement Answer(GameNetworkService game, GameNetworkService.Session session, HostCommand command, JsonElement arguments)
+    private static void RegisterSpaceCommands(Dictionary<string, SpaceCommand> commands)
     {
-        EnsureLifeSession(session.Packets.ReceiptStreamId);
-        var now = Environment.TickCount64;
-        if (command.Command is "enter" or "detach" or "leave" or "presence" or "abort_move")
-            return PresenceCommand(game, session, command, arguments, now);
-        if (command.Command == "persona")
-            return PersonaCommand(command, arguments);
-        if (command.Command is "hack_start" or "hack_answer" or "hack_keys" or "hack_use" or "mask")
-            return HackCommand(game, session, command, arguments, now);
-        if (command.Command == "act")
-            return Act(game, session, command, arguments, now);
-        if (command.Command is "poll_alarm" or "alarm_action")
-            return AlarmCommand(game, session, command, arguments, now);
-        if (command.Command is "move" or "preview_move")
-            return Move(game, session, command, arguments, now, preview: command.Command == "preview_move");
+        commands.Add("presence", Reply(ReadPresence));
+        commands.Add("enter", Reply(EnterPresence));
+        commands.Add("detach", Reply(DetachPresence));
+        commands.Add("leave", Reply(LeavePresence));
+        commands.Add("abort_move", Reply(AbortMove));
+        commands.Add("move", Reply(static context => Move(context, preview: false)));
+        commands.Add("preview_move", Reply(static context => Move(context, preview: true)));
+        commands.Add("act", Reply(Act));
+        commands.Add("scan", Reply(ScanKnowledge));
+        commands.Add("knowledge", Reply(ReadKnowledge));
+        commands.Add("poll_alarm", Reply(static context => AlarmCommand(context, read: true)));
+        commands.Add("alarm_action", Reply(static context => AlarmCommand(context, read: false)));
+        commands.Add("chat_read", ReadChat);
+        commands.Add("chat_send", SendChat);
+    }
+
+    private static JsonElement ScanKnowledge(CommandContext context)
+    {
+        var (game, session, command, arguments, now) = context;
         var knowledge = KnowledgeOf(command.InitiatorKey, session.Packets.ReceiptStreamId, now);
-        if (command.Command == "life")
-            return LifeCommand(command, arguments, knowledge, now);
-        return command.Command == "scan"
-            ? Scan(game, session, command, knowledge, arguments.TryGetProperty("radius", out var radius)
-                ? Math.Clamp(radius.GetInt32(), 1, MaxRadius) : DefaultRadius, now)
-            : Read(game, session, knowledge, arguments.TryGetProperty("since", out var since) ? Math.Max(0, since.GetInt64()) : 0,
-                arguments.TryGetProperty("limit", out var limit) ? Math.Clamp(limit.GetInt32(), 1, MaxPageItems) : MaxPageItems, now);
+        var radius = arguments.TryGetProperty("radius", out var requestedRadius)
+            ? Math.Clamp(requestedRadius.GetInt32(), 1, MaxRadius) : DefaultRadius;
+        return Scan(game, session, command, knowledge, radius, now);
+    }
+
+    private static JsonElement ReadKnowledge(CommandContext context)
+    {
+        var (game, session, command, arguments, now) = context;
+        var knowledge = KnowledgeOf(command.InitiatorKey, session.Packets.ReceiptStreamId, now);
+        var after = arguments.TryGetProperty("since", out var since) ? Math.Max(0, since.GetInt64()) : 0;
+        var pageSize = arguments.TryGetProperty("limit", out var limit)
+            ? Math.Clamp(limit.GetInt32(), 1, MaxPageItems) : MaxPageItems;
+        return Read(game, session, knowledge, after, pageSize, now);
     }
 
     private static Knowledge KnowledgeOf(EndpointKey operatorKey, Guid stream, long now)
