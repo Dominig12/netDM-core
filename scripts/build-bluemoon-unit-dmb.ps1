@@ -35,7 +35,7 @@ $files = @('tgstation.dme', 'code/game/world.dm', 'code/game/area/areas.dm', 'co
     'modular_bluemoon/white_steel/inner/discovery_research/discoverable_component.dm',
     'code/__DEFINES/dcs/signals.dm', 'code/game/machinery/_machinery.dm',
     'code/modules/mapping/space_management/space_reservation.dm', 'code/modules/unit_tests/_unit_tests.dm',
-    'code/modules/unit_tests/netdm_observe.dm')
+    'code/modules/unit_tests/netdm_observe.dm', 'code/modules/unit_tests/netrun_client_life.dm', 'code/modules/unit_tests/_unit_tests.dm')
 # `pwsh -File` passes a list as one comma-separated string.
 $Defines = @($Defines | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 foreach ($file in $files) {
