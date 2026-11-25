@@ -357,6 +357,16 @@
 | `door_station` | «The station needs door buttons: 2» — на герметичной карте `Runtime Station` нет кнопок blast-дверей | окружение, не код |
 | `network_life_physical` | «An agent on the APC pings it» — население сети не засеяно в этом профиле (`NETDM_NET_LIFE` выключен) | окружение, не код |
 
+### Первая живая проверка кода NETRUN
+
+`/datum/unit_test/netdm_observe/netrun_adapter` (добавлен в `code/modules/unit_tests/netdm_observe.dm`) — имена хостов по сервисам, классы по типам сервисов, отказ объявлять хост без канала или без инстанса, отсутствие мусора в очереди после отказа:
+
+| Команда | Результат |
+|---|---|
+| `pwsh -File scripts/test-bluemoon-unit.ps1 -BuildDirectory C:\nrun\src -BridgeDll <dll> -TestList <adapter>` | **PASS**, `clean_run.lk: True` |
+
+Это первый случай, когда код NETRUN проверен внутри настоящего DreamDaemon, а не только компиляцией.
+
 ## 18. Что не сделано и почему
 
 | Пункт | Состояние | Условие |

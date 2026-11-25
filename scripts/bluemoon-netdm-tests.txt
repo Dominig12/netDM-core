@@ -1,3 +1,4 @@
+/datum/unit_test/netdm_observe/netrun_adapter
 /datum/unit_test/netdm_observe
 /datum/unit_test/netdm_observe/area_map
 /datum/unit_test/netdm_observe/area_map/node_attachment
