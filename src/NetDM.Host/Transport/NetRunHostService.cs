@@ -172,6 +172,55 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
         }
     }
 
+    /// <summary>
+    /// Imports program text and starts it as the named principal. The text carries no identity, no rights and
+    /// no host from another round: the owner and the execution host come from here, and the pipeline checks
+    /// every invoked action again (SCRIPT-003, AT-27).
+    /// </summary>
+    public (ProgramStatus Status, string? Reason, ProcessId Process, string? Name) StartProgram(
+        string principalName, string text, HostId executionHost, string programName)
+    {
+        lock (_gate)
+        {
+            var principal = PrincipalLocked(principalName);
+            if (principal.IsNone)
+                return (ProgramStatus.InvalidDefinition, "principal", ProcessId.None, null);
+            var host = _runtime.Hosts.Get(executionHost);
+            if (host is not { Available: true })
+                return (ProgramStatus.InvalidDefinition, "execution_host", ProcessId.None, null);
+            // Starting a program spends the host's capacity, so it is a use of that host in its own right;
+            // every action the program then invokes is authorized again at commit (SEC-001).
+            var profile = host.Security?.Profile ?? SecurityProfile.Standard;
+            if (!_runtime.Authority.Authorize(principal, executionHost, CapabilityCategory.Execution, null, profile).Allowed)
+                return (ProgramStatus.Forbidden, "execution_host_right", ProcessId.None, null);
+            var parsed = ProgramSource.TryParse(text, out var source, out var parseError);
+            if (parsed != ProgramStatus.Ok || source is null)
+                return (parsed == ProgramStatus.Ok ? ProgramStatus.InvalidDefinition : parsed,
+                    parseError ?? "source", ProcessId.None, null);
+            var name = string.IsNullOrEmpty(programName) ? source.Name : programName;
+            if (string.IsNullOrEmpty(name) || name.Length > 64)
+                return (ProgramStatus.InvalidDefinition, "name", ProcessId.None, null);
+            var definition = new ProgramDefinition(name, executionHost, source.Steps, source.InstructionBudget);
+            var started = _runtime.Programs.Start(principal, definition);
+            return (started.Status, started.Reason, started.Process, started.Status == ProgramStatus.Ok ? name : null);
+        }
+    }
+
+    /// <summary>Stops a program the caller owns. A program of somebody else is not even visible here.</summary>
+    public ProgramStatus StopProgram(string principalName, ProcessId process)
+    {
+        lock (_gate)
+        {
+            var snapshot = _runtime.Programs.Peek(process);
+            if (snapshot is null)
+                return ProgramStatus.UnknownProgram;
+            var principal = PrincipalLocked(principalName);
+            if (snapshot.Owner != principal)
+                return ProgramStatus.NotRunning;
+            return _runtime.Programs.Cancel(process).Status;
+        }
+    }
+
     /// <summary>Finalizes an accepted remote operation with what the world reported.</summary>
     public ActionOutcome Complete(OperationId operation, ActionStatus status, string? reason, string? result)
     {

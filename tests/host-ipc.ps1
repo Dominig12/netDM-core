@@ -2091,6 +2091,30 @@ try {
     $ownPanel = Invoke-Next @{ op = 'netrun_panel'; payload = @{ principal = 'ckey-operator'; hosts = 8 } }
     Assert-True ($ownPanel.ok -and ($ownPanel.result.hosts | Where-Object { $_.host -eq $adapterId -and $_.name -ceq 'svc.door.adapter' }) -ne $null) 'the device appears in its operator view by name'
 
+    # A program travels as text and runs as its owner. Import carries no rights: the operator still needs the
+    # capability for every action the program invokes.
+    $programText = @"
+program "Imported"
+invoke net.inspect self
+wait 5000
+emit program.imported.done
+stop
+"@
+    $imported = Invoke-Next @{ op = 'netrun_program'; payload = @{ principal = 'ckey-operator'; source = $programText
+        execution = $adapterId; name = 'Imported' } }
+    Assert-True ($imported.ok -and $imported.result.status -ceq 'ok' -and $imported.result.process -gt 0) "program text is imported and starts: $($imported | ConvertTo-Json -Compress -Depth 3)"
+    Start-Sleep -Milliseconds 400
+    $withProgram = Invoke-Next @{ op = 'netrun_panel'; payload = @{ principal = 'ckey-operator'; hosts = 8 } }
+    Assert-True (($withProgram.result.programs | Where-Object { $_.process -eq $imported.result.process }) -ne $null) 'the started program appears in the operator panel'
+    Assert-True ((Invoke-Next @{ op = 'netrun_program'; payload = @{ principal = 'ckey-operator'
+        source = "program `"Broken`"`nfly 5" ; execution = $adapterId } }).result.status -ceq 'invalid_definition') 'malformed text is refused'
+    Assert-True ((Invoke-Next @{ op = 'netrun_program'; payload = @{ principal = 'op-other'
+        source = $programText; execution = $adapterId } }).result.status -ceq 'forbidden') 'a program cannot start on a host the caller may not use'
+    Assert-True ((Invoke-Next @{ op = 'netrun_program_stop'; payload = @{ principal = 'ckey-operator'
+        process = $imported.result.process } }).ok) 'the owner stops its program'
+    Assert-True ((Invoke-Next @{ op = 'netrun_program_stop'; payload = @{ principal = 'ckey-operator'
+        process = $imported.result.process } }).result.status -ceq 'unknown_program') 'a stopped program is gone'
+
     $state = Invoke-Next @{ op = 'netrun_state'; payload = @{ limit = 16 } }
     $deckState = $state.result.hosts | Where-Object { $_.host -eq $deckHost } | Select-Object -First 1
     Assert-True ($state.ok -and $null -ne $deckState -and $deckState.bufferCu -lt 40) "the buffer reflects spent compute: $($deckState | ConvertTo-Json -Compress)"

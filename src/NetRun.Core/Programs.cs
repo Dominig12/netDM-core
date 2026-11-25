@@ -65,7 +65,7 @@ public enum ProgramState : byte { Running, Waiting, WaitingForOperation, Complet
 public enum ProgramStatus : byte
 {
     Ok, Duplicate, InvalidDefinition, LimitExceeded, UnknownProgram, InstructionBudget, DepthBudget,
-    StepBudget, NotRunning
+    StepBudget, NotRunning, Forbidden
 }
 
 /// <summary>A validated program: the steps were checked for depth, size and bounds before it was accepted.</summary>

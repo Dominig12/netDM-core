@@ -14,7 +14,8 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
     [
         "netrun_principal", "netrun_host", "netrun_destroy", "netrun_lifecycle",
         "netrun_grant", "netrun_revoke", "netrun_actions", "netrun_execute", "netrun_complete",
-        "netrun_knowledge", "netrun_view", "netrun_panel", "netrun_state"
+        "netrun_knowledge", "netrun_view", "netrun_panel", "netrun_program", "netrun_program_stop",
+        "netrun_state"
     ];
 
     // NETRUN administration has to work while the map snapshot is still being synchronized: the domain
@@ -35,6 +36,8 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         "netrun_knowledge" => KnowledgeProjection(payload),
         "netrun_view" => ObservationProjection(payload),
         "netrun_panel" => PanelProjection(payload),
+        "netrun_program" => ProgramImport(payload),
+        "netrun_program_stop" => ProgramStop(payload),
         "netrun_state" => State(payload),
         _ => new HostIpcResult(false, "unknown_operation", null)
     };
@@ -312,6 +315,39 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         var actions = Clamp(Integer(body, "actions"), 1, 256, 64);
         var operations = Clamp(Integer(body, "operations"), 0, 64, 12);
         return new HostIpcResult(true, null, netrun.Panel(name, hosts, actions, operations));
+    }
+
+    /// <summary>Imports program text and starts it as the caller's principal on its own host.</summary>
+    private HostIpcResult ProgramImport(JsonElement? payload)
+    {
+        if (payload is not { ValueKind: JsonValueKind.Object } body)
+            return new HostIpcResult(false, "invalid_request", null);
+        if (Text(body, "principal") is not { Length: > 0 } name ||
+            Text(body, "source") is not { Length: > 0 } source ||
+            Integer(body, "execution") is not { } execution || execution <= 0)
+            return new HostIpcResult(false, "invalid_request", null);
+        var started = netrun.StartProgram(name, source, new HostId((ulong)execution), Text(body, "name") ?? "");
+        return new HostIpcResult(started.Status == ProgramStatus.Ok,
+            started.Status == ProgramStatus.Ok ? null : StatusCode(started.Status),
+            new
+            {
+                status = StatusCode(started.Status),
+                process = started.Process.Value,
+                name = started.Name,
+                reason = started.Reason
+            });
+    }
+
+    /// <summary>Stops one program of the caller.</summary>
+    private HostIpcResult ProgramStop(JsonElement? payload)
+    {
+        if (payload is not { ValueKind: JsonValueKind.Object } body ||
+            Text(body, "principal") is not { Length: > 0 } name ||
+            Integer(body, "process") is not { } process || process <= 0)
+            return new HostIpcResult(false, "invalid_request", null);
+        var status = netrun.StopProgram(name, new ProcessId((ulong)process));
+        return new HostIpcResult(status == ProgramStatus.Ok, StatusCode(status),
+            new { status = StatusCode(status) });
     }
 
     private HostIpcResult State(JsonElement? payload)
