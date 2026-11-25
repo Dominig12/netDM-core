@@ -3,7 +3,7 @@ param(
     # world: hermetic BlueMoon DMB and the netDM DreamDaemon tests with a live Host (about 15 minutes).
     # tgui: ESLint, TypeScript, Jest and the TGUI bundle of the game.
     # load: a short P10 load run (about two minutes).
-    # bridge: the BYOND bridge smoke world (BYOND and the built bridge DLL).
+    # bridge: builds the Win32 BYOND bridge with the portable MinGW-w64 toolchain and runs the smoke world.
     # Several groups: -Only tgui,world (pwsh -File passes the list as one string; it is split below).
     [string[]] $Only = @('host'),
     [string] $GameRepository = '..\MOLOT-BlueMoon-Station',
@@ -99,6 +99,9 @@ if ($groups -contains 'load') {
         { param($out) $out -match 'NETDM_P10_LOAD_DONE' }
 }
 if ($groups -contains 'bridge') {
+    # Portable MinGW-w64 toolchain: the first run downloads it into native/byond/toolchain.
+    Invoke-Check 'BYOND bridge build' { pwsh -NoProfile -File native/byond/build.ps1 -Destination (Split-Path $BridgeDll) } `
+        { param($out) $LASTEXITCODE -eq 0 -and ($out -match 'NETDM_BRIDGE_READY') }
     Invoke-Check 'BYOND bridge world' { pwsh -NoProfile -File scripts/test-byond-world.ps1 -BridgeDll $BridgeDll }
 }
 
