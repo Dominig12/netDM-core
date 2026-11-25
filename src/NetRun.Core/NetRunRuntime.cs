@@ -7,7 +7,8 @@ public sealed record NetRunRuntimeOptions(
     int MaxEffects = 16_384,
     int MaxOperations = 16_384,
     int MaxPrincipals = 65_536,
-    bool RegisterMvpEffects = true);
+    bool RegisterMvpEffects = true,
+    bool RegisterBuiltinActions = true);
 
 /// <summary>What one tick of the simulation changed, for diagnostics and tests.</summary>
 public sealed record NetRunTickResult(
@@ -51,6 +52,8 @@ public sealed class NetRunRuntime
             foreach (var definition in EffectRegistry.MvpDefaults())
                 Effects.Register(definition);
         }
+        if (_options.RegisterBuiltinActions)
+            BuiltinActions.Register(Actions);
     }
 
     public HostRegistry Hosts { get; }

@@ -107,14 +107,14 @@ public sealed record ActionValidation(ActionStatus Status, string? Reason = null
     public bool Succeeded => Status == ActionStatus.Ok;
 }
 
-public sealed record ActionExecution(ActionStatus Status, string? Reason = null)
+public sealed record ActionExecution(ActionStatus Status, string? Reason = null, string? Result = null)
 {
     public static ActionExecution Ok { get; } = new(ActionStatus.Ok);
 
     public bool Succeeded => Status == ActionStatus.Ok;
 }
 
-/// <summary>Read side of the world that an action may inspect during validation.</summary>
+/// <summary>Read side of the world that an action may inspect during validation and commit.</summary>
 public interface INetRunWorldReader
 {
     long NowMilliseconds { get; }
@@ -124,6 +124,12 @@ public interface INetRunWorldReader
     ResourceSnapshot? Resources(HostId host);
 
     EffectInstance[] Effects(HostId target, int limit);
+
+    /// <summary>
+    /// Hosts this principal may discover, bounded. A host it may not discover never appears, so a
+    /// selector can never reveal a hidden object through a count or an error (PRIM-002, AT-12).
+    /// </summary>
+    HostSnapshot[] VisibleHosts(PrincipalId principal, int limit);
 }
 
 /// <summary>Write side offered to an action at commit time. Everything goes through the registered domains.</summary>
@@ -134,6 +140,9 @@ public interface INetRunMutationScope
     PrincipalId Principal { get; }
 
     long NowMilliseconds { get; }
+
+    /// <summary>The read model of the committing host, so a result can be built from authoritative state.</summary>
+    INetRunWorldReader World { get; }
 
     /// <summary>Applies a registered effect within its server-side definition bounds.</summary>
     EffectResult ApplyEffect(EffectKind kind, HostId target, int magnitude, int durationMilliseconds, string origin);
@@ -176,7 +185,8 @@ public sealed record ActionOutcome(
     ActionKind Kind,
     ActionCategory Category,
     long CooldownRemainingMilliseconds = 0,
-    string? Reason = null);
+    string? Reason = null,
+    string? Result = null);
 
 /// <summary>An event produced by a committed action, waiting for the owner to publish it.</summary>
 public sealed record ActionEvent(string Topic, string Payload, OperationId Operation, long AtMilliseconds);
@@ -220,6 +230,7 @@ public sealed class ActionPipeline(
         public readonly long CreatedAt = createdAt;
         public OperationState State;
         public string? Reason;
+        public string? Result;
         public long CompletedAt;
     }
 
@@ -274,6 +285,10 @@ public sealed class ActionPipeline(
 
     public ActionDescriptor? Describe(string actionId) =>
         _actions.TryGetValue(actionId, out var action) ? action.Descriptor : null;
+
+    /// <summary>The registered instance of an action, or null. Callers execute this exact instance.</summary>
+    public IGameAction? GetAction(string actionId) =>
+        _actions.TryGetValue(actionId, out var action) ? action : null;
 
     /// <summary>Bounded catalogue for the UI and the API reference, in registration order.</summary>
     public ActionDescriptor[] Catalogue(int limit)
@@ -424,12 +439,14 @@ public sealed class ActionPipeline(
 
         ConsumeReserves(prepared);
         record.State = OperationState.Committed;
+        record.Result = executed.Result;
         record.CompletedAt = _clock.NowMilliseconds;
         _prepared.Remove((prepared.PrepareExpiresAtMilliseconds, operationId.Value));
         if (descriptor.CooldownMilliseconds > 0)
             _cooldowns[CooldownKey(prepared.Context.Principal, descriptor)] =
                 _clock.NowMilliseconds + descriptor.CooldownMilliseconds;
-        return new ActionOutcome(ActionStatus.Committed, operationId, descriptor.Kind, descriptor.Category);
+        return new ActionOutcome(ActionStatus.Committed, operationId, descriptor.Kind, descriptor.Category,
+            Result: executed.Result);
     }
 
     /// <summary>Cancels a prepared operation before commit. Its reserves return and its cooldown never starts.</summary>
@@ -511,7 +528,7 @@ public sealed class ActionPipeline(
         if (!_operations.TryGetValue(id.Value, out var record))
             return null;
         return new ActionOutcome(MapState(record.State), record.Id, record.Descriptor.Kind,
-            record.Descriptor.Category, Reason: record.Reason);
+            record.Descriptor.Category, Reason: record.Reason, Result: record.Result);
     }
 
     /// <summary>Bounded history, newest first, for the events tab.</summary>
@@ -525,7 +542,7 @@ public sealed class ActionPipeline(
             if (index >= count)
                 break;
             result[index++] = new ActionOutcome(MapState(record.State), record.Id, record.Descriptor.Kind,
-                record.Descriptor.Category, Reason: record.Reason);
+                record.Descriptor.Category, Reason: record.Reason, Result: record.Result);
         }
         return result;
     }
@@ -651,6 +668,25 @@ public sealed class ActionPipeline(
         public ResourceSnapshot? Resources(HostId host) => pipeline._resources.Snapshot(host);
 
         public EffectInstance[] Effects(HostId target, int limit) => pipeline.EffectsReader(target, limit);
+
+        public HostSnapshot[] VisibleHosts(PrincipalId principal, int limit)
+        {
+            if (principal.IsNone || limit <= 0)
+                return [];
+            // The registry is asked for a bounded page; each candidate is then checked against the same
+            // authority that guards a direct call, so a filtered list and a refused call always agree.
+            var candidates = pipeline._hosts.All(Math.Min(limit * 4, 1_024));
+            var visible = new List<HostSnapshot>(Math.Min(limit, candidates.Length));
+            foreach (var host in candidates)
+            {
+                if (visible.Count >= limit)
+                    break;
+                var profile = host.Security?.Profile ?? SecurityProfile.Standard;
+                if (pipeline._authority.Authorize(principal, host.Id, CapabilityCategory.Discovery, null, profile).Allowed)
+                    visible.Add(host);
+            }
+            return visible.ToArray();
+        }
     }
 
     private sealed class MutationScope(ActionPipeline pipeline, ActionContext context) : INetRunMutationScope
@@ -660,6 +696,8 @@ public sealed class ActionPipeline(
         public PrincipalId Principal => context.Principal;
 
         public long NowMilliseconds => pipeline._clock.NowMilliseconds;
+
+        public INetRunWorldReader World => new WorldReader(pipeline, pipeline._clock.NowMilliseconds);
 
         public EffectResult ApplyEffect(EffectKind kind, HostId target, int magnitude, int durationMilliseconds,
             string origin) =>

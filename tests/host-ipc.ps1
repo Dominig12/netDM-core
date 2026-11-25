@@ -1974,6 +1974,74 @@ try {
     Assert-True ($reopened.Body.storage -ceq 'ready' -and $null -eq $reopened.Body.damage) 'a restored journal opens again'
     Assert-True ((Send-Catalog).ok) 'the restored round binds its catalog again'
     Assert-True ((Invoke-Next $damageRegister.Clone()).ok) 'research accepts writes after the restore'
+
+    # NETRUN: the digital layer lives in the same Host. A host is declared with its components, a
+    # principal receives capabilities, actions run through one pipeline, and a revoke stops the next
+    # action. None of this is a bypass: it is the authoritative digital state of the round.
+    $nr1 = Invoke-Next @{ op = 'netrun_principal'; payload = @{ name = 'op-netrun' } }
+    $nr2 = Invoke-Next @{ op = 'netrun_principal'; payload = @{ name = 'op-netrun' } }
+    $nr3 = Invoke-Next @{ op = 'netrun_principal'; payload = @{ name = 'op-other' } }
+    Assert-True ($nr1.ok -and $nr1.result.principal -gt 0) 'NETRUN allocates a principal'
+    Assert-True ($nr1.result.principal -eq $nr2.result.principal) 'a principal name maps to one identity'
+    Assert-True ($nr1.result.principal -ne $nr3.result.principal) 'different names are different principals'
+
+    $deckDecl = @{ op = 'netrun_host'; payload = @{ name = 'netrun.deck'; class = 'Cyberdeck'; capacityCu = 8
+        rateCu = 2; memorySlots = 4; storageBytes = 65536 } }
+    $deck = Invoke-Next $deckDecl.Clone()
+    Assert-True ($deck.ok -and $deck.result.status -ceq 'ok' -and $deck.result.generation -eq 1) "a host is declared: $($deck | ConvertTo-Json -Compress -Depth 4)"
+    $deckHost = $deck.result.host
+    $deckAgain = Invoke-Next $deckDecl.Clone()
+    Assert-True ($deckAgain.result.status -ceq 'duplicate' -and $deckAgain.result.host -eq $deckHost) 'the same declaration is idempotent'
+    $deckConflict = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.deck'; class = 'Cyberdeck'; capacityCu = 99 } }
+    Assert-True ($deckConflict.result.status -ceq 'conflict' -and $deckConflict.result.host -eq $deckHost) 'a conflicting declaration changes nothing'
+
+    $catalogue = Invoke-Next @{ op = 'netrun_actions'; payload = @{ limit = 32 } }
+    $actionIds = @($catalogue.result.actions | ForEach-Object { $_.id })
+    Assert-True ($catalogue.ok -and $catalogue.result.count -ge 2 -and $actionIds -contains 'net.inspect' -and
+        $actionIds -contains 'net.scan') "the action catalogue comes from one registry: $($actionIds -join ',')"
+
+    $denied = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'net.inspect'
+        execution = $deckHost; target = $deckHost; key = 'nr-deny' } }
+    Assert-True ($denied.result.status -ceq 'forbidden') 'an action without a capability is refused'
+
+    $grantExecution = Invoke-Next @{ op = 'netrun_grant'; payload = @{ subject = 'op-netrun'; host = $deckHost
+        category = 'Execution'; lifetimeMs = 60000 } }
+    $grantRead = Invoke-Next @{ op = 'netrun_grant'; payload = @{ subject = 'op-netrun'; host = $deckHost
+        category = 'Read'; lifetimeMs = 60000 } }
+    $grantDiscovery = Invoke-Next @{ op = 'netrun_grant'; payload = @{ subject = 'op-netrun'; host = $deckHost
+        category = 'Discovery'; lifetimeMs = 60000 } }
+    Assert-True ($grantExecution.ok -and $grantRead.ok -and $grantDiscovery.ok) 'capabilities are granted'
+
+    $inspect = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'net.inspect'
+        execution = $deckHost; target = $deckHost; key = 'nr-inspect-1' } }
+    Assert-True ($inspect.result.status -ceq 'committed' -and $inspect.result.result -match 'netrun\.deck') "the action returns the authoritative state: $($inspect | ConvertTo-Json -Compress -Depth 4)"
+    $inspectReplay = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'net.inspect'
+        execution = $deckHost; target = $deckHost; key = 'nr-inspect-1' } }
+    Assert-True ($inspectReplay.result.status -ceq 'duplicate' -and
+        $inspectReplay.result.operation -eq $inspect.result.operation) 'a replay is a duplicate, not a second effect'
+
+    $scan = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'net.scan'
+        execution = $deckHost; target = $deckHost; key = 'nr-scan-1' } }
+    Assert-True ($scan.result.status -ceq 'committed' -and $scan.result.result -match 'netrun\.deck') 'discovery is served from the same pipeline'
+
+    $state = Invoke-Next @{ op = 'netrun_state'; payload = @{ limit = 16 } }
+    $deckState = $state.result.hosts | Where-Object { $_.host -eq $deckHost } | Select-Object -First 1
+    Assert-True ($state.ok -and $null -ne $deckState -and $deckState.bufferCu -lt 8) "the buffer reflects spent compute: $($deckState | ConvertTo-Json -Compress)"
+
+    $revoked = Invoke-Next @{ op = 'netrun_revoke'; payload = @{ grant = $grantRead.result.grant } }
+    Assert-True ($revoked.ok) 'a capability is revoked'
+    $afterRevoke = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'net.inspect'
+        execution = $deckHost; target = $deckHost; key = 'nr-inspect-2' } }
+    Assert-True ($afterRevoke.result.status -ceq 'forbidden') 'a revoked capability stops the next action'
+
+    $stale = Invoke-Next @{ op = 'netrun_destroy'; payload = @{ host = $deckHost; generation = 7 } }
+    Assert-True ($stale.result.status -ceq 'stale_generation') 'a stale generation cannot destroy its successor'
+    $destroyed = Invoke-Next @{ op = 'netrun_destroy'; payload = @{ host = $deckHost; generation = 1 } }
+    Assert-True ($destroyed.result.status -ceq 'ok') 'the host is destroyed'
+    $gone = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'net.inspect'
+        execution = $deckHost; target = $deckHost; key = 'nr-inspect-3' } }
+    Assert-True ($gone.result.status -ceq 'target_destroyed') 'a destroyed host is not a valid target'
+
     Write-Host 'NETDM_IPC_PASS'
 }
 finally {

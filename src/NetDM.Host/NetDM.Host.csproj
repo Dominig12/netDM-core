@@ -5,5 +5,6 @@
   <ItemGroup>
     <ProjectReference Include="../NetDM.Core/NetDM.Core.csproj" />
     <ProjectReference Include="../NetDM.Services/NetDM.Services.csproj" />
+    <ProjectReference Include="../NetRun.Core/NetRun.Core.csproj" />
   </ItemGroup>
 </Project>
