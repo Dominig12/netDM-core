@@ -343,19 +343,24 @@
 |---|---|---|
 | Сборка моста | `pwsh -File native/byond/build.ps1 -Offline` | `netdm_byond.dll` 747 890 байт, PE machine `0x014C` (i386). Сборка тестового exe падает на гонке `objects.a` в MinGW — на DLL не влияет |
 | Мир-дым | `pwsh -File scripts/test-byond-world.ps1 -BridgeDll native\byond\build\netdm_byond.dll` | **`NETDM_WORLD_PASS`**, включая восстановление research-журнала, переполнение mailbox (1063 команды), APC-топологию и привязку устройств |
-| DM-набор BlueMoon | `pwsh -File scripts/test-bluemoon-unit.ps1 -BuildDirectory C:\nrun\src -BridgeDll <dll> -TestList scripts/bluemoon-netdm-tests.txt` | **19 PASS, 3 FAIL** в герметичном мире `Runtime Station` с живым Host |
+| DM-набор BlueMoon | `pwsh -File scripts/test-bluemoon-unit.ps1 -BuildDirectory C:\nrun\src -BridgeDll <dll> -TestList scripts/bluemoon-netdm-tests.txt` | **21 PASS, 2 FAIL** из 23 в герметичном мире `Runtime Station` с живым Host; `network_life_physical` проходит при `NETDM_NET_LIFE=1` |
 
 Список тестов исправлен (D-08): четыре устаревших пути (`messenger_shadow`, `radio_shadow`, `door_shadow`, `research_shadow`) заменены на реальные (`messenger_authoritative`, `radio_uplink`, `radio_station`, `door_station`), добавлен `network_airlock_panel`.
 
 Прошли в живом мире: `netdm_observe`, `area_map`, `node_attachment`, `topology_view`, `power_state`, `network_diagnostics`, `network_terminal`, `network_cameras`, `network_air_alarm`, `network_airlock_panel`, `network_immersion`, `atmos_telemetry`, `messenger_authoritative`, `radio_uplink`, `radio_station`, `research_authoritative`, `research_p6`, `research_authoritative/outbox`, `verb_proc_ids`.
 
-Три падения и их причина:
+### Исправлен существовавший дефект: восстановление личности
 
-| Тест | Причина | Статус |
+`network_immersion_dive` падал и до этой работы (проверено экспериментом с выключенным хостом NETRUN). Причина найдена и устранена: `restore_persona` отправлял `null` в полях `statusLine`/`role`, которых не было в нейролинке. Схема принимает **отсутствующее** поле, но не `null`, поэтому команда отвергалась как `invalid_payload`, ответ не приходил, и присутствие оставалось без личности — молчаливый отказ без сообщения игроку. Теперь отсутствующие поля уходят пустым текстом.
+
+Результат: `network_immersion_dive` — **PASS** (3.6 с), `clean_run.lk: True`.
+
+### Оставшиеся два падения — окружение, не код
+
+| Тест | Причина | Как проверить |
 |---|---|---|
-| `network_immersion_dive` | персона не восстанавливается после переустановки нейролинка (таймаут 20 с, `netdm_observe.dm:2715`). **Проверено экспериментом: падает и при выключенном хуке NETRUN**, то есть дефект существовал до этой работы | известный дефект, зафиксирован |
-| `door_station` | «The station needs door buttons: 2» — на герметичной карте `Runtime Station` нет кнопок blast-дверей | окружение, не код |
-| `network_life_physical` | «An agent on the APC pings it» — население сети не засеяно в этом профиле (`NETDM_NET_LIFE` выключен) | окружение, не код |
+| `network_life_physical` | население сети не засеяно: `NETDM_NET_LIFE` выключен в профиле | с `NETDM_NET_LIFE=1` — **PASS** (11.5 с), `clean_run.lk: True` |
+| `door_station` | «The station needs door buttons: 2» — на герметичной карте `Runtime Station` нет кнопок blast-дверей | нужна станционная карта (full-map профиль), в этот прогон не входила |
 
 ### Первая живая проверка кода NETRUN
 
