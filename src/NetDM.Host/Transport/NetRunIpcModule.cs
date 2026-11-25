@@ -14,7 +14,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
     [
         "netrun_principal", "netrun_host", "netrun_destroy", "netrun_lifecycle",
         "netrun_grant", "netrun_revoke", "netrun_actions", "netrun_execute", "netrun_complete",
-        "netrun_knowledge", "netrun_view", "netrun_state"
+        "netrun_knowledge", "netrun_view", "netrun_panel", "netrun_state"
     ];
 
     // NETRUN administration has to work while the map snapshot is still being synchronized: the domain
@@ -34,6 +34,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         "netrun_complete" => CompleteAction(payload),
         "netrun_knowledge" => KnowledgeProjection(payload),
         "netrun_view" => ObservationProjection(payload),
+        "netrun_panel" => PanelProjection(payload),
         "netrun_state" => State(payload),
         _ => new HostIpcResult(false, "unknown_operation", null)
     };
@@ -300,6 +301,17 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         var limit = Clamp(Integer(body, "limit"), 1, 256, 64);
         var views = netrun.View(name, limit);
         return new HostIpcResult(true, null, new { count = views.Length, hosts = views });
+    }
+
+    /// <summary>The whole client refresh in one call: bounded, already filtered, safe to hand to a player.</summary>
+    private HostIpcResult PanelProjection(JsonElement? payload)
+    {
+        if (payload is not { ValueKind: JsonValueKind.Object } body || Text(body, "principal") is not { Length: > 0 } name)
+            return new HostIpcResult(false, "invalid_request", null);
+        var hosts = Clamp(Integer(body, "hosts"), 1, 256, 64);
+        var actions = Clamp(Integer(body, "actions"), 1, 256, 64);
+        var operations = Clamp(Integer(body, "operations"), 0, 64, 12);
+        return new HostIpcResult(true, null, netrun.Panel(name, hosts, actions, operations));
     }
 
     private HostIpcResult State(JsonElement? payload)

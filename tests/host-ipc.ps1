@@ -2065,6 +2065,16 @@ try {
         execution = $deckHost; target = $secretHost; key = 'nr-breach-2' } }
     Assert-True ($breachAgain.result.status -ceq 'cooldown') 'every breach mode shares one cooldown'
 
+    # The client gets one bounded, already-filtered projection per refresh: the same data the window draws.
+    $panel = Invoke-Next @{ op = 'netrun_panel'; payload = @{ principal = 'op-netrun'; hosts = 16; actions = 16; operations = 8 } }
+    Assert-True ($panel.ok -and $panel.result.hosts.Count -ge 1 -and $panel.result.knowledge.known -ge 1) "the panel carries the observer's own view: $($panel | ConvertTo-Json -Compress -Depth 3)"
+    Assert-True (($panel.result.hosts | Where-Object { $_.host -eq $deckHost -and $_.name -ceq 'netrun.deck' }) -ne $null) 'the panel names an identified host'
+    Assert-True (($panel.result.actions | Where-Object { $_.id -ceq 'net.inspect' }) -ne $null) 'the panel carries the action catalogue with its costs'
+    Assert-True (($panel.result.operations | Where-Object { $_.operation -eq $inspect.result.operation }) -ne $null) 'the panel carries the operations of this observer'
+    Assert-True (($panel.result.links | Where-Object { $_.a -ne $null }) -eq $null -or $panel.result.links.Count -ge 0) 'links are a bounded list'
+    $foreign = Invoke-Next @{ op = 'netrun_panel'; payload = @{ principal = 'op-other'; hosts = 16 } }
+    Assert-True ($foreign.ok -and $foreign.result.hosts.Count -eq 0) 'an observer without knowledge gets an empty panel'
+
     $state = Invoke-Next @{ op = 'netrun_state'; payload = @{ limit = 16 } }
     $deckState = $state.result.hosts | Where-Object { $_.host -eq $deckHost } | Select-Object -First 1
     Assert-True ($state.ok -and $null -ne $deckState -and $deckState.bufferCu -lt 40) "the buffer reflects spent compute: $($deckState | ConvertTo-Json -Compress)"

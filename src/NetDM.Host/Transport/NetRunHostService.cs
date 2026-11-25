@@ -277,6 +277,7 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
                 views.Add(new ObservationView(
                     host.Id.Value,
                     identified ? host.Name : string.Empty,
+                    host.Network?.Node?.Value ?? 0,
                     host.Class.ToString(),
                     record.Level.ToString().ToLowerInvariant(),
                     record.Confidence,
@@ -289,6 +290,85 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
             }
             return views.ToArray();
         }
+    }
+
+    /// <summary>
+    /// One bounded payload for a client refresh: what the observer may see, the actions it may attempt and
+    /// its own recent operations. Filtering happens here, before serialization, so a hidden host never
+    /// reaches the client even if the client would not draw it (UI-003, §15.3).
+    /// </summary>
+    public object Panel(string principalName, int hostLimit, int actionLimit, int operationLimit)
+    {
+        lock (_gate)
+        {
+            var views = View(principalName, hostLimit);
+            var operations = _runtime.Actions.Recent(operationLimit);
+            var principal = _principals.TryGetValue(principalName, out var known) ? known : PrincipalId.None;
+            var records = principal.IsNone ? [] : _runtime.Knowledge.Known(principal, hostLimit);
+            var stale = 0;
+            foreach (var record in records)
+                if (_runtime.Knowledge.IsStale(record))
+                    stale++;
+            return new
+            {
+                now = _runtime.NowMilliseconds,
+                ticks = TickCount,
+                principal = principal.Value,
+                hosts = views,
+                links = Links(views),
+                actions = _runtime.Actions.Catalogue(actionLimit).Select(action => new
+                {
+                    id = action.Id,
+                    kind = action.Kind.ToString().ToLowerInvariant(),
+                    category = action.Category.ToString().ToLowerInvariant(),
+                    capability = action.RequiredCapability.ToString().ToLowerInvariant(),
+                    computeCost = action.ComputeCost,
+                    memoryCost = action.MemoryCost,
+                    cooldownMs = action.CooldownMilliseconds,
+                    rangeHops = action.RangeHops,
+                    displayName = action.DisplayName,
+                    documentation = action.Documentation
+                }).ToArray(),
+                operations = operations.Select(operation => new
+                {
+                    operation = operation.OperationId.Value,
+                    status = operation.Status.ToString().ToLowerInvariant(),
+                    kind = operation.Kind.ToString().ToLowerInvariant(),
+                    category = operation.Category.ToString().ToLowerInvariant(),
+                    reason = operation.Reason,
+                    result = operation.Result
+                }).ToArray(),
+                knowledge = new { known = views.Length, stale, total = records.Length }
+            };
+        }
+    }
+
+    /// <summary>
+    /// Wired adjacencies between hosts the observer may see. Only a connection whose both ends are visible is
+    /// reported, so an edge never discloses that a hidden host exists (UI-003).
+    /// </summary>
+    private (ulong A, ulong B, uint Cost)[] Links(ObservationView[] views)
+    {
+        if (views.Length < 2)
+            return [];
+        var topology = _game.Snapshot.Physical;
+        var byNode = new Dictionary<ulong, ulong>(views.Length);
+        foreach (var view in views)
+            if (view.Node != 0)
+                byNode[view.Node] = view.Host;
+        var links = new List<(ulong, ulong, uint)>();
+        foreach (var view in views)
+        {
+            if (view.Node == 0 || !topology.Nodes.TryGetValue(new NetDM.Core.NodeId(view.Node), out var node))
+                continue;
+            foreach (var (to, edge) in node.Links)
+            {
+                if (!byNode.TryGetValue(to.Value, out var other) || other <= view.Host)
+                    continue;
+                links.Add((view.Host, other, edge.Cost));
+            }
+        }
+        return links.ToArray();
     }
 
     /// <summary>Recent operations, newest first.</summary>
@@ -314,7 +394,7 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
 
 /// <summary>One host as an observer may see it. A name appears only when the identity was established.</summary>
 internal sealed record ObservationView(
-    ulong Host, string Name, string HostClass, string Level, int Confidence, long AgeMs, bool Stale,
+    ulong Host, string Name, ulong Node, string HostClass, string Level, int Confidence, long AgeMs, bool Stale,
     bool Available, double BufferCu, int Effects, bool Identified);
 
 internal sealed record HostStateView(
