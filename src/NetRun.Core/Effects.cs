@@ -67,7 +67,31 @@ public sealed record EffectInstance(
     long ExpiresAtMilliseconds,
     string Origin);
 
-public sealed record EffectResult(EffectStatus Status, EffectInstance? Effect);
+/// <summary>
+/// What an effect actually changes in the world. The registry owns the rules; the owner of the state applies
+/// them, so a definition never reaches into a pool or a life by itself (ARCH-001).
+/// </summary>
+public interface IEffectTargets
+{
+    /// <summary>Takes compute out of the host. Returns how much was really taken.</summary>
+    long DrainCompute(HostId host, long milliCu);
+
+    /// <summary>Damages the core hosted there, after its resistance. Returns the damage taken.</summary>
+    int DamageLife(HostId host, int amount);
+
+    /// <summary>Repairs the core hosted there. Returns the amount restored.</summary>
+    int RepairLife(HostId host, int amount);
+
+    /// <summary>Damage the target currently resists, from active protective effects.</summary>
+    int Resistance(HostId host);
+}
+
+public sealed record EffectResult(EffectStatus Status, EffectInstance? Effect, int Applied = 0)
+{
+    /// <summary>Whether the effect both matched its definition and changed something.</summary>
+    public bool Changed => Status is EffectStatus.Applied or EffectStatus.Refreshed or EffectStatus.Replaced
+        or EffectStatus.Stacked && Applied > 0;
+}
 
 public sealed record EffectRegistryOptions(int MaxEffects = 16_384, int MaxEffectsPerTarget = 32);
 
@@ -80,6 +104,7 @@ public sealed class EffectRegistry(ISimulationClock clock, EffectRegistryOptions
 {
     private readonly ISimulationClock _clock = clock ?? throw new ArgumentNullException(nameof(clock));
     private readonly EffectRegistryOptions _options = options ?? new EffectRegistryOptions();
+    private IEffectTargets? _targets;
     private readonly Dictionary<EffectKind, EffectDefinition> _definitions = [];
     private readonly Dictionary<ulong, EffectInstance> _instances = [];
     private readonly Dictionary<ulong, List<ulong>> _byTarget = [];
@@ -102,13 +127,51 @@ public sealed class EffectRegistry(ISimulationClock clock, EffectRegistryOptions
             throw new ArgumentException($"Effect {definition.Kind} is already registered.");
     }
 
+    /// <summary>Connects the state an effect changes. Without it effects are recorded but inert.</summary>
+    public void AttachTargets(IEffectTargets targets) => _targets = targets ?? throw new ArgumentNullException(nameof(targets));
+
     public EffectDefinition? Definition(EffectKind kind) => _definitions.GetValueOrDefault(kind);
 
     /// <summary>
     /// Applies an effect within the definition's bounds. Out-of-range magnitude or duration is refused
     /// rather than clamped, so a caller cannot discover the ceiling by probing.
     /// </summary>
+    /// <summary>
+    /// Applies an effect and then lets it change the state it names: a drain takes compute, damage reaches the
+    /// core hosted there, a shield resists the next damage. An effect that matched its definition but changed
+    /// nothing reports so, instead of claiming a result (PRIM-003).
+    /// </summary>
     public EffectResult Apply(EffectKind kind, HostId target, PrincipalId source, int magnitude,
+        int durationMilliseconds, string origin)
+    {
+        var result = ApplyCore(kind, target, source, magnitude, durationMilliseconds, origin);
+        return result.Status is EffectStatus.Applied or EffectStatus.Refreshed or EffectStatus.Replaced
+            or EffectStatus.Stacked
+            ? result with { Applied = Consequence(result.Effect!) }
+            : result;
+    }
+
+    private int Consequence(EffectInstance instance)
+    {
+        if (_targets is null)
+            return 0;
+        switch (instance.Kind)
+        {
+            case EffectKind.Drain:
+                return (int)(_targets.DrainCompute(instance.Target, instance.Magnitude * 1000L) / 1000);
+            case EffectKind.Damage:
+                // Resistance from a live shield reduces the incoming damage, never below one point.
+                return _targets.DamageLife(instance.Target,
+                    Math.Max(1, instance.Magnitude - _targets.Resistance(instance.Target)));
+            case EffectKind.Repair:
+                return _targets.RepairLife(instance.Target, instance.Magnitude);
+            default:
+                // Perception and traffic effects change no pool: they stay live for the readers.
+                return instance.Magnitude;
+        }
+    }
+
+    private EffectResult ApplyCore(EffectKind kind, HostId target, PrincipalId source, int magnitude,
         int durationMilliseconds, string origin)
     {
         if (!_definitions.TryGetValue(kind, out var definition))

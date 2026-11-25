@@ -31,7 +31,7 @@ public sealed record NetRunTickResult(
 /// with its resources, grants, effects and pending operations. Callers read through the domain APIs and
 /// mutate only through methods here or through the domains they own.
 /// </summary>
-public sealed class NetRunRuntime
+public sealed class NetRunRuntime : IEffectTargets
 {
     private readonly ISimulationClock _clock;
     private readonly NetRunRuntimeOptions _options;
@@ -54,6 +54,8 @@ public sealed class NetRunRuntime
         Actions.AttachKnowledge(Knowledge);
         // Programs run through the same pipeline, so they need it to exist first.
         Programs = new ProgramScheduler(clock, Actions, new ProgramOptions(MaxPrograms: _options.MaxPrograms));
+        // Effects change the pools and the lives the runtime owns; without this seam they would only be recorded.
+        Effects.AttachTargets(new EffectTargets(this));
         Lives = new DigitalLifeRegistry(clock, Hosts, Resources);
         if (_options.RegisterMvpEffects)
         {
@@ -193,6 +195,37 @@ public sealed class NetRunRuntime
         return result;
     }
 
+    // ---- IEffectTargets: what an effect changes when it lands -------------------------------------------------
+
+    long IEffectTargets.DrainCompute(HostId host, long milliCu) => Resources.Drain(host, milliCu);
+
+    int IEffectTargets.DamageLife(HostId host, int amount) => Lives.DamageCore(host, amount);
+
+    int IEffectTargets.RepairLife(HostId host, int amount) => Lives.RepairCore(host, amount);
+
+    /// <summary>
+    /// Damage the host currently resists. A live shield is the only source today; the rule lives here so a
+    /// future resistance effect does not need a new call site.
+    /// </summary>
+    int IEffectTargets.Resistance(HostId host)
+    {
+        var best = 0;
+        foreach (var effect in Effects.On(host, 16))
+            if (effect.Kind == EffectKind.Shield && effect.Magnitude > best)
+                best = effect.Magnitude;
+        return best;
+    }
+
+    private sealed class EffectTargets(NetRunRuntime runtime) : IEffectTargets
+    {
+        public long DrainCompute(HostId host, long milliCu) => ((IEffectTargets)runtime).DrainCompute(host, milliCu);
+
+        public int DamageLife(HostId host, int amount) => ((IEffectTargets)runtime).DamageLife(host, amount);
+
+        public int RepairLife(HostId host, int amount) => ((IEffectTargets)runtime).RepairLife(host, amount);
+
+        public int Resistance(HostId host) => ((IEffectTargets)runtime).Resistance(host);
+    }
     private static ulong NextSlot(ref ulong counter, int limit)
     {
         if (counter >= (ulong)limit)

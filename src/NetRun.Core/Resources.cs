@@ -383,6 +383,20 @@ public sealed class ResourceLedger(ISimulationClock clock, ResourceLedgerOptions
     }
 
     /// <summary>
+    /// Takes compute out of a host's buffer on behalf of an effect, such as a drain. The amount is capped by
+    /// what is actually there, so an effect never drives the account negative and the caller learns how much
+    /// it really got.
+    /// </summary>
+    public long Drain(HostId provider, long milliCu)
+    {
+        if (milliCu <= 0 || !_accounts.TryGetValue(provider.Value, out var account))
+            return 0;
+        var taken = Math.Min(milliCu, account.BufferMilliCu);
+        account.BufferMilliCu -= taken;
+        return taken;
+    }
+
+    /// <summary>
     /// Charges a cost directly against the buffer without a reservation. Used by owners whose compute
     /// budget is checked and spent inside one critical section; callers that need a reserve/commit
     /// window use <see cref="ReserveCompute"/> instead.

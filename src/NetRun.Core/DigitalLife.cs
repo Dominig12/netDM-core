@@ -240,6 +240,50 @@ public sealed class DigitalLifeRegistry(
     }
 
     /// <summary>
+    /// Applies damage to whatever core lives on this host. An effect hits a host, not a name: if no life is
+    /// hosted there, nothing is harmed. Returns the damage actually taken.
+    /// </summary>
+    public int DamageCore(HostId host, int amount)
+    {
+        if (amount <= 0)
+            return 0;
+        foreach (var record in _cores.Values)
+        {
+            if (record.Host != host || record.State is LifeState.Terminated)
+                continue;
+            var before = record.Integrity;
+            ApplyIntegrity(record.Identity, -amount);
+            return Math.Max(0, before - _cores[record.Identity.Value].Integrity);
+        }
+        return 0;
+    }
+
+    /// <summary>Repairs whatever core lives on this host, up to its full integrity. Returns the amount restored.</summary>
+    public int RepairCore(HostId host, int amount)
+    {
+        if (amount <= 0)
+            return 0;
+        foreach (var record in _cores.Values)
+        {
+            if (record.Host != host || record.State is LifeState.Terminated)
+                continue;
+            var before = record.Integrity;
+            ApplyIntegrity(record.Identity, amount);
+            return Math.Max(0, _cores[record.Identity.Value].Integrity - before);
+        }
+        return 0;
+    }
+
+    /// <summary>The core hosted on this host, if any. Used by effects and by the projection.</summary>
+    public DigitalCoreSnapshot? CoreOn(HostId host)
+    {
+        foreach (var record in _cores.Values)
+            if (record.Host == host)
+                return record.Snapshot();
+        return null;
+    }
+
+    /// <summary>
     /// The host that held the core is gone (§13.5). A pending migration to a live destination completes,
     /// because the state was already on its way and the source is no longer there to keep it; otherwise the
     /// core is lost but not deleted, so a restore remains possible.

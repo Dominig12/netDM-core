@@ -25,7 +25,10 @@ internal static class Program
         if (Matches("action"))
             ActionTests.Run();
         if (Matches("effects"))
+        {
             EffectTests.Run();
+            EffectConsequencesTests.Run();
+        }
         if (Matches("remote"))
             RemoteActionTests.Run();
         if (Matches("knowledge"))
