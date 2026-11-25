@@ -2130,10 +2130,10 @@ stop
     # LIFE-001 over the live Host: the round allocates the identity, the core moves with a new controlling
     # generation, and an action from the retired generation is refused.
     $lifeDeck = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.lifedeck'; class = 'Cyberdeck'
-        capacityCu = 20; rateCu = 5; memorySlots = 4; node = 1; wired = $true } }
+        capacityCu = 20; rateCu = 5; memorySlots = 4; node = 41; wired = $true } }
     $lifeDeckId = $lifeDeck.result.host
     $lifeServer = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.lifeserver'; class = 'Server'
-        capacityCu = 20; rateCu = 5; memorySlots = 4; storageBytes = 65536; node = 3; wired = $true } }
+        capacityCu = 20; rateCu = 5; memorySlots = 4; storageBytes = 65536; node = 42; wired = $true } }
     $lifeServerId = $lifeServer.result.host
     Assert-True ($lifeDeck.ok -and $lifeServer.ok) "two hosts are declared for a digital life: $($lifeDeck | ConvertTo-Json -Compress -Depth 4) / $($lifeServer | ConvertTo-Json -Compress -Depth 4)"
 
