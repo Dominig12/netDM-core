@@ -35,6 +35,8 @@ internal static class Program
             KnowledgeTests.Run();
         if (Matches("range"))
             RangeTests.Run();
+        if (Matches("invariant"))
+            InvariantTests.Run();
         if (Matches("breach"))
             BreachTests.Run();
         if (Matches("program"))

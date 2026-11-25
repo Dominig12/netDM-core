@@ -451,7 +451,9 @@ public sealed class ActionPipeline(
         var authorization = _authority.Authorize(request.Principal, request.TargetHost,
             descriptor.RequiredCapability, descriptor.ServiceKey, profile);
         if (!authorization.Allowed)
-            return new PrepareOutcome(ActionStatus.Forbidden, OperationId.None, null, Reason: authorization.Status.ToString());
+            // One refusal for every way of not being allowed: the code and the reason must not tell an
+            // observer whether the target exists or which policy refused it (PRIM-002, AT-12).
+            return new PrepareOutcome(ActionStatus.Forbidden, OperationId.None, null, Reason: "denied");
 
         if (_operations.Count >= _options.MaxOperations)
             EvictOldestOperation();
@@ -469,10 +471,10 @@ public sealed class ActionPipeline(
             return new PrepareOutcome(validation.Status, operationId, null, Reason: validation.Reason);
         }
 
-        // An action that passed validation and then finds no host could only be one that does not check its
-        // own target; refuse it instead of spending anything.
+        // A missing target answers exactly like a target the caller may not touch, so probing identifiers
+        // cannot reveal which of them exist (PRIM-002, AT-12).
         if (targetHost is null)
-            return new PrepareOutcome(ActionStatus.TargetDestroyed, OperationId.None, null, Reason: "target");
+            return new PrepareOutcome(ActionStatus.Forbidden, OperationId.None, null, Reason: "denied");
 
         var cooldownKey = CooldownKey(request.Principal, descriptor);
         if (_cooldowns.TryGetValue(cooldownKey, out var readyAt) && readyAt > now)
@@ -524,8 +526,12 @@ public sealed class ActionPipeline(
             return new ActionOutcome(ActionStatus.InvalidState, operationId, descriptor.Kind, descriptor.Category,
                 Reason: "not_prepared");
 
-        var fence = _authority.Recheck(prepared.Token);
-        if (fence != AuthorizationStatus.Ok && !prepared.Token.IsNone)
+        // A grant is rechecked at the commit boundary. An implicit grant has no token to recheck, so the
+        // decision is repeated: revocation and a changed policy must stop the commit either way (SVC-003).
+        var fence = prepared.Token.IsNone
+            ? RecheckImplicit(prepared)
+            : _authority.Recheck(prepared.Token);
+        if (fence != AuthorizationStatus.Ok)
         {
             Cancel(prepared, fence.ToString());
             return new ActionOutcome(ActionStatus.Forbidden, operationId, descriptor.Kind, descriptor.Category,
@@ -827,6 +833,21 @@ public sealed class ActionPipeline(
         if (_retired.Count >= _options.MaxRetiredIdempotencyKeys)
             _retired.Clear();
         _retired.Add((evicted.Principal.Value, evicted.IdempotencyKey));
+    }
+
+    /// <summary>
+    /// The commit-time decision for an operation that was allowed by the host profile rather than by a grant.
+    /// </summary>
+    private AuthorizationStatus RecheckImplicit(PreparedAction prepared)
+    {
+        var descriptor = prepared.Action.Descriptor;
+        var host = _hosts.Get(prepared.Context.TargetHost);
+        if (host is null)
+            return AuthorizationStatus.Denied;
+        var profile = host.Security?.Profile ?? SecurityProfile.Standard;
+        var check = _authority.Authorize(prepared.Context.Principal, prepared.Context.TargetHost,
+            descriptor.RequiredCapability, descriptor.ServiceKey, profile);
+        return check.Allowed ? AuthorizationStatus.Ok : check.Status;
     }
 
     private static string CooldownKey(PrincipalId principal, ActionDescriptor descriptor) =>
