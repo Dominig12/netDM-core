@@ -57,6 +57,7 @@ public sealed class NetRunRuntime : IEffectTargets
         // Effects change the pools and the lives the runtime owns; without this seam they would only be recorded.
         Effects.AttachTargets(new EffectTargets(this));
         Lives = new DigitalLifeRegistry(clock, Hosts, Resources);
+        Presences = new PresenceRegistry(clock, Hosts, Lives);
         if (_options.RegisterMvpEffects)
         {
             foreach (var definition in EffectRegistry.MvpDefaults())
@@ -81,6 +82,12 @@ public sealed class NetRunRuntime : IEffectTargets
 
     /// <summary>Digital lives and their cores (§13.4). One identity has exactly one active controlling core.</summary>
     public DigitalLifeRegistry Lives { get; }
+
+    /// <summary>Where digital presences stand and how they travel (§8.1).</summary>
+    public PresenceRegistry Presences { get; }
+
+    /// <summary>Connects the transport that plans travel routes.</summary>
+    public void AttachRoutePlanner(IRoutePlanner planner) => Presences.AttachPlanner(planner);
 
     public ActionPipeline Actions { get; }
 
@@ -141,6 +148,7 @@ public sealed class NetRunRuntime : IEffectTargets
         Actions.CancelTarget(host.Id, "target_destroyed");
         Programs.CancelHost(host.Id);
         Lives.OnHostDestroyed(host.Id);
+        Presences.OnHostDestroyed(host.Id);
         return result;
     }
 
@@ -163,6 +171,7 @@ public sealed class NetRunRuntime : IEffectTargets
         var operations = Actions.ExpirePrepared(now) + Actions.ExpireRemote(now);
         Programs.Reap();
         Lives.Tick();
+        Presences.Tick();
         var instructions = Programs.Advance(now);
         var published = PublishEvents();
         return new NetRunTickResult(now, expiredReservations, effects, operations, published, instructions);

@@ -42,7 +42,10 @@ internal static class Program
         if (Matches("source"))
             ProgramSourceTests.Run();
         if (Matches("life"))
+        {
             DigitalLifeTests.Run();
+            PresenceTests.Run();
+        }
         if (Matches("external"))
             ExternalWorldTests.Run();
 

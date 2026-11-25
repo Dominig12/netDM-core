@@ -11,7 +11,7 @@ namespace NetDM.Host.Transport;
 /// single logical writer is what keeps its composed invariants true. The gate is never held across an
 /// await or IPC I/O.
 /// </summary>
-internal sealed class NetRunHostService : BackgroundService, INetRunTransport, IHopDistance
+internal sealed class NetRunHostService : BackgroundService, INetRunTransport, IHopDistance, IRoutePlanner
 {
     /// <summary>NETRUN reads the same monotonic quantum clock as the transport, in milliseconds.</summary>
     private sealed class QuantumClock(GameNetworkService game) : ISimulationClock
@@ -37,6 +37,7 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
         _runtime = new NetRunRuntime(_clock);
         _runtime.Actions.AttachTransport(this);
         _runtime.Actions.AttachRange(this);
+        _runtime.AttachRoutePlanner(this);
     }
 
     public long TickCount => Volatile.Read(ref _ticks);
@@ -239,6 +240,25 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
         return route.Found ? route.Path.Count - 1 : -1;
     }
 
+    /// <summary>
+    /// Plans travel between two placed hosts: the route the transport finds, priced at one second per hop. An
+    /// unplaced host or an unreachable pair has no plan, and a presence then cannot move there (§8.1).
+    /// </summary>
+    public RoutePlan? Plan(HostId from, HostId to)
+    {
+        if (from == to)
+            return new RoutePlan(0, 0);
+        var fromNode = _runtime.Hosts.Get(from)?.Network?.Node;
+        var toNode = _runtime.Hosts.Get(to)?.Network?.Node;
+        if (fromNode is null || toNode is null)
+            return null;
+        var route = Router.Find(_game.Snapshot.Physical, fromNode.Value, toNode.Value);
+        if (!route.Found || route.Path.Count < 2)
+            return null;
+        var hops = route.Path.Count - 1;
+        return new RoutePlan(hops, (long)hops * 1_000);
+    }
+
     /// <summary>Finalizes an accepted remote operation with what the world reported.</summary>
     public ActionOutcome Complete(OperationId operation, ActionStatus status, string? reason, string? result)
     {
@@ -422,6 +442,16 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
                     fault = program.Fault,
                     lastAction = program.LastAction,
                     lastOutcome = program.LastOutcome
+                }).ToArray(),
+                presences = _runtime.Presences.ControlledBy(principal, operationLimit).Select(presence => new
+                {
+                    identity = presence.Identity.Value,
+                    host = presence.Host.Value,
+                    state = presence.State.ToString().ToLowerInvariant(),
+                    destination = presence.Destination.Value,
+                    hops = presence.Hops,
+                    arriveAt = presence.ArriveAtMilliseconds,
+                    reason = presence.Reason
                 }).ToArray(),
                 lives = _runtime.Lives.ControlledBy(principal, operationLimit).Select(core => new
                 {
