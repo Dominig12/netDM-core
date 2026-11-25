@@ -19,16 +19,37 @@ public enum StepKind : byte
     Stop
 }
 
+/// <summary>
+/// Where a step points. A preset written in one round must not carry an identifier from that round, so a
+/// step either names a fixed host or means "the host this program runs on" (SCRIPT-003).
+/// </summary>
+public enum TargetKind : byte { Self, Fixed }
+
+public readonly record struct HostTarget(TargetKind Kind, HostId Host)
+{
+    public static HostTarget Self => new(TargetKind.Self, HostId.None);
+
+    public static HostTarget Of(HostId host) => new(TargetKind.Fixed, host);
+
+    /// <summary>The host this step addresses, with Self resolved against the program execution host.</summary>
+    public HostId Resolve(HostId executionHost) => Kind == TargetKind.Self ? executionHost : Host;
+
+    public override string ToString() => Kind == TargetKind.Self ? "self" : Host.ToString();
+}
+
 public sealed record ProgramStep(
     StepKind Kind,
     string ActionId = "",
-    HostId Target = default,
+    HostTarget Target = default,
     long WaitMilliseconds = 0,
     int Count = 1,
     string Topic = "",
     IReadOnlyList<ProgramStep>? Body = null)
 {
-    public static ProgramStep Invoke(string actionId, HostId target) => new(StepKind.Invoke, actionId, target);
+    public static ProgramStep Invoke(string actionId, HostId target) =>
+        new(StepKind.Invoke, actionId, HostTarget.Of(target));
+
+    public static ProgramStep InvokeSelf(string actionId) => new(StepKind.Invoke, actionId, HostTarget.Self);
 
     public static ProgramStep Wait(long milliseconds) => new(StepKind.Wait, WaitMilliseconds: milliseconds);
 
@@ -286,7 +307,8 @@ public sealed class ProgramScheduler(ISimulationClock clock, ActionPipeline acti
         }
         instance.LastAction = step.ActionId;
         var key = $"prog-{instance.Id.Value}-{++instance.StepCounter}";
-        var request = new ActionRequest(instance.Owner, instance.Definition.ExecutionHost, step.Target,
+        var target = step.Target.Resolve(instance.Definition.ExecutionHost);
+        var request = new ActionRequest(instance.Owner, instance.Definition.ExecutionHost, target,
             EntityId.None, instance.Id, CorrelationId.None, key);
         var outcome = _actions.Execute(request, action);
         instance.LastOutcome = outcome.Status.ToString().ToLowerInvariant();

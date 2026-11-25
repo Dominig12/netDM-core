@@ -349,6 +349,11 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
                     lastAction = program.LastAction,
                     lastOutcome = program.LastOutcome
                 }).ToArray(),
+                presets = ProgramPresets.All.Select(preset => new
+                {
+                    name = preset.Name,
+                    text = preset.ToText()
+                }).ToArray(),
                 knowledge = new { known = views.Length, stale, total = records.Length }
             };
         }
