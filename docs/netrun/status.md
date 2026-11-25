@@ -588,3 +588,43 @@
 | D-08 | Устаревший список `scripts/bluemoon-netdm-tests.txt` (5 из 23 путей не существуют) | §21.1 | N2 |
 | D-09 | Смешанная таксономия ошибок IPC (`ex.Message` рядом с `snake_case`) | §6.4 | N2 |
 | D-10 | Бенчмарки в production-бинаре и на HTTP-поверхности | §18.3 | N2 |
+## 23. Передача состояния: с чего начинать следующему
+
+### Где что лежит
+
+| Что | Путь |
+|---|---|
+| Домен NETRUN (17 файлов) | `netDM-core/src/NetRun.Core` |
+| Хост и IPC (17 операций) | `netDM-core/src/NetDM.Host/Transport/NetRunHostService.cs`, `NetRunIpcModule.cs` |
+| Тесты домена | `netDM-core/tests/NetRun.Tests` (451 утверждение) |
+| Живой Host-тест | `netDM-core/tests/host-ipc.ps1` |
+| DM: адаптер, клиент, проверки | `MOLOT:code/modules/netdm/netrun_adapter.dm`, `netrun_client.dm`, `code/modules/unit_tests/netrun_client_life.dm` |
+| Окно | `MOLOT:tgui/packages/tgui/interfaces/NetrunView.tsx` + `NetrunView/` |
+| Правила и история решений | `docs/netrun/` (ADR-0001…0007, `legacy-removal.md`) |
+
+### Как проверять
+
+```
+pwsh -File scripts/check-all.ps1 -Only host                                    # C#: сборка, smoke, домен, живой IPC
+pwsh -File scripts/build-bluemoon-unit-dmb.ps1 -GameRepository <MOLOT> -BuildDirectory C:\nrun\src
+pwsh -File scripts/test-bluemoon-unit.ps1 -BuildDirectory C:\nrun\src -BridgeDll native\byond\build\netdm_byond.dll -TestList scripts/bluemoon-netdm-tests.txt
+cd tgui; node .yarn/releases/yarn-4.18.1.cjs jest packages/tgui/interfaces/NetrunView
+```
+
+### Что осталось, с точками входа
+
+| Задача | С чего начать | Известное препятствие |
+|---|---|---|
+| L-4: снять сравнение мессенджера | `messenger_shadow.dm` (`end_send`, `delivered`, `receipt`); тест `messenger_authoritative` | при переписывании файла теряется регистрация 62-го эндпойнта: сначала разобрать порядок `add_messenger`/`add_server`, потом резать |
+| L-3: сравнение атмосферы | `atmos_telemetry.dm`: `compare`, `explain`, `published`, `legacy_received`, `state` | вторая сторона сравнения мертва, но файл держит живой путь доставки |
+| L-6: зеркало техуэба | `research_shadow.dm`: `legacy_unlock`, `legacy_boost`, `compared`, `mirror_lost` | два писателя в R&D; нужен ручной прогон консоли и дисков |
+| L-8: бенчмарки вне игры | `Program.cs` маршруты 88–247, `Benchmarks/*` | маршруты использует CI и скрипты профилей |
+| P7: неподтверждённые доставки | `ServiceRuntime.cs`: `Acknowledge`, `ExpireInbox` | переотправка требует дедупа на стороне DM |
+| P8: полоса планировщика | `PriorityWorkScheduler.cs` | общий бюджет 65 мс/100 мс на маршруты и доставки |
+| UI-003: слои карты | `NetrunView/Map.tsx` | нужна потоковая проекция событий, а не статичная топология |
+| N6: ICE и вирусы | новый файл в `src/NetRun.Core`, по образцу `Breach.cs` | требуется решение по балансу, в ТЗ даны ориентиры |
+| Живой переход в мире | `netrun_presence` + адаптер уже передаёт узел | проверить `move` между двумя устройствами на разных АПЦ |
+
+### Чего не делать
+
+Не «улучшать» `stored_research` (D-02 — не нарушение), не убирать физические фолбэки кнопок и радио (INT-002), не трогать `topology_view` и текстовый shell (инструменты, §18.3), не переписывать DM-файлы целиком: чувствительность к отступам уже дважды стоила откатов.
