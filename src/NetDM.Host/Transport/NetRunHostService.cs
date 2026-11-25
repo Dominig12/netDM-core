@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using NetDM.Core;
 using NetDM.Services;
@@ -179,32 +181,38 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
     /// no host from another round: the owner and the execution host come from here, and the pipeline checks
     /// every invoked action again (SCRIPT-003, AT-27).
     /// </summary>
-    public (ProgramStatus Status, string? Reason, ProcessId Process, string? Name) StartProgram(
-        string principalName, string text, HostId executionHost, string programName)
+    public (ProgramStatus Status, string? Reason, ProcessId Process, string? Name, string? Digest) StartProgram(
+        string principalName, string text, HostId executionHost, string programName, bool confirm)
     {
         lock (_gate)
         {
             var principal = PrincipalLocked(principalName);
             if (principal.IsNone)
-                return (ProgramStatus.InvalidDefinition, "principal", ProcessId.None, null);
+                return (ProgramStatus.InvalidDefinition, "principal", ProcessId.None, null, null);
             var host = _runtime.Hosts.Get(executionHost);
             if (host is not { Available: true })
-                return (ProgramStatus.InvalidDefinition, "execution_host", ProcessId.None, null);
+                return (ProgramStatus.InvalidDefinition, "execution_host", ProcessId.None, null, null);
             // Starting a program spends the host's capacity, so it is a use of that host in its own right;
             // every action the program then invokes is authorized again at commit (SEC-001).
             var profile = host.Security?.Profile ?? SecurityProfile.Standard;
             if (!_runtime.Authority.Authorize(principal, executionHost, CapabilityCategory.Execution, null, profile).Allowed)
-                return (ProgramStatus.Forbidden, "execution_host_right", ProcessId.None, null);
+                return (ProgramStatus.Forbidden, "execution_host_right", ProcessId.None, null, null);
             var parsed = ProgramSource.TryParse(text, out var source, out var parseError);
             if (parsed != ProgramStatus.Ok || source is null)
                 return (parsed == ProgramStatus.Ok ? ProgramStatus.InvalidDefinition : parsed,
-                    parseError ?? "source", ProcessId.None, null);
+                    parseError ?? "source", ProcessId.None, null, null);
             var name = string.IsNullOrEmpty(programName) ? source.Name : programName;
             if (string.IsNullOrEmpty(name) || name.Length > 64)
-                return (ProgramStatus.InvalidDefinition, "name", ProcessId.None, null);
+                return (ProgramStatus.InvalidDefinition, "name", ProcessId.None, null, null);
+            // Import is not deployment (SCRIPT-003): without a confirmation the text is compiled and described,
+            // and nothing runs. The caller deploys it as a second, explicit step, which revalidates everything.
+            var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+            if (!confirm)
+                return (ProgramStatus.InvalidDefinition, "confirmation_required", ProcessId.None, name, digest);
             var definition = new ProgramDefinition(name, executionHost, source.Steps, source.InstructionBudget);
             var started = _runtime.Programs.Start(principal, definition);
-            return (started.Status, started.Reason, started.Process, started.Status == ProgramStatus.Ok ? name : null);
+            return (started.Status, started.Reason, started.Process,
+                started.Status == ProgramStatus.Ok ? name : null, digest);
         }
     }
 

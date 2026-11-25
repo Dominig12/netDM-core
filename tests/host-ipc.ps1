@@ -2106,9 +2106,15 @@ wait 5000
 emit program.imported.done
 stop
 "@
-    $imported = Invoke-Next @{ op = 'netrun_program'; payload = @{ principal = 'ckey-operator'; source = $programText
+    # Import is not deployment (SCRIPT-003): the first call compiles and describes, it does not run.
+    $preview = Invoke-Next @{ op = 'netrun_program'; payload = @{ principal = 'ckey-operator'; source = $programText
         execution = $adapterId; name = 'Imported' } }
-    Assert-True ($imported.ok -and $imported.result.status -ceq 'ok' -and $imported.result.process -gt 0) "program text is imported and starts: $($imported | ConvertTo-Json -Compress -Depth 3)"
+    Assert-True (-not $preview.ok -and $preview.result.reason -ceq 'confirmation_required' -and
+        $preview.result.digest -and $preview.result.process -eq 0) "import alone never runs the program: $($preview | ConvertTo-Json -Compress -Depth 3)"
+    $imported = Invoke-Next @{ op = 'netrun_program'; payload = @{ principal = 'ckey-operator'; source = $programText
+        execution = $adapterId; name = 'Imported'; confirm = $true } }
+    Assert-True ($imported.ok -and $imported.result.status -ceq 'ok' -and $imported.result.process -gt 0 -and
+        $imported.result.digest -ceq $preview.result.digest) "the confirmed deployment starts the program: $($imported | ConvertTo-Json -Compress -Depth 3)"
     Start-Sleep -Milliseconds 400
     $withProgram = Invoke-Next @{ op = 'netrun_panel'; payload = @{ principal = 'ckey-operator'; hosts = 8 } }
     Assert-True (($withProgram.result.programs | Where-Object { $_.process -eq $imported.result.process }) -ne $null) 'the started program appears in the operator panel'

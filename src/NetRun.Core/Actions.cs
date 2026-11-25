@@ -318,6 +318,7 @@ public sealed class ActionPipeline(
     private readonly Dictionary<ulong, OperationRecord> _operations = [];
     private readonly Dictionary<(ulong Principal, string Key), ulong> _idempotency = [];
     private readonly HashSet<(ulong Principal, string Key)> _retired = [];
+    private readonly Queue<(ulong Principal, string Key)> _retiredOrder = new();
     private readonly Dictionary<string, long> _cooldowns = new(StringComparer.Ordinal);
     private readonly SortedSet<(long At, ulong Operation)> _prepared = [];
     private readonly Queue<ActionEvent> _events = new();
@@ -443,6 +444,11 @@ public sealed class ActionPipeline(
         }
         if (_retired.Contains((request.Principal.Value, request.IdempotencyKey)))
             return new PrepareOutcome(ActionStatus.UnknownOutcome, OperationId.None, null, Reason: "idempotency_window_expired");
+        // The promise "unknown key means it was never seen" holds only while the retirement window is intact.
+        // Once it is full and the log is saturated, an unknown key may be an evicted one: starting it could
+        // repeat an irreversible effect, so the pipeline refuses instead (SVC-002, §18.2).
+        if (_operations.Count >= _options.MaxOperations && _retired.Count >= _options.MaxRetiredIdempotencyKeys)
+            return new PrepareOutcome(ActionStatus.UnknownOutcome, OperationId.None, null, Reason: "idempotency_window");
 
         // A missing target is not refused here yet: the action validates first, so that "you may not see it"
         // and "it does not exist" produce the same answer and an error cannot reveal a hidden object (§6.4).
@@ -830,9 +836,14 @@ public sealed class ActionPipeline(
         if (oldest == 0 || !_operations.Remove(oldest, out var evicted))
             return;
         _idempotency.Remove((evicted.Principal.Value, evicted.IdempotencyKey));
+        // A retired key is remembered for as long as the window allows. When the set is full the OLDEST entry
+        // goes, never the whole set: forgetting everything at once would make every ancient key look new.
         if (_retired.Count >= _options.MaxRetiredIdempotencyKeys)
-            _retired.Clear();
+            _retired.Remove(OldestRetired());
         _retired.Add((evicted.Principal.Value, evicted.IdempotencyKey));
+        _retiredOrder.Enqueue((evicted.Principal.Value, evicted.IdempotencyKey));
+        while (_retiredOrder.Count > _options.MaxRetiredIdempotencyKeys * 2)
+            _retiredOrder.Dequeue();
     }
 
     /// <summary>
@@ -848,6 +859,21 @@ public sealed class ActionPipeline(
         var check = _authority.Authorize(prepared.Context.Principal, prepared.Context.TargetHost,
             descriptor.RequiredCapability, descriptor.ServiceKey, profile);
         return check.Allowed ? AuthorizationStatus.Ok : check.Status;
+    }
+
+    /// <summary>The key that has been retired longest, used when the window is full.</summary>
+    private (ulong Principal, string Key) OldestRetired()
+    {
+        while (_retiredOrder.Count > 0)
+        {
+            var candidate = _retiredOrder.Dequeue();
+            if (_retired.Contains(candidate))
+                return candidate;
+        }
+        // The order queue lost track (it is bounded): fall back to an arbitrary entry rather than growing.
+        foreach (var key in _retired)
+            return key;
+        return default;
     }
 
     private static string CooldownKey(PrincipalId principal, ActionDescriptor descriptor) =>

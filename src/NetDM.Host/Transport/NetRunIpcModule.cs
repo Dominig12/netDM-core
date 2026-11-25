@@ -326,7 +326,8 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
             Text(body, "source") is not { Length: > 0 } source ||
             Integer(body, "execution") is not { } execution || execution <= 0)
             return new HostIpcResult(false, "invalid_request", null);
-        var started = netrun.StartProgram(name, source, new HostId((ulong)execution), Text(body, "name") ?? "");
+        var started = netrun.StartProgram(name, source, new HostId((ulong)execution), Text(body, "name") ?? "",
+            Flag(body, "confirm") ?? false);
         return new HostIpcResult(started.Status == ProgramStatus.Ok,
             started.Status == ProgramStatus.Ok ? null : StatusCode(started.Status),
             new
@@ -334,6 +335,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
                 status = StatusCode(started.Status),
                 process = started.Process.Value,
                 name = started.Name,
+                digest = started.Digest,
                 reason = started.Reason
             });
     }
