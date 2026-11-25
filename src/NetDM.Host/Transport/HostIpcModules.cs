@@ -67,19 +67,6 @@ internal sealed class ResearchIpcModule(ResearchHost research) : IHostIpcModule
     }
 }
 
-internal sealed class RadioReachIpcModule(GameNetworkService game) : IHostIpcModule
-{
-    public IReadOnlyCollection<string> Operations { get; } = ["radio_reach"];
-    public bool RequiresNetworkReady => true;
-
-    public HostIpcResult Execute(string operation, JsonElement? payload)
-    {
-        var (ok, error, result) = RadioReach.Handle(game.Snapshot, payload);
-        return new(ok, error, result);
-    }
-}
-
-/// <summary>Administrative lifecycle of network entities, not a user endpoint command.</summary>
 internal sealed class NetworkLifeIpcModule(GameNetworkService game) : IHostIpcModule
 {
     public IReadOnlyCollection<string> Operations { get; } = ["network_life"];

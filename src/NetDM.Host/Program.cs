@@ -43,7 +43,6 @@ builder.Services.AddSingleton<ThreeScenarioBenchmarkSuite>();
 builder.Services.AddSingleton<RoutingComparisonRunner>();
 // Modules are registered once at composition root, not in a central IPC switch.
 builder.Services.AddSingleton<IHostIpcModule, ResearchIpcModule>();
-builder.Services.AddSingleton<IHostIpcModule, RadioReachIpcModule>();
 builder.Services.AddSingleton<IHostIpcModule, NetworkLifeIpcModule>();
 builder.Services.AddSingleton<IHostIpcModule, NetRunIpcModule>();
 builder.Services.AddSingleton<HostIpcModuleRouter>();
