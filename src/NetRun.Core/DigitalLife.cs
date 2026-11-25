@@ -40,13 +40,34 @@ public sealed record LifeResult(LifeStatus Status, DigitalCoreSnapshot? Core, st
     public bool Succeeded => Status == LifeStatus.Ok;
 }
 
+/// <summary>
+/// A snapshot of a core, kept on a host that has storage (§13.5). It is a copy of the identity's own state:
+/// never of the world, the money, the rights or somebody else's objects.
+/// </summary>
+public sealed record CoreBackup(
+    ulong Id,
+    IdentityId Identity,
+    PrincipalId Controller,
+    HostId StoredOn,
+    HostGeneration StoredGeneration,
+    int Integrity,
+    ulong ControlGeneration,
+    long TakenAtMilliseconds,
+    ReservationId Storage);
+
+public sealed record BackupResult(LifeStatus Status, CoreBackup? Backup, string? Reason = null);
+
 public sealed record DigitalLifeOptions(
     int MaxIdentities = 4_096,
     int MigrationReservationCu = 1,
     long MigrationLifetimeMilliseconds = 30_000,
     int FullIntegrity = 100,
     int DegradedAt = 60,
-    int CriticalAt = 30);
+    int CriticalAt = 30,
+    int MaxBackups = 1_024,
+    int MaxBackupsPerIdentity = 3,
+    long BackupBytes = 256,
+    long BackupLifetimeMilliseconds = 600_000);
 
 /// <summary>
 /// The authoritative model of a digital life's core (LIFE-001, §13.4). One identity has exactly one active
@@ -85,6 +106,8 @@ public sealed class DigitalLifeRegistry(
     private readonly ResourceLedger _resources = resources ?? throw new ArgumentNullException(nameof(resources));
     private readonly DigitalLifeOptions _options = options ?? new DigitalLifeOptions();
     private readonly Dictionary<ulong, Record> _cores = [];
+    private readonly Dictionary<ulong, CoreBackup> _backups = [];
+    private ulong _nextBackup;
 
     public int Count => _cores.Count;
 
@@ -224,6 +247,8 @@ public sealed class DigitalLifeRegistry(
     public int OnHostDestroyed(HostId host)
     {
         var affected = 0;
+        // A copy stored on the host that died goes with it.
+        affected += OnBackupHostDestroyed(host);
         foreach (var record in _cores.Values.ToArray())
         {
             if (record.Migrating && record.Destination == host)
@@ -295,11 +320,21 @@ public sealed class DigitalLifeRegistry(
         _cores.TryGetValue(identity.Value, out var record) && record.ControlGeneration == controlGeneration &&
         !record.Migrating;
 
-    /// <summary>Expires moves whose confirmation never came. The source keeps the life and the reserve returns.</summary>
+    /// <summary>
+    /// Expires moves whose confirmation never came, and drops backups whose storage no longer exists. A copy
+    /// that lost its carrier is gone, and pretending otherwise would break the storage accounting.
+    /// </summary>
     public int Tick()
     {
         var now = _clock.NowMilliseconds;
         var expired = 0;
+        foreach (var backup in _backups.Values.ToArray())
+        {
+            if (!backup.Storage.IsNone && _resources.Get(backup.Storage) is { IsActive: true })
+                continue;
+            _backups.Remove(backup.Id);
+            expired++;
+        }
         foreach (var record in _cores.Values.ToArray())
         {
             if (!record.Migrating || now - record.MigrationStarted < _options.MigrationLifetimeMilliseconds)
@@ -308,6 +343,106 @@ public sealed class DigitalLifeRegistry(
             expired++;
         }
         return expired;
+    }
+
+    /// <summary>
+    /// Copies the core's own state onto a host that has storage. The copy costs storage for as long as it
+    /// exists and carries the generation it was taken at, so restoring an old snapshot can never revive a
+    /// second controller.
+    /// </summary>
+    public BackupResult Snapshot(IdentityId identity, HostId storageHost)
+    {
+        if (!_cores.TryGetValue(identity.Value, out var record))
+            return new BackupResult(LifeStatus.UnknownIdentity, null, "identity");
+        if (record.State is LifeState.Terminated)
+            return new BackupResult(LifeStatus.AlreadyTerminated, null, "terminated");
+        if (_backups.Count >= _options.MaxBackups || CountBackups(identity) >= _options.MaxBackupsPerIdentity)
+            return new BackupResult(LifeStatus.InvalidRequest, null, "limit");
+        if (_hosts.Get(storageHost) is not { Available: true } host || host.Storage is not { Bytes: > 0 })
+            return new BackupResult(LifeStatus.InsufficientResources, null, "storage");
+        var reservation = _resources.ReserveStorage(storageHost, record.Controller, _options.BackupBytes,
+            _options.BackupLifetimeMilliseconds);
+        if (reservation.Status != ReservationStatus.Ok)
+            return new BackupResult(LifeStatus.InsufficientResources, null, reservation.Status.ToString());
+        var backup = new CoreBackup(++_nextBackup, identity, record.Controller, storageHost, host.Generation,
+            record.Integrity, record.ControlGeneration, _clock.NowMilliseconds,
+            reservation.Reservation?.Id ?? ReservationId.None);
+        _backups[backup.Id] = backup;
+        return new BackupResult(LifeStatus.Ok, backup);
+    }
+
+    /// <summary>Bounded list of the backups one identity holds, newest first.</summary>
+    public CoreBackup[] Backups(IdentityId identity, int limit)
+    {
+        if (limit <= 0)
+            return [];
+        return _backups.Values
+            .Where(backup => backup.Identity == identity)
+            .OrderByDescending(backup => backup.Id)
+            .Take(limit)
+            .ToArray();
+    }
+
+    /// <summary>Drops a backup and returns the storage it held.</summary>
+    public LifeStatus DropBackup(ulong backupId)
+    {
+        if (!_backups.Remove(backupId, out var backup))
+            return LifeStatus.InvalidRequest;
+        ReleaseStorage(backup);
+        return LifeStatus.Ok;
+    }
+
+    /// <summary>
+    /// Brings a lost core back from its own backup. The identity returns at a fraction of its condition with a
+    /// new controlling generation; the world, spent resources and revoked rights stay where they are (§13.5).
+    /// </summary>
+    public LifeResult RestoreFromBackup(IdentityId identity, ulong backupId, HostId host, int integrity)
+    {
+        if (!_cores.TryGetValue(identity.Value, out var record))
+            return new LifeResult(LifeStatus.UnknownIdentity, null);
+        if (!_backups.TryGetValue(backupId, out var backup) || backup.Identity != identity)
+            return new LifeResult(LifeStatus.InvalidRequest, record.Snapshot(), "backup");
+        if (record.State is not (LifeState.CoreLost or LifeState.Stasis))
+            return new LifeResult(LifeStatus.InvalidRequest, record.Snapshot(), "alive");
+        var restored = Restore(identity, host, integrity);
+        if (!restored.Succeeded)
+            return restored;
+        _backups.Remove(backupId);
+        ReleaseStorage(backup);
+        return restored;
+    }
+
+    private void ReleaseStorage(CoreBackup backup)
+    {
+        if (!backup.Storage.IsNone)
+            _resources.Release(backup.Storage, backup.Controller);
+    }
+
+    private int CountBackups(IdentityId identity)
+    {
+        var count = 0;
+        foreach (var backup in _backups.Values)
+            if (backup.Identity == identity)
+                count++;
+        return count;
+    }
+
+    /// <summary>
+    /// Backups stored on a destroyed host are gone with their carrier: storage that no longer exists cannot
+    /// hold a copy. The record stays for the client so the loss is visible instead of silent.
+    /// </summary>
+    public int OnBackupHostDestroyed(HostId host)
+    {
+        var lost = 0;
+        foreach (var backup in _backups.Values.ToArray())
+        {
+            if (backup.StoredOn != host)
+                continue;
+            _backups.Remove(backup.Id);
+            ReleaseStorage(backup);
+            lost++;
+        }
+        return lost;
     }
 
     /// <summary>Bounded listing for the client, oldest identity first.</summary>

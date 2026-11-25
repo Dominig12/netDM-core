@@ -122,6 +122,63 @@ internal static class DigitalLifeTests
         Equal(rescue.Id, timedOut.Host, "the committed host stays in charge");
         Equal(LifeStatus.InvalidRequest, runtime.Lives.Restore(lostIdentity, rescue.Id, 10).Status,
             "a living core cannot be restored over itself");
+
+        // Backups: a copy of the core's own state, paid for with storage, carried by one host.
+        var store = runtime.RegisterHost(new HostDefinition("store.1", HostClass.Server,
+            Compute: new ComputeComponent(5, 1), Memory: new MemoryComponent(2),
+            Storage: new StorageComponent(4_096))).Host!;
+        var storageBefore = runtime.Resources.Snapshot(store.Id)!.StorageHeld;
+        var backup = runtime.Lives.Snapshot(identity, store.Id);
+        Equal(LifeStatus.Ok, backup.Status, "a backup is taken on a host with storage");
+        Equal(storageBefore + 256, runtime.Resources.Snapshot(store.Id)!.StorageHeld,
+            "the copy occupies storage while it exists");
+        Equal(1, runtime.Lives.Backups(identity, 8).Length, "the identity holds its backup");
+
+        // Dropping the copy returns the storage.
+        Equal(LifeStatus.Ok, runtime.Lives.DropBackup(backup.Backup!.Id), "a backup can be dropped");
+        Equal(storageBefore, runtime.Resources.Snapshot(store.Id)!.StorageHeld, "dropping it returns the storage");
+        Equal(0, runtime.Lives.Backups(identity, 8).Length, "a dropped backup is gone");
+
+        // Restoring from a backup needs a lost core, and it comes back with a new controlling generation.
+        var restoreHost = runtime.RegisterHost(new HostDefinition("store.2", HostClass.Server,
+            Compute: new ComputeComponent(10, 2), Memory: new MemoryComponent(2),
+            Storage: new StorageComponent(4_096))).Host!;
+        var victim = runtime.NewIdentity();
+        var victimDeck = runtime.RegisterHost(new HostDefinition("deck.9", HostClass.Cyberdeck,
+            Compute: new ComputeComponent(6, 2), Memory: new MemoryComponent(2))).Host!;
+        runtime.Lives.Create(victim, actor, victimDeck.Id);
+        var victimBackup = runtime.Lives.Snapshot(victim, store.Id).Backup!;
+        runtime.DestroyHost(victimDeck.Id, victimDeck.Generation);
+        Equal(LifeState.CoreLost, runtime.Lives.Get(victim)!.State, "the victim lost its core");
+        var fromBackup = runtime.Lives.RestoreFromBackup(victim, victimBackup.Id, restoreHost.Id, 40);
+        Equal(LifeStatus.Ok, fromBackup.Status, "the identity returns from its own backup");
+        Check(fromBackup.Core!.ControlGeneration > 1, "the restored core has a new controlling generation");
+        Equal(LifeState.Degraded, fromBackup.Core.State, "a restored core comes back degraded");
+        Equal(0, runtime.Lives.Backups(victim, 8).Length, "the backup was consumed by the restore");
+
+        // A backup stored on a host that dies is lost with its carrier.
+        var carrier = runtime.RegisterHost(new HostDefinition("store.3", HostClass.Server,
+            Compute: new ComputeComponent(4, 1), Memory: new MemoryComponent(1),
+            Storage: new StorageComponent(4_096))).Host!;
+        var stranded = runtime.Lives.Snapshot(victim, carrier.Id).Backup!;
+        runtime.DestroyHost(carrier.Id, carrier.Generation);
+        Equal(0, runtime.Lives.Backups(victim, 8).Length, "a backup dies with the host that stored it");
+
+        // Expired storage drops the copy instead of silently keeping a record that holds nothing.
+        var shortLived = new NetRunRuntime(clock, new NetRunRuntimeOptions());
+        var sHost = shortLived.RegisterHost(new HostDefinition("s.1", HostClass.Server,
+            Compute: new ComputeComponent(4, 1), Memory: new MemoryComponent(1),
+            Storage: new StorageComponent(4_096))).Host!;
+        var dHost = shortLived.RegisterHost(new HostDefinition("d.1", HostClass.Cyberdeck,
+            Compute: new ComputeComponent(4, 1), Memory: new MemoryComponent(1))).Host!;
+        var sIdentity = shortLived.NewIdentity();
+        var sActor = shortLived.NewPrincipal();
+        shortLived.Lives.Create(sIdentity, sActor, dHost.Id);
+        shortLived.Lives.Snapshot(sIdentity, sHost.Id);
+        clock.Advance(600_001);
+        shortLived.Tick();
+        Equal(0, shortLived.Lives.Backups(sIdentity, 8).Length,
+            "a backup whose storage expired is dropped, not left as a record");
         Equal(LifeState.Stasis, runtime.Lives.ApplyIntegrity(lostIdentity, -1_000).Core!.State,
             "exhausting a restored core leaves it in stasis, not deleted");
     }
