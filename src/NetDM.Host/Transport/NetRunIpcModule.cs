@@ -15,7 +15,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         "netrun_principal", "netrun_host", "netrun_destroy", "netrun_lifecycle",
         "netrun_grant", "netrun_revoke", "netrun_actions", "netrun_execute", "netrun_complete",
         "netrun_knowledge", "netrun_view", "netrun_panel", "netrun_program", "netrun_program_stop",
-        "netrun_life", "netrun_state"
+        "netrun_life", "netrun_presence", "netrun_state"
     ];
 
     // NETRUN administration has to work while the map snapshot is still being synchronized: the domain
@@ -39,6 +39,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         "netrun_program" => ProgramImport(payload),
         "netrun_program_stop" => ProgramStop(payload),
         "netrun_life" => LifeOperation(payload),
+        "netrun_presence" => PresenceOperation(payload),
         "netrun_state" => State(payload),
         _ => new HostIpcResult(false, "unknown_operation", null)
     };
@@ -362,6 +363,45 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
     /// Digital life operations: create the round''s identity, move its core, take and restore a backup. The
     /// controlling generation is returned with every answer, so the caller always knows what it may still do.
     /// </summary>
+    /// <summary>
+    /// Presence and travel: a life enters where its core lives, moves over a route the transport plans, or
+    /// aborts a move before it lands. The answer carries where it stands and when it arrives (§8.1).
+    /// </summary>
+    private HostIpcResult PresenceOperation(JsonElement? payload)
+    {
+        if (payload is not { ValueKind: JsonValueKind.Object } body)
+            return new HostIpcResult(false, "invalid_request", null);
+        if (Integer(body, "identity") is not { } identityValue || identityValue <= 0)
+            return new HostIpcResult(false, "invalid_request", null);
+        var identity = new NetRun.Core.IdentityId((ulong)identityValue);
+        var action = Text(body, "action") ?? "";
+        var result = action switch
+        {
+            "enter" when Integer(body, "host") is { } host && host > 0 =>
+                netrun.EnterPresence(identity, new HostId((ulong)host)),
+            "move" when Integer(body, "destination") is { } destination && destination > 0 =>
+                netrun.MovePresence(identity, new HostId((ulong)destination)),
+            "abort" => netrun.AbortPresence(identity),
+            "leave" => netrun.LeavePresence(identity),
+            _ => (PresenceResult?)null
+        };
+        if (result is not { } presence)
+            return new HostIpcResult(false, "invalid_request", null);
+        var snapshot = presence.Presence ?? netrun.PresenceOf(identity);
+        return new HostIpcResult(presence.Succeeded, presence.Succeeded ? null : presence.Status.ToString().ToLowerInvariant(),
+            new
+            {
+                status = presence.Status.ToString().ToLowerInvariant(),
+                identity = identity.Value,
+                host = snapshot?.Host.Value ?? 0,
+                state = snapshot?.State.ToString().ToLowerInvariant() ?? "absent",
+                destination = snapshot?.Destination.Value ?? 0,
+                hops = snapshot?.Hops ?? 0,
+                arriveAt = snapshot?.ArriveAtMilliseconds ?? 0,
+                reason = presence.Reason
+            });
+    }
+
     private HostIpcResult LifeOperation(JsonElement? payload)
     {
         if (payload is not { ValueKind: JsonValueKind.Object } body)

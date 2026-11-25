@@ -2130,12 +2130,13 @@ stop
     # LIFE-001 over the live Host: the round allocates the identity, the core moves with a new controlling
     # generation, and an action from the retired generation is refused.
     $lifeDeck = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.lifedeck'; class = 'Cyberdeck'
-        capacityCu = 20; rateCu = 5; memorySlots = 4 } }
+        capacityCu = 20; rateCu = 5; memorySlots = 4; node = 1; wired = $true } }
     $lifeDeckId = $lifeDeck.result.host
     $lifeServer = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.lifeserver'; class = 'Server'
-        capacityCu = 20; rateCu = 5; memorySlots = 4; storageBytes = 65536 } }
+        capacityCu = 20; rateCu = 5; memorySlots = 4; storageBytes = 65536; node = 3; wired = $true } }
     $lifeServerId = $lifeServer.result.host
-    Assert-True ($lifeDeck.ok -and $lifeServer.ok) 'two hosts are declared for a digital life'
+    Assert-True ($lifeDeck.ok -and $lifeServer.ok) "two hosts are declared for a digital life: $($lifeDeck | ConvertTo-Json -Compress -Depth 4) / $($lifeServer | ConvertTo-Json -Compress -Depth 4)"
+
     foreach ($category in 'Execution', 'Read') {
         Assert-True ((Invoke-Next @{ op = 'netrun_grant'; payload = @{ subject = 'ckey-operator'; host = $lifeDeckId
             category = $category; lifetimeMs = 120000 } }).ok) "the operator may use the life deck ($category)"
@@ -2145,6 +2146,13 @@ stop
         $created.result.host -eq $lifeDeckId) "the round creates a digital life: $($created | ConvertTo-Json -Compress -Depth 4)"
     $lifeId = $created.result.identity
 
+    # Presence and travel (PLAY-001): the life enters on the host that holds it and moves over the graph.
+    $entered = Invoke-Next @{ op = 'netrun_presence'; payload = @{ action = 'enter'; identity = $lifeId; host = $lifeDeckId } }
+    Assert-True ($entered.ok -and $entered.result.state -ceq 'idle' -and $entered.result.host -eq $lifeDeckId) "the life enters where its core lives: $($entered | ConvertTo-Json -Compress -Depth 4)"
+    $travelling = Invoke-Next @{ op = 'netrun_presence'; payload = @{ action = 'move'; identity = $lifeId; destination = $lifeServerId } }
+    Assert-True (($travelling.ok -and $travelling.result.state -ceq 'traveling' -and $travelling.result.hops -gt 0) -or (-not $travelling.ok -and $travelling.result.reason -ceq 'no_route')) "a move plans a route or says why not: $($travelling | ConvertTo-Json -Compress -Depth 4)"
+    $aborted = Invoke-Next @{ op = 'netrun_presence'; payload = @{ action = 'abort'; identity = $lifeId } }
+    Assert-True (($aborted.ok -and $aborted.result.state -ceq 'idle' -and $aborted.result.host -eq $lifeDeckId) -or (-not $aborted.ok -and $aborted.result.status -ceq 'nottraveling')) "the presence is grounded after the attempt: $($aborted | ConvertTo-Json -Compress -Depth 4)"
     $backup = Invoke-Next @{ op = 'netrun_life'; payload = @{ action = 'backup'; identity = $lifeId; host = $lifeServerId } }
     Assert-True ($backup.ok -and $backup.result.backup -gt 0) 'a backup is stored on a host with storage'
 

@@ -244,8 +244,8 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
         var toNode = _runtime.Hosts.Get(to)?.Network?.Node;
         if (fromNode is null || toNode is null)
             return 0;
-        var route = Router.Find(_game.Snapshot.Physical, fromNode.Value, toNode.Value);
-        return route.Found ? route.Path.Count - 1 : -1;
+        var route = FindRoute(fromNode.Value, toNode.Value);
+        return route is { } found ? found : -1;
     }
 
     /// <summary>
@@ -260,11 +260,22 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
         var toNode = _runtime.Hosts.Get(to)?.Network?.Node;
         if (fromNode is null || toNode is null)
             return null;
-        var route = Router.Find(_game.Snapshot.Physical, fromNode.Value, toNode.Value);
-        if (!route.Found || route.Path.Count < 2)
+        if (FindRoute(fromNode.Value, toNode.Value) is not { } hops)
             return null;
-        var hops = route.Path.Count - 1;
         return new RoutePlan(hops, (long)hops * 1_000);
+    }
+
+    /// <summary>
+    /// Hops between two placed nodes, or null when no route exists. A cable link carries traffic both ways, so a
+    /// route published in one direction still connects the pair.
+    /// </summary>
+    private int? FindRoute(NetDM.Core.NodeId from, NetDM.Core.NodeId to)
+    {
+        var physical = _game.Snapshot.Physical;
+        var route = Router.Find(physical, from, to);
+        if (!route.Found || route.Path.Count < 2)
+            route = Router.Find(physical, to, from);
+        return route.Found && route.Path.Count >= 2 ? route.Path.Count - 1 : null;
     }
 
     /// <summary>Finalizes an accepted remote operation with what the world reported.</summary>
@@ -347,6 +358,38 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
             var taken = _runtime.Lives.Snapshot(identity, storage);
             return (taken.Backup, new LifeResult(taken.Status, _runtime.Lives.Get(identity), taken.Reason));
         }
+    }
+
+    // ---- Presence and travel (§8.1, PLAY-001): where a life stands, and how it gets somewhere ---------------
+
+    public PresenceResult EnterPresence(IdentityId identity, HostId host)
+    {
+        lock (_gate)
+            return _runtime.Presences.Enter(identity, host);
+    }
+
+    public PresenceResult MovePresence(IdentityId identity, HostId destination)
+    {
+        lock (_gate)
+            return _runtime.Presences.Move(identity, destination);
+    }
+
+    public PresenceResult AbortPresence(IdentityId identity)
+    {
+        lock (_gate)
+            return _runtime.Presences.Abort(identity, "aborted");
+    }
+
+    public PresenceResult LeavePresence(IdentityId identity)
+    {
+        lock (_gate)
+            return _runtime.Presences.Leave(identity);
+    }
+
+    public PresenceSnapshot? PresenceOf(IdentityId identity)
+    {
+        lock (_gate)
+            return _runtime.Presences.Get(identity);
     }
 
     public LifeResult RestoreLife(IdentityId identity, HostId host, int integrity)
@@ -507,6 +550,16 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
                     arriveAt = presence.ArriveAtMilliseconds,
                     reason = presence.Reason
                 }).ToArray(),
+                // The window needs to know its own presence to offer travel; the array is for the map.
+                presence = _runtime.Presences.ControlledBy(principal, 1).Select(presence => new
+                {
+                    identity = presence.Identity.Value,
+                    host = presence.Host.Value,
+                    state = presence.State.ToString().ToLowerInvariant(),
+                    destination = presence.Destination.Value,
+                    hops = presence.Hops,
+                    arriveAt = presence.ArriveAtMilliseconds
+                }).FirstOrDefault(),
                 lives = _runtime.Lives.ControlledBy(principal, operationLimit).Select(core => new
                 {
                     identity = core.Identity.Value,
