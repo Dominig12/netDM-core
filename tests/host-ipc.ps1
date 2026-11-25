@@ -2075,6 +2075,22 @@ try {
     $foreign = Invoke-Next @{ op = 'netrun_panel'; payload = @{ principal = 'op-other'; hosts = 16 } }
     Assert-True ($foreign.ok -and $foreign.result.hosts.Count -eq 0) 'an observer without knowledge gets an empty panel'
 
+    # The device adapter's contract: a service the world accepted becomes a host, and the operator of that
+    # device gets the rights of its own equipment — use it, see around it, read itself. Nothing more.
+    $adapterHost = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'svc.door.adapter'; class = 'Terminal'
+        capacityCu = 2; rateCu = 1; memorySlots = 1; services = @{ 'machine.door' = 'door.adapter' } } }
+    Assert-True ($adapterHost.ok -and $adapterHost.result.status -ceq 'ok') 'an accepted service becomes a digital host'
+    $adapterId = $adapterHost.result.host
+    foreach ($category in 'Execution', 'Discovery', 'Read') {
+        Assert-True ((Invoke-Next @{ op = 'netrun_grant'; payload = @{ subject = 'ckey-operator'; host = $adapterId
+            category = $category; lifetimeMs = 600000 } }).ok) "the operator is granted $category on its own device"
+    }
+    $own = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'ckey-operator'; action = 'net.inspect'
+        execution = $adapterId; target = $adapterId; key = 'nr-own-device' } }
+    Assert-True ($own.result.status -ceq 'committed' -and $own.result.result -match 'svc\.door\.adapter') "the operator reads its own device: $($own | ConvertTo-Json -Compress -Depth 4)"
+    $ownPanel = Invoke-Next @{ op = 'netrun_panel'; payload = @{ principal = 'ckey-operator'; hosts = 8 } }
+    Assert-True ($ownPanel.ok -and ($ownPanel.result.hosts | Where-Object { $_.host -eq $adapterId -and $_.name -ceq 'svc.door.adapter' }) -ne $null) 'the device appears in its operator view by name'
+
     $state = Invoke-Next @{ op = 'netrun_state'; payload = @{ limit = 16 } }
     $deckState = $state.result.hosts | Where-Object { $_.host -eq $deckHost } | Select-Object -First 1
     Assert-True ($state.ok -and $null -ne $deckState -and $deckState.bufferCu -lt 40) "the buffer reflects spent compute: $($deckState | ConvertTo-Json -Compress)"
