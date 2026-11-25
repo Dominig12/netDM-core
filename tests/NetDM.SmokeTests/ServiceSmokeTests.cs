@@ -483,7 +483,8 @@ static class ServiceSmokeTests
         stand.Settle();
         services.Acknowledge(Inbox(stand, "pump-1", "command").Single().DeliveryId, true, null, StateOn);
         stand.Submit();
-        stand.Tick += 60;
+        // The result leg now lives 300 ticks: a report of an applied effect must survive a long stall (SVC-002).
+        stand.Tick += 320;
         stand.Advance(2);
         Check(services.Operation(console, lossy.Operation!.OperationId).Operation is
             { Outcome: CommandOutcome.Applied, Result: ResultLeg.Failed }, "result leg expired");

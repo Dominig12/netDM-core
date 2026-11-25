@@ -21,6 +21,8 @@ $launch.Environment['NetDM__ResearchDirectory'] = Join-Path $work 'research'
 $launch.Environment['NetDM__ProgramStateBytes'] = '1200'
 # P13 network life: the population is opt-in, so the test enables it explicitly.
 $launch.Environment['NetDM__NetLife'] = '1'
+# The test checks the refusal a silent world earns, so it keeps a short window (product default is 30 s).
+$launch.Environment['NetDM__HeartbeatFreshnessSeconds'] = '5'
 
 function Open-Stream {
     if ($IsWindows) {
@@ -1844,6 +1846,7 @@ $damageLaunch.Environment['NETDM_SOCKET_PATH'] = $script:socketPath
 $damageLaunch.Environment['NetDM__HttpPort'] = "$script:httpPort"
 $damageLaunch.Environment['Logging__LogLevel__Default'] = 'Error'
 $damageLaunch.Environment['NetDM__ResearchDirectory'] = Join-Path $damageWork 'research'
+$damageLaunch.Environment['NetDM__HeartbeatFreshnessSeconds'] = '5'
 $damageHost = [Diagnostics.Process]::Start($damageLaunch)
 function Get-ResearchStatus {
     $response = Invoke-WebRequest "http://127.0.0.1:$script:httpPort/api/research/status" -SkipHttpErrorCheck -TimeoutSec 5

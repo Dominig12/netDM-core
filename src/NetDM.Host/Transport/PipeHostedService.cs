@@ -17,7 +17,8 @@ namespace NetDM.Host.Transport;
 /// unbounded routing tasks. One connection never writes concurrently to its stream.
 /// </summary>
 public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkScheduler scheduler,
-    GameNetworkService game, HostIpcModuleRouter modules, NetDM.Host.Research.ResearchHost research, ILogger<PipeHostedService> log)
+    GameNetworkService game, HostIpcModuleRouter modules, NetDM.Host.Research.ResearchHost research,
+    IConfiguration configuration, ILogger<PipeHostedService> log)
     : BackgroundService
 {
     private const int MaxConnections = 16;
@@ -29,6 +30,13 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
     // Explicit pipe buffers: with the default the writer rendezvous with each read.
     private const int PipeBufferBytes = 64 * 1024;
     private readonly SemaphoreSlim _connectionSlots = new(MaxConnections, MaxConnections);
+    /// <summary>
+    /// How long the game may stay silent before its network work is refused. DM heartbeats about once a second,
+    /// so the default tolerates a starved scheduler without calling a live world dead; a test that checks the
+    /// refusal sets a short window on purpose.
+    /// </summary>
+    private readonly TimeSpan _heartbeatFreshness =
+        TimeSpan.FromSeconds(Math.Clamp(configuration.GetValue("NetDM:HeartbeatFreshnessSeconds", 30), 1, 600));
     private readonly SemaphoreSlim _gameOwner = new(1, 1);
     private volatile bool _ipcReady;
     private sealed record SyncState(string Phase, Guid? StreamId = null,
@@ -61,7 +69,7 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
         var ipc = _ipcReady;
         var workers = game.WorkersReady;
         var heartbeat = state.LastWorldContact != 0 &&
-            Stopwatch.GetElapsedTime(state.LastWorldContact) <= TimeSpan.FromSeconds(5);
+            Stopwatch.GetElapsedTime(state.LastWorldContact) <= _heartbeatFreshness;
         return (ipc && workers && heartbeat && state.Phase == "ready", ipc, workers, heartbeat, state);
     }
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -779,7 +787,14 @@ public sealed class PipeHostedService(NetworkRuntime runtime, PriorityWorkSchedu
                     (PacketTrafficClass)request.TrafficClass,
                     request.TimeoutTicks, disconnect.Token);
                 if (stagedProtocol && (_sync.Phase != "ready" || _sync.StreamId != submitted.StreamId))
+                {
+                    // Every request gets an answer: a silent return makes the client read the next reply as this
+                    // one and desynchronises the frame stream for the rest of the session.
+                    if (!disconnect.IsCancellationRequested)
+                        await SendAsync(new PipeResponse(request.Id, false, "stream_changed",
+                            StreamId: framed ? _sync.StreamId : null));
                     return;
+                }
                 if (!disconnect.IsCancellationRequested)
                     await SendAsync(new PipeResponse(request.Id, true,
                         Submission: submitted, StreamId: framed ? submitted.StreamId : null));

@@ -93,7 +93,10 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
     public SharedMediumSnapshot Snapshot => Current.Medium.Snapshot;
     internal bool WorkersReady => Volatile.Read(ref _tickTask) is { IsCompleted: false } &&
         Volatile.Read(ref _rerouteTask) is { IsCompleted: false } &&
-        _runner.LastTick >= CurrentTick - 20;
+        
+        // Ten seconds of tolerance: a starved process is late, not dead, and a live client must not be told
+        // "not ready" because the machine was busy for a moment.
+        _runner.LastTick >= CurrentTick - 100;
 
     public (Guid StreamId, SharedMediumSnapshot Snapshot) CaptureTopology()
     {

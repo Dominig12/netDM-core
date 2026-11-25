@@ -59,7 +59,7 @@ public sealed record ServiceRuntimeOptions(
     int DefaultTimeoutTicks = 50, int MaxTimeoutTicks = 900, int AckTimeoutTicks = 600,
     int MaxOperations = 16_384, int MaxActiveOperationsPerEndpoint = 8, int MaxPendingCommandsPerProvider = 16,
     long ScanRetentionTicks = 300,
-    int MaxDiscoverFanout = 16, int MaxResultAttempts = 3, int ResultTimeoutTicks = 50,
+    int MaxDiscoverFanout = 16, int MaxResultAttempts = 3, int ResultTimeoutTicks = 300,
     IReadOnlyList<string>? HostProvidedTypes = null, int MaxHostCommands = 256);
 
 /// <summary>
