@@ -60,6 +60,7 @@ public sealed record ServiceRuntimeOptions(
     int MaxOperations = 16_384, int MaxActiveOperationsPerEndpoint = 8, int MaxPendingCommandsPerProvider = 16,
     long ScanRetentionTicks = 300,
     int MaxDiscoverFanout = 16, int MaxResultAttempts = 3, int ResultTimeoutTicks = 300,
+    int MaxSubmissionAttempts = 8,
     IReadOnlyList<string>? HostProvidedTypes = null, int MaxHostCommands = 256);
 
 /// <summary>
@@ -210,6 +211,10 @@ public sealed class ServiceRuntime
         public byte[]? Payload;
         public long CreatedTick, DeadlineTick, PacketId, InboxSequence;
         public bool Dispatched;
+        /// <summary>How many times routing has been retried after a busy answer. Bounded, never silent.</summary>
+        public int SubmissionAttempts;
+        /// <summary>True while the delivery sits in the outbox, so one delivery is never queued twice.</summary>
+        public bool Queued;
         public DeliveryState State;
         public string? Reason;
         public bool Terminal => State >= DeliveryState.Applied;
@@ -1037,12 +1042,37 @@ public sealed class ServiceRuntime
             while (written < count && _outbox.TryDequeue(out var submission))
                 if (_deliveries.TryGetValue(submission.DeliveryId, out var delivery) &&
                     delivery.State == DeliveryState.Accepted)
+                {
+                    delivery.Queued = false;
                     taken[written++] = submission;
+                }
             return written == count ? taken : taken[..written];
         }
     }
 
-    /// <summary>Records the transport admission of a delivery's packet.</summary>
+    /// <summary>
+    /// Returns a delivery whose routing was refused for lack of capacity to the outbox, so accepted work is not
+    /// dropped because the scheduler was momentarily busy (§6.3). The attempt count is bounded: a delivery that
+    /// keeps being refused becomes a visible failure with a reason, never a silent loss.
+    /// </summary>
+    public bool ReturnSubmission(DeliverySubmission submission, string reason)
+    {
+        lock (_gate)
+        {
+            if (!_deliveries.TryGetValue(submission.DeliveryId, out var delivery) ||
+                delivery.State != DeliveryState.Accepted)
+                return false;
+            if (delivery.SubmissionAttempts >= _options.MaxSubmissionAttempts || delivery.Queued)
+                return false;
+            delivery.SubmissionAttempts++;
+            delivery.Queued = true;
+            delivery.Reason = reason;
+            _outbox.Enqueue(submission);
+            return true;
+        }
+    }
+
+    /// <summary>Records the transport admission of a delivery''s packet.</summary>
     public void OnSubmitted(long deliveryId, PacketSubmissionResult result)
     {
         lock (_gate)

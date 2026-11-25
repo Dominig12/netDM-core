@@ -16,6 +16,7 @@ static class ServiceSmokeTests
         CheckSchemas();
         CheckContractModules();
         CheckDeliveryLifecycle();
+        CheckBusyRetry();
         CheckLatestValueWithOutOfOrderDelivery();
         CheckAcknowledgedEventJournal();
         CheckBounds();
@@ -846,6 +847,54 @@ static class ServiceSmokeTests
         public DeliveryState State(long deliveryId) => Services.Delivery(deliveryId)!.State;
     }
 
+    /// <summary>
+    /// §6.3: work the transport already accepted is not dropped because the scheduler was momentarily busy. A
+    /// refused submission returns to the outbox and is retried; after the bounded attempts it becomes a visible
+    /// failure with a reason.
+    /// </summary>
+    private static void CheckBusyRetry()
+    {
+        var stand = new Stand();
+        var services = stand.Services;
+        var sensor = new EndpointKey("sensor-1", 1);
+        var display = new EndpointKey("display-1", 1);
+        Check(services.AttachEndpoint(sensor, new NodeId(1)) == ServiceStatus.Ok, "busy: attach sensor");
+        Check(services.AttachEndpoint(display, new NodeId(3)) == ServiceStatus.Ok, "busy: attach display");
+        Check(services.RegisterService(sensor, "sensor.auto", "atmos.telemetry", "atmos.sample", 1, 0) == ServiceStatus.Ok,
+            "busy: register");
+        Check(services.Subscribe(display, "main", "sensor.auto", "atmos.sample", 1, "panel.v1",
+            DeliveryMode.LatestValue, 1).Status == ServiceStatus.Ok, "busy: subscribe");
+        var published = services.Publish(sensor, "sensor.auto", 1, Sample(150), 30, PacketTrafficClass.Background);
+        Check(published.Status == ServiceStatus.Ok, $"busy: publish ({published.Status})");
+
+        var taken = services.TakeSubmissions(4);
+        Check(taken.Length == 1, "busy: the outbox hands out the delivery");
+        var submission = taken[0];
+        // A refused submission goes back to the outbox once and is offered again.
+        Check(services.ReturnSubmission(submission, "queue_full"), "busy: a refused submission returns to the outbox");
+        Check(!services.ReturnSubmission(submission, "queue_full"), "busy: it is never queued twice");
+        var offered = services.TakeSubmissions(1);
+        Check(offered.Length == 1 && offered[0].DeliveryId == submission.DeliveryId,
+            "busy: the retried delivery is offered again");
+        var exhausted = 0;
+        while (services.ReturnSubmission(offered[0], "queue_full") && exhausted < 20)
+        {
+            exhausted++;
+            offered = services.TakeSubmissions(1);
+            if (offered.Length == 0)
+                break;
+        }
+        Check(exhausted <= 8, $"busy: the retry budget is bounded ({exhausted})");
+        Check(services.Delivery(submission.DeliveryId)!.State == DeliveryState.Accepted,
+            "busy: the retry budget itself never fails the delivery");
+
+        services.OnSubmitted(submission.DeliveryId, new PacketSubmissionResult(false, Guid.Empty, 0,
+            submission.RequestId, PacketSubmissionRejection.QueueFull));
+        Check(services.Delivery(submission.DeliveryId)!.State == DeliveryState.Busy,
+            "busy: a spent retry budget ends as a visible failure");
+        Check(services.Delivery(submission.DeliveryId)!.Reason == "queue_full",
+            "busy: the failure names why");
+    }
     private static void CheckDeliveryLifecycle()
     {
         var stand = new Stand();

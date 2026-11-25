@@ -420,6 +420,12 @@ public sealed class GameNetworkService : IHostedService, IAsyncDisposable
             var result = await SendOnSessionAsync(session, submission.RequestId, submission.From.Value,
                 submission.To.Value, submission.Bytes, submission.TrafficClass, submission.TimeoutTicks, ct)
                 .ConfigureAwait(false);
+            // A busy scheduler is not a lost delivery: it returns to the outbox and is retried. Only a refusal
+            // a retry cannot fix (no route, another session) is terminal (§6.3, SVC-002).
+            if (!result.Accepted && result.Rejection is PacketSubmissionRejection.QueueFull
+                        or PacketSubmissionRejection.BackgroundCongestion or PacketSubmissionRejection.RouteSchedulerBusy
+                        && session.Services.ReturnSubmission(submission, ServiceNames.Code(result.Rejection)))
+                return;
             session.Services.OnSubmitted(submission.DeliveryId, result);
         }
         catch (OperationCanceledException)
