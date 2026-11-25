@@ -59,6 +59,7 @@ if ($groups -contains 'host' -or $groups -contains 'world' -or $groups -contains
 }
 if ($groups -contains 'host') {
     Invoke-Check 'Smoke tests' { dotnet run --project tests/NetDM.SmokeTests -c Release }
+    Invoke-Check 'NETRUN domain tests' { dotnet run --project tests/NetRun.Tests -c Release }
     Invoke-Check 'Host IPC' { pwsh -NoProfile -File tests/host-ipc.ps1 }
 }
 if ($groups -contains 'tgui') {
