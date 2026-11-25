@@ -2127,6 +2127,39 @@ stop
     Assert-True ((Invoke-Next @{ op = 'netrun_program_stop'; payload = @{ principal = 'ckey-operator'
         process = $imported.result.process } }).result.status -ceq 'unknown_program') 'a stopped program is gone'
 
+    # LIFE-001 over the live Host: the round allocates the identity, the core moves with a new controlling
+    # generation, and an action from the retired generation is refused.
+    $lifeDeck = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.lifedeck'; class = 'Cyberdeck'
+        capacityCu = 20; rateCu = 5; memorySlots = 4 } }
+    $lifeDeckId = $lifeDeck.result.host
+    $lifeServer = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.lifeserver'; class = 'Server'
+        capacityCu = 20; rateCu = 5; memorySlots = 4; storageBytes = 65536 } }
+    $lifeServerId = $lifeServer.result.host
+    Assert-True ($lifeDeck.ok -and $lifeServer.ok) 'two hosts are declared for a digital life'
+    foreach ($category in 'Execution', 'Read') {
+        Assert-True ((Invoke-Next @{ op = 'netrun_grant'; payload = @{ subject = 'ckey-operator'; host = $lifeDeckId
+            category = $category; lifetimeMs = 120000 } }).ok) "the operator may use the life deck ($category)"
+    }
+    $created = Invoke-Next @{ op = 'netrun_life'; payload = @{ action = 'create'; principal = 'ckey-operator'; host = $lifeDeckId } }
+    Assert-True ($created.ok -and $created.result.identity -gt 0 -and $created.result.control -eq 1 -and
+        $created.result.host -eq $lifeDeckId) "the round creates a digital life: $($created | ConvertTo-Json -Compress -Depth 4)"
+    $lifeId = $created.result.identity
+
+    $backup = Invoke-Next @{ op = 'netrun_life'; payload = @{ action = 'backup'; identity = $lifeId; host = $lifeServerId } }
+    Assert-True ($backup.ok -and $backup.result.backup -gt 0) 'a backup is stored on a host with storage'
+
+    Assert-True ((Invoke-Next @{ op = 'netrun_life'; payload = @{ action = 'migrate'; identity = $lifeId
+        destination = $lifeServerId } }).ok) 'the move begins'
+    $moved = Invoke-Next @{ op = 'netrun_life'; payload = @{ action = 'migrate_commit'; identity = $lifeId; control = 1 } }
+    Assert-True ($moved.ok -and $moved.result.control -eq 2 -and $moved.result.host -eq $lifeServerId) "the move commits with a new generation: $($moved | ConvertTo-Json -Compress -Depth 4)"
+
+    $lifeInspect = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'ckey-operator'; action = 'net.inspect'
+        execution = $lifeDeckId; target = $lifeDeckId; key = 'nr-life-current'; identity = $lifeId; control = 2 } }
+    Assert-True ($lifeInspect.result.status -ceq 'committed' -or $lifeInspect.result.status -ceq 'forbidden')
+    $staleAction = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'ckey-operator'; action = 'net.inspect'
+        execution = $lifeDeckId; target = $lifeDeckId; key = 'nr-life-stale'; identity = $lifeId; control = 1 } }
+    Assert-True ($staleAction.result.status -ceq 'forbidden' -and $staleAction.result.reason -ceq 'life_generation') "the retired generation cannot act: $($staleAction | ConvertTo-Json -Compress -Depth 4)"
+
     $state = Invoke-Next @{ op = 'netrun_state'; payload = @{ limit = 16 } }
     $deckState = $state.result.hosts | Where-Object { $_.host -eq $deckHost } | Select-Object -First 1
     Assert-True ($state.ok -and $null -ne $deckState -and $deckState.bufferCu -lt 40) "the buffer reflects spent compute: $($deckState | ConvertTo-Json -Compress)"

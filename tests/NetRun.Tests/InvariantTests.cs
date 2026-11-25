@@ -24,6 +24,7 @@ internal static class InvariantTests
             Security: new SecurityComponent(SecurityProfile.Open, 4, 2))).Host!;
         var actor = runtime.NewPrincipal();
         runtime.Authority.Grant(actor, deck.Id, CapabilityCategory.Execution, null, 600_000, GrantSource.Granted, PrincipalId.None);
+        runtime.Authority.Grant(actor, deck.Id, CapabilityCategory.Read, null, 600_000, GrantSource.Granted, PrincipalId.None);
         runtime.Knowledge.Remember(actor, open.Id, KnowledgeLevel.Observed, 90);
         var inspect = runtime.Actions.GetAction("net.inspect")!;
 
@@ -51,5 +52,17 @@ internal static class InvariantTests
         Equal(ActionStatus.Forbidden, missing.Status, "a nonexistent identifier is refused");
         Equal(existing.Status, missing.Status, "an existing hidden host answers exactly like a missing one");
         Equal(existing.Reason, missing.Reason, "and for the same stated reason");
+
+        // LIFE-001: a presence acts only with the generation that currently controls its life.
+        var lifeIdentity = runtime.NewIdentity();
+        runtime.Lives.Create(lifeIdentity, actor, deck.Id);
+        var control = runtime.Lives.Get(lifeIdentity)!.ControlGeneration;
+        var current = runtime.Actions.Execute(new ActionRequest(actor, deck.Id, deck.Id, EntityId.None,
+            ProcessId.None, CorrelationId.None, "life-1", lifeIdentity, control), inspect);
+        Equal(ActionStatus.Committed, current.Status, "the current generation may act");
+        var stale = runtime.Actions.Execute(new ActionRequest(actor, deck.Id, deck.Id, EntityId.None,
+            ProcessId.None, CorrelationId.None, "life-2", lifeIdentity, control + 1), inspect);
+        Equal(ActionStatus.Forbidden, stale.Status, "an older generation may not act");
+        Equal("life_generation", stale.Reason, "the refusal names the generation");
     }
 }

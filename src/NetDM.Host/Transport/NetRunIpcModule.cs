@@ -15,7 +15,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         "netrun_principal", "netrun_host", "netrun_destroy", "netrun_lifecycle",
         "netrun_grant", "netrun_revoke", "netrun_actions", "netrun_execute", "netrun_complete",
         "netrun_knowledge", "netrun_view", "netrun_panel", "netrun_program", "netrun_program_stop",
-        "netrun_state"
+        "netrun_life", "netrun_state"
     ];
 
     // NETRUN administration has to work while the map snapshot is still being synchronized: the domain
@@ -38,6 +38,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         "netrun_panel" => PanelProjection(payload),
         "netrun_program" => ProgramImport(payload),
         "netrun_program_stop" => ProgramStop(payload),
+        "netrun_life" => LifeOperation(payload),
         "netrun_state" => State(payload),
         _ => new HostIpcResult(false, "unknown_operation", null)
     };
@@ -216,7 +217,12 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
             if (bound != NetDM.Services.ServiceStatus.Ok)
                 return new HostIpcResult(false, bound.ToString().ToLowerInvariant(), null);
         }
-        var outcome = netrun.Execute(principalName, actionId, new HostId((ulong)execution), new HostId((ulong)target), key);
+        // A presence acts under its life: the controlling generation travels with the request and is fenced.
+        var identity = Integer(body, "identity") is { } identityValue && identityValue > 0
+            ? new NetRun.Core.IdentityId((ulong)identityValue) : NetRun.Core.IdentityId.None;
+        var control = (ulong)Clamp(Integer(body, "control"), 0, int.MaxValue, 0);
+        var outcome = netrun.Execute(principalName, actionId, new HostId((ulong)execution), new HostId((ulong)target),
+            key, identity, control);
         return new HostIpcResult(true, null, new
         {
             status = StatusCode(outcome.Status),
@@ -351,6 +357,89 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         return new HostIpcResult(status == ProgramStatus.Ok, StatusCode(status),
             new { status = StatusCode(status) });
     }
+
+    /// <summary>
+    /// Digital life operations: create the round''s identity, move its core, take and restore a backup. The
+    /// controlling generation is returned with every answer, so the caller always knows what it may still do.
+    /// </summary>
+    private HostIpcResult LifeOperation(JsonElement? payload)
+    {
+        if (payload is not { ValueKind: JsonValueKind.Object } body)
+            return new HostIpcResult(false, "invalid_request", null);
+        var action = Text(body, "action") ?? "";
+        switch (action)
+        {
+            case "create":
+            {
+                if (Text(body, "principal") is not { Length: > 0 } name || Integer(body, "host") is not { } host ||
+                    host <= 0)
+                    return new HostIpcResult(false, "invalid_request", null);
+                var controller = netrun.Principal(name);
+                if (controller.IsNone)
+                    return new HostIpcResult(false, "limit_exceeded", null);
+                var (identity, created) = netrun.CreateLife(controller, new HostId((ulong)host));
+                return created.Core is null
+                    ? new HostIpcResult(false, StatusCode(created.Status), new { status = StatusCode(created.Status) })
+                    : new HostIpcResult(true, null, LifeDto(identity, created));
+            }
+            default:
+            {
+                if (Integer(body, "identity") is not { } identityValue || identityValue <= 0)
+                    return new HostIpcResult(false, "invalid_request", null);
+                var identity = new IdentityId((ulong)identityValue);
+                if (action == "backup")
+                {
+                    if (Integer(body, "host") is not { } storage || storage <= 0)
+                        return new HostIpcResult(false, "invalid_request", null);
+                    var (backup, result) = netrun.Backup(identity, new HostId((ulong)storage));
+                    return new HostIpcResult(result.Core is not null || backup is not null,
+                        StatusCode(result.Status),
+                        new { status = StatusCode(result.Status), backup = backup?.Id ?? 0 });
+                }
+                if (action is "migrate" or "migrate_commit" or "migrate_cancel")
+                {
+                    var destination = Integer(body, "destination") is { } target && target > 0
+                        ? new HostId((ulong)target) : HostId.None;
+                    var result = netrun.Migrate(identity, destination, action == "migrate_commit",
+                        (ulong)Clamp(Integer(body, "control"), 0, int.MaxValue, 0), Text(body, "reason"));
+                    return LifeOutcome(identity, result);
+                }
+                if (action is "restore" or "restore_backup")
+                {
+                    if (Integer(body, "host") is not { } host || host <= 0)
+                        return new HostIpcResult(false, "invalid_request", null);
+                    var integrity = Clamp(Integer(body, "integrity"), 1, 100, 50);
+                    var result = action == "restore"
+                        ? netrun.RestoreLife(identity, new HostId((ulong)host), integrity)
+                        : netrun.RestoreFromBackup(identity, (ulong)Clamp(Integer(body, "backup"), 0, int.MaxValue, 0),
+                            new HostId((ulong)host), integrity);
+                    return LifeOutcome(identity, result);
+                }
+                return new HostIpcResult(false, "unknown_action", null);
+            }
+        }
+    }
+
+    private static HostIpcResult LifeOutcome(IdentityId identity, LifeResult result) =>
+        result.Core is null
+            ? new HostIpcResult(result.Status is LifeStatus.Ok or LifeStatus.Duplicate, StatusCode(result.Status),
+                new { status = StatusCode(result.Status) })
+            : new HostIpcResult(result.Succeeded, result.Succeeded ? null : StatusCode(result.Status),
+                LifeDto(identity, result));
+
+    private static object LifeDto(IdentityId identity, LifeResult result) => new
+    {
+        status = StatusCode(result.Status),
+        identity = identity.Value,
+        host = result.Core?.Host.Value ?? 0,
+        generation = result.Core?.HostGeneration.Value ?? 0,
+        control = result.Core?.ControlGeneration ?? 0,
+        integrity = result.Core?.Integrity ?? 0,
+        state = result.Core?.State.ToString().ToLowerInvariant() ?? string.Empty,
+        migrating = result.Core?.Migrating ?? false,
+        destination = result.Core?.MigrationDestination.Value ?? 0,
+        reason = result.Reason
+    };
 
     private HostIpcResult State(JsonElement? payload)
     {

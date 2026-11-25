@@ -276,7 +276,7 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
 
     /// <summary>Runs one registered action through the pipeline for a named principal.</summary>
     public ActionOutcome Execute(string principalName, string actionId, HostId executionHost, HostId targetHost,
-        string idempotencyKey)
+        string idempotencyKey, IdentityId identity = default, ulong controlGeneration = 0)
     {
         lock (_gate)
         {
@@ -289,7 +289,7 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
                 return new ActionOutcome(ActionStatus.UnknownAction, OperationId.None, ActionKind.Query,
                     ActionCategory.Perception, Reason: "unknown_action");
             var request = new ActionRequest(principal, executionHost, targetHost, EntityId.None, ProcessId.None,
-                CorrelationId.None, idempotencyKey);
+                CorrelationId.None, idempotencyKey, identity, controlGeneration);
             return _runtime.Actions.Execute(request, action);
         }
     }
@@ -313,6 +313,52 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
             return new NetRunStateView(_runtime.NowMilliseconds, TickCount, views,
                 _runtime.Actions.ActionCount, _runtime.Actions.OperationCount);
         }
+    }
+
+    // ---- Digital lives (§13): the round''s identities are allocated here, not by the client -------------------
+
+    public (IdentityId Identity, LifeResult Result) CreateLife(PrincipalId controller, HostId host)
+    {
+        lock (_gate)
+        {
+            var identity = _runtime.NewIdentity();
+            return identity.IsNone
+                ? (IdentityId.None, new LifeResult(LifeStatus.InvalidRequest, null, "limit"))
+                : (identity, _runtime.Lives.Create(identity, controller, host));
+        }
+    }
+
+    public LifeResult Migrate(IdentityId identity, HostId destination, bool commit, ulong control, string? reason)
+    {
+        lock (_gate)
+        {
+            if (!commit && destination.IsNone && control == 0)
+                return _runtime.Lives.CancelMigration(identity, reason ?? "cancelled");
+            if (!commit)
+                return _runtime.Lives.BeginMigration(identity, destination);
+            return _runtime.Lives.CommitMigration(identity, control);
+        }
+    }
+
+    public (CoreBackup? Backup, LifeResult Result) Backup(IdentityId identity, HostId storage)
+    {
+        lock (_gate)
+        {
+            var taken = _runtime.Lives.Snapshot(identity, storage);
+            return (taken.Backup, new LifeResult(taken.Status, _runtime.Lives.Get(identity), taken.Reason));
+        }
+    }
+
+    public LifeResult RestoreLife(IdentityId identity, HostId host, int integrity)
+    {
+        lock (_gate)
+            return _runtime.Lives.Restore(identity, host, integrity);
+    }
+
+    public LifeResult RestoreFromBackup(IdentityId identity, ulong backup, HostId host, int integrity)
+    {
+        lock (_gate)
+            return _runtime.Lives.RestoreFromBackup(identity, backup, host, integrity);
     }
 
     /// <summary>Reads the current effect list of a host, for projections.</summary>

@@ -58,6 +58,7 @@ public sealed class NetRunRuntime : IEffectTargets
         Effects.AttachTargets(new EffectTargets(this));
         Lives = new DigitalLifeRegistry(clock, Hosts, Resources);
         Presences = new PresenceRegistry(clock, Hosts, Lives);
+        Actions.AttachLives(Lives);
         if (_options.RegisterMvpEffects)
         {
             foreach (var definition in EffectRegistry.MvpDefaults())

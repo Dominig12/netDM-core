@@ -90,7 +90,11 @@ public readonly record struct ActionRequest(
     EntityId Entity,
     ProcessId Process,
     CorrelationId Correlation,
-    string IdempotencyKey);
+    string IdempotencyKey,
+    /// <summary>The digital identity acting, when the caller is a presence rather than a raw principal.</summary>
+    IdentityId Identity = default,
+    /// <summary>The controlling generation of that identity. An older generation may not act (LIFE-001).</summary>
+    ulong ControlGeneration = 0);
 
 public enum ActionStatus : byte
 {
@@ -326,6 +330,7 @@ public sealed class ActionPipeline(
     private KnowledgeStore? _knowledge;
     private INetRunTransport? _transport;
     private IHopDistance? _hops;
+    private DigitalLifeRegistry? _lives;
     private ulong _nextOperation;
 
     public int ActionCount => _actions.Count;
@@ -349,6 +354,9 @@ public sealed class ActionPipeline(
     /// the declared range is not enforced, which is why the composition root always attaches it.
     /// </summary>
     public void AttachRange(IHopDistance hops) => _hops = hops ?? throw new ArgumentNullException(nameof(hops));
+
+    /// <summary>Connects the digital lives, so an operation is fenced to the generation that controls them.</summary>
+    public void AttachLives(DigitalLifeRegistry lives) => _lives = lives ?? throw new ArgumentNullException(nameof(lives));
 
     /// <summary>Connects the per-observer knowledge store so perception actions can read and record it.</summary>
     public void AttachKnowledge(KnowledgeStore knowledge) =>
@@ -422,6 +430,11 @@ public sealed class ActionPipeline(
             return new PrepareOutcome(ActionStatus.InvalidRequest, OperationId.None, null, Reason: "idempotency_key");
         if (request.Principal.IsNone)
             return new PrepareOutcome(ActionStatus.InvalidRequest, OperationId.None, null, Reason: "principal");
+
+        // A presence of a digital life acts only with the generation that currently controls it: a message
+        // from before a migration describes a controller that no longer exists (LIFE-001).
+        if (!request.Identity.IsNone && _lives is not null && !_lives.Owns(request.Identity, request.ControlGeneration))
+            return new PrepareOutcome(ActionStatus.Forbidden, OperationId.None, null, Reason: "life_generation");
 
         var executionHost = _hosts.Get(request.ExecutionHost);
         if (executionHost is null)
