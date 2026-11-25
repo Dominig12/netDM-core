@@ -152,7 +152,7 @@
 | `pwsh -NoProfile -File tests/host-ipc.ps1` | PASS три раза подряд; проверяет, что осмотренный хост показывается с именем, а только что просканированный — без имени и с уровнем `observed` |
 | `pwsh -File scripts/check-all.ps1 -Only host` | PASS целиком дважды; в третьем прогоне упало ранее существовавшее shell-утверждение (`shell line answered: $a = self $b | count`), а не NETRUN |
 
-Нестабильность `host-ipc.ps1` — известная и ранее существовавшая: в разных прогонах падают разные shell- и presence-утверждения (`presence answered at netshell.apc2`, `shell program burst-6`, `run answered at netshell.apc3`, `shell line answered: $a = self $b | count`). Наборы NETRUN проходят каждый раз, когда до них доходит исполнение. Это записано как технический долг, а не как пройденная проверка.
+Нестабильность `host-ipc.ps1` — известная и ранее существовавшая (по прогонам 25.11.2026: 2 из 3 успешных, падения в `presence answered at netshell.apc2`, `query q-8 answered`, `shell line answered`, `run answered at netshell.apc3`, один раз — таймаут readiness при старте Host). Причина не в NETRUN: в разных прогонах падают разные shell- и presence-утверждения (`presence answered at netshell.apc2`, `shell program burst-6`, `run answered at netshell.apc3`, `shell line answered: $a = self $b | count`). Наборы NETRUN проходят каждый раз, когда до них доходит исполнение. Это записано как технический долг, а не как пройденная проверка.
 
 ## 5. ARCH-004: ограничение роста структур — выполнено
 
