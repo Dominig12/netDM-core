@@ -32,6 +32,8 @@ internal static class Program
             KnowledgeTests.Run();
         if (Matches("breach"))
             BreachTests.Run();
+        if (Matches("program"))
+            ProgramTests.Run();
 
         Console.WriteLine($"All NetRun.Core checks passed ({Count} assertions).");
         return Environment.ExitCode;

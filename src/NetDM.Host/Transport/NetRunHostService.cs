@@ -338,6 +338,17 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport
                     reason = operation.Reason,
                     result = operation.Result
                 }).ToArray(),
+                programs = _runtime.Programs.All(operationLimit).Select(program => new
+                {
+                    process = program.Process.Value,
+                    definition = program.DefinitionId,
+                    state = program.State.ToString().ToLowerInvariant(),
+                    instructions = program.InstructionCount,
+                    runs = program.CompletedRuns,
+                    fault = program.Fault,
+                    lastAction = program.LastAction,
+                    lastOutcome = program.LastOutcome
+                }).ToArray(),
                 knowledge = new { known = views.Length, stale, total = records.Length }
             };
         }

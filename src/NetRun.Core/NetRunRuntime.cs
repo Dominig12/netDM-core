@@ -8,6 +8,7 @@ public sealed record NetRunRuntimeOptions(
     int MaxOperations = 16_384,
     int MaxPrincipals = 65_536,
     int MaxKnowledgePerObserver = 1_024,
+    int MaxPrograms = 4_096,
     bool RegisterMvpEffects = true,
     bool RegisterBuiltinActions = true);
 
@@ -17,7 +18,8 @@ public sealed record NetRunTickResult(
     int ExpiredReservations,
     int ExpiredEffects,
     int ExpiredOperations,
-    int PublishedEvents)
+    int PublishedEvents,
+    int ProgramInstructions)
 {
     public bool ChangedAnything =>
         ExpiredReservations > 0 || ExpiredEffects > 0 || ExpiredOperations > 0 || PublishedEvents > 0;
@@ -50,6 +52,8 @@ public sealed class NetRunRuntime
             new ActionPipelineOptions(MaxOperations: _options.MaxOperations));
         Actions.AttachEffects(Effects);
         Actions.AttachKnowledge(Knowledge);
+        // Programs run through the same pipeline, so they need it to exist first.
+        Programs = new ProgramScheduler(clock, Actions, new ProgramOptions(MaxPrograms: _options.MaxPrograms));
         if (_options.RegisterMvpEffects)
         {
             foreach (var definition in EffectRegistry.MvpDefaults())
@@ -68,6 +72,9 @@ public sealed class NetRunRuntime
     public EffectRegistry Effects { get; }
 
     public KnowledgeStore Knowledge { get; }
+
+    /// <summary>The bounded executor of user programs (§17.3). It runs through the same action pipeline.</summary>
+    public ProgramScheduler Programs { get; }
 
     public ActionPipeline Actions { get; }
 
@@ -126,6 +133,7 @@ public sealed class NetRunRuntime
         Effects.RemoveTarget(host.Id);
         Knowledge.Forget(host.Id);
         Actions.CancelTarget(host.Id, "target_destroyed");
+        Programs.CancelHost(host.Id);
         return result;
     }
 
@@ -146,8 +154,10 @@ public sealed class NetRunRuntime
         var effects = Effects.Tick(now);
         Knowledge.Prune();
         var operations = Actions.ExpirePrepared(now) + Actions.ExpireRemote(now);
+        Programs.Reap();
+        var instructions = Programs.Advance(now);
         var published = PublishEvents();
-        return new NetRunTickResult(now, expiredReservations, effects, operations, published);
+        return new NetRunTickResult(now, expiredReservations, effects, operations, published, instructions);
     }
 
     /// <summary>
