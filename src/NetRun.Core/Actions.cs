@@ -158,6 +158,13 @@ public interface INetRunMutationScope
 
     /// <summary>Stores what the acting principal has just learned, for example from a scan.</summary>
     void Remember(HostId host, KnowledgeLevel level, int confidence);
+
+    /// <summary>
+    /// Issues a capability as the outcome of a committed action, for example a breach. The grant is ordinary:
+    /// it expires, it can be revoked, and it is rechecked at every later commit.
+    /// </summary>
+    AuthorizationResult GrantCapability(CapabilityCategory category, string? serviceKey, long lifetimeMilliseconds,
+        GrantSource source);
 }
 
 /// <summary>
@@ -896,6 +903,11 @@ public sealed class ActionPipeline(
 
         public void Remember(HostId host, KnowledgeLevel level, int confidence) =>
             pipeline._knowledge?.Remember(context.Principal, host, level, confidence);
+
+        public AuthorizationResult GrantCapability(CapabilityCategory category, string? serviceKey,
+            long lifetimeMilliseconds, GrantSource source) =>
+            pipeline._authority.Grant(context.Principal, context.TargetHost, category, serviceKey,
+                lifetimeMilliseconds, source, PrincipalId.None);
     }
 
     private void EmitEvent(string topic, string payload)

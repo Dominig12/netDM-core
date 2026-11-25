@@ -1985,11 +1985,15 @@ try {
     Assert-True ($nr1.result.principal -eq $nr2.result.principal) 'a principal name maps to one identity'
     Assert-True ($nr1.result.principal -ne $nr3.result.principal) 'different names are different principals'
 
-    $deckDecl = @{ op = 'netrun_host'; payload = @{ name = 'netrun.deck'; class = 'Cyberdeck'; capacityCu = 8
-        rateCu = 2; memorySlots = 4; storageBytes = 65536 } }
+    $deckDecl = @{ op = 'netrun_host'; payload = @{ name = 'netrun.deck'; class = 'Cyberdeck'; capacityCu = 40
+        rateCu = 10; memorySlots = 4; storageBytes = 65536 } }
     $deck = Invoke-Next $deckDecl.Clone()
     Assert-True ($deck.ok -and $deck.result.status -ceq 'ok' -and $deck.result.generation -eq 1) "a host is declared: $($deck | ConvertTo-Json -Compress -Depth 4)"
     $deckHost = $deck.result.host
+    $secret = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.secret'; class = 'Server'
+        capacityCu = 4; rateCu = 1; security = 'Secure' } }
+    $secretHost = $secret.result.host
+    Assert-True ($secret.ok) 'a hardened host is declared'
     $deckAgain = Invoke-Next $deckDecl.Clone()
     Assert-True ($deckAgain.result.status -ceq 'duplicate' -and $deckAgain.result.host -eq $deckHost) 'the same declaration is idempotent'
     $deckConflict = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.deck'; class = 'Cyberdeck'; capacityCu = 99 } }
@@ -2011,6 +2015,8 @@ try {
     $grantDiscovery = Invoke-Next @{ op = 'netrun_grant'; payload = @{ subject = 'op-netrun'; host = $deckHost
         category = 'Discovery'; lifetimeMs = 60000 } }
     Assert-True ($grantExecution.ok -and $grantRead.ok -and $grantDiscovery.ok) 'capabilities are granted'
+    Assert-True ((Invoke-Next @{ op = 'netrun_grant'; payload = @{ subject = 'op-netrun'; host = $secretHost
+        category = 'Discovery'; lifetimeMs = 60000 } }).ok) 'discovery of the hardened host is granted'
 
     $inspect = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'net.inspect'
         execution = $deckHost; target = $deckHost; key = 'nr-inspect-1' } }
@@ -2049,9 +2055,19 @@ try {
     Assert-True ($null -ne $seenOther -and -not $seenOther.identified -and [string]::IsNullOrEmpty($seenOther.name) -and
         $seenOther.level -ceq 'observed') "a scanned host is shown without its identity: $($seenOther | ConvertTo-Json -Compress)"
 
+    # The way in: a breach is an ordinary action whose outcome the server decides. Force takes a hardened
+    # host and is always noticed; the next mode cannot be cycled to inside the shared cooldown.
+    $breach = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'security.breach.forced'
+        execution = $deckHost; target = $secretHost; key = 'nr-breach' } }
+    Assert-True ($breach.result.status -ceq 'committed' -and $breach.result.result -match '"success":true' -and
+        $breach.result.result -match '"detected":true') "a forced breach opens a hardened host and is noticed: $($breach | ConvertTo-Json -Compress -Depth 4)"
+    $breachAgain = Invoke-Next @{ op = 'netrun_execute'; payload = @{ principal = 'op-netrun'; action = 'security.breach.stealth'
+        execution = $deckHost; target = $secretHost; key = 'nr-breach-2' } }
+    Assert-True ($breachAgain.result.status -ceq 'cooldown') 'every breach mode shares one cooldown'
+
     $state = Invoke-Next @{ op = 'netrun_state'; payload = @{ limit = 16 } }
     $deckState = $state.result.hosts | Where-Object { $_.host -eq $deckHost } | Select-Object -First 1
-    Assert-True ($state.ok -and $null -ne $deckState -and $deckState.bufferCu -lt 8) "the buffer reflects spent compute: $($deckState | ConvertTo-Json -Compress)"
+    Assert-True ($state.ok -and $null -ne $deckState -and $deckState.bufferCu -lt 40) "the buffer reflects spent compute: $($deckState | ConvertTo-Json -Compress)"
 
     $revoked = Invoke-Next @{ op = 'netrun_revoke'; payload = @{ grant = $grantRead.result.grant } }
     Assert-True ($revoked.ok) 'a capability is revoked'

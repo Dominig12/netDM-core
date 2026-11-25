@@ -138,6 +138,10 @@ public static class BuiltinActions
         // command, so a context menu, a hotkey and a preset can all name exactly what they will do.
         pipeline.Register(new DoorOpenAction());
         pipeline.Register(new DoorCloseAction());
+        // The way in. A breach grants a temporary control right; it never bypasses the door handler.
+        pipeline.Register(new StealthBreachAction());
+        pipeline.Register(new NormalBreachAction());
+        pipeline.Register(new ForcedBreachAction());
     }
 }
 

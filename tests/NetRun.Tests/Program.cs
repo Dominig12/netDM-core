@@ -30,6 +30,8 @@ internal static class Program
             RemoteActionTests.Run();
         if (Matches("knowledge"))
             KnowledgeTests.Run();
+        if (Matches("breach"))
+            BreachTests.Run();
 
         Console.WriteLine($"All NetRun.Core checks passed ({Count} assertions).");
         return Environment.ExitCode;

@@ -176,8 +176,9 @@ public sealed class CapabilityAuthority(ISimulationClock clock, CapabilityAuthor
     {
         if (subject.IsNone || target.IsNone)
             return new AuthorizationResult(AuthorizationStatus.Denied, CapabilityToken.None);
-        if (profile == SecurityProfile.Quarantine)
-            return new AuthorizationResult(AuthorizationStatus.PolicyDenied, CapabilityToken.None);
+        // Lockdown is not absolute: it refuses ordinary authority, but it must stay breakable and it must not
+        // hide whether something is there. A breach grant and plain discovery still pass.
+        var quarantine = profile == SecurityProfile.Quarantine;
 
         var now = _clock.NowMilliseconds;
         CapabilityGrant? best = null;
@@ -191,6 +192,9 @@ public sealed class CapabilityAuthority(ISimulationClock clock, CapabilityAuthor
                 continue;
             if (grant.ExpiresAtMilliseconds <= now)
                 continue;
+            if (quarantine && grant.Source != GrantSource.Breach &&
+                !(grant.Source == GrantSource.Granted && category == CapabilityCategory.Discovery))
+                continue;
             if (best is null || grant.Fence > best.Fence)
                 best = grant;
         }
@@ -199,6 +203,8 @@ public sealed class CapabilityAuthority(ISimulationClock clock, CapabilityAuthor
 
         // Profile defaults: an open host answers discovery and read without or during authorization; a
         // secure host does not even answer discovery without a grant.
+        if (quarantine)
+            return new AuthorizationResult(AuthorizationStatus.PolicyDenied, CapabilityToken.None);
         var implicitAllowed = profile switch
         {
             SecurityProfile.Open => category is CapabilityCategory.Discovery or CapabilityCategory.Read,

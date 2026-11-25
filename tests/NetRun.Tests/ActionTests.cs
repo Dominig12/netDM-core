@@ -33,7 +33,8 @@ internal static class ActionTests
         var descriptor = runtime.Actions.Describe("probe.read")!;
         Equal(1, descriptor.ComputeCost, "the descriptor carries the cost");
         Equal(ActionKind.Query, descriptor.Kind, "the descriptor carries the operation kind");
-        Equal(8, runtime.Actions.Catalogue(10).Length, "every distinct action id appears once");
+        Check(runtime.Actions.Catalogue(10_000).Length == runtime.Actions.ActionCount,
+            "the catalogue lists every registered action exactly once");
         Check(runtime.Actions.Describe("net.inspect") is not null && runtime.Actions.Describe("net.scan") is not null,
             "the built-in perception actions are registered by the domain itself");
         Check(runtime.Actions.Describe("device.door.open") is not null &&
