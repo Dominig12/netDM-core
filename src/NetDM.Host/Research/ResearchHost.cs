@@ -29,10 +29,10 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
     private readonly Diagnostics.DiagnosticsHost.Watch _directoryWatch = Diagnostics.QueryHost.DirectoryWatch();
     // P10: how long each stage of the background loop takes when it has work.
     private readonly Diagnostics.StageTimer _commandsTimer = new(), _linksTimer = new(), _directoryTimer = new(), _programsTimer = new();
-    private volatile bool _resetBackground;
+    private int _resetBackground;
 
     /// <summary>Starts a new background measurement at the next loop pass (load runs measure phase by phase).</summary>
-    public void ResetBackgroundTimers() => _resetBackground = true;
+    public void ResetBackgroundTimers() => Interlocked.Exchange(ref _resetBackground, 1);
     private readonly object _gate = new();
     private readonly string _directory = Path.GetFullPath(configuration.GetValue("NetDM:ResearchDirectory", "research")!);
     private ResearchLedger? _ledger;
@@ -429,41 +429,71 @@ public sealed class ResearchHost(GameNetworkService game, IConfiguration configu
     private const int SyncBatchRecords = 50;
     private long _nextExpiry;
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(20));
-        while (await timer.WaitForNextTickAsync(stoppingToken))
+        /// <summary>
+        /// Two independent loops on the same cadence: answering commands and publishing watch state on one, running
+        /// user programs and network-space activity on the other. A slow program iteration delays only the next
+        /// program tick, never the answer another service is waiting for (P6, §6.2).
+        /// </summary>
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            try
+            await Task.WhenAll(RunCommandsAsync(stoppingToken), RunProgramsAsync(stoppingToken));
+        }
+
+        private async Task RunCommandsAsync(CancellationToken stoppingToken)
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(20));
+            while (await timer.WaitForNextTickAsync(stoppingToken))
             {
-                if (_resetBackground)
+                try
                 {
-                    _resetBackground = false;
-                    foreach (var stage in new[] { _commandsTimer, _linksTimer, _directoryTimer, _programsTimer })
-                        stage.Reset();
-                    Diagnostics.ShellPrograms.ResetCounters();
+                    TakeReset();
+                    var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                    _commandsTimer.Record(started, AnswerCommands() > 0);
+                    ExpireTransfers();
+                    RecoverStorage();
+                    started = System.Diagnostics.Stopwatch.GetTimestamp();
+                    _diagnosticsWatch.Publish(game);
+                    _linksTimer.Record(started, _diagnosticsWatch.Due && _diagnosticsWatch.LastWatched > 0);
+                    started = System.Diagnostics.Stopwatch.GetTimestamp();
+                    _directoryWatch.Publish(game);
+                    _directoryTimer.Record(started, _directoryWatch.Due && _directoryWatch.LastWatched > 0);
                 }
-                var started = System.Diagnostics.Stopwatch.GetTimestamp();
-                _commandsTimer.Record(started, AnswerCommands() > 0);
-                ExpireTransfers();
-                RecoverStorage();
-                started = System.Diagnostics.Stopwatch.GetTimestamp();
-                _diagnosticsWatch.Publish(game);
-                _linksTimer.Record(started, _diagnosticsWatch.Due && _diagnosticsWatch.LastWatched > 0);
-                started = System.Diagnostics.Stopwatch.GetTimestamp();
-                _directoryWatch.Publish(game);
-                _directoryTimer.Record(started, _directoryWatch.Due && _directoryWatch.LastWatched > 0);
-                started = System.Diagnostics.Stopwatch.GetTimestamp();
-                Diagnostics.ShellPrograms.Tick(game);
-                Diagnostics.NetworkSpace.Tick(game);
-                _programsTimer.Record(started, Diagnostics.ShellPrograms.Due && Diagnostics.ShellPrograms.Count > 0);
-            }
-            catch (Exception exception)
-            {
-                log.LogError(exception, "Research command handling failed.");
+                catch (Exception exception)
+                {
+                    log.LogError(exception, "Research command handling failed.");
+                }
             }
         }
-    }
+
+        private async Task RunProgramsAsync(CancellationToken stoppingToken)
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(20));
+            while (await timer.WaitForNextTickAsync(stoppingToken))
+            {
+                try
+                {
+                    TakeReset();
+                    var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                    Diagnostics.ShellPrograms.Tick(game);
+                    Diagnostics.NetworkSpace.Tick(game);
+                    _programsTimer.Record(started, Diagnostics.ShellPrograms.Due && Diagnostics.ShellPrograms.Count > 0);
+                }
+                catch (Exception exception)
+                {
+                    log.LogError(exception, "Program tick failed.");
+                }
+            }
+        }
+
+        /// <summary>Consumes a pending reset once; whichever loop takes it resets every stage timer.</summary>
+        private void TakeReset()
+        {
+            if (Interlocked.Exchange(ref _resetBackground, 0) == 0)
+                return;
+            foreach (var stage in new[] { _commandsTimer, _linksTimer, _directoryTimer, _programsTimer })
+                stage.Reset();
+            Diagnostics.ShellPrograms.ResetCounters();
+        }
 
     /// <summary>Answers the commands that reached research servers; the ledger decides, the network carries the answer.</summary>
     public int AnswerCommands()
