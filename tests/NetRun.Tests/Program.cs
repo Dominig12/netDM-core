@@ -38,6 +38,8 @@ internal static class Program
             ProgramSourceTests.Run();
         if (Matches("life"))
             DigitalLifeTests.Run();
+        if (Matches("external"))
+            ExternalWorldTests.Run();
 
         Console.WriteLine($"All NetRun.Core checks passed ({Count} assertions).");
         return Environment.ExitCode;
