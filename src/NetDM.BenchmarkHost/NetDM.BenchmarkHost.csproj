@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../NetDM.Core/NetDM.Core.csproj" />
+    <ProjectReference Include="../NetDM.Benchmarks/NetDM.Benchmarks.csproj" />
+  </ItemGroup>
+</Project>
