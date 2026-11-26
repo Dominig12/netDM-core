@@ -1,5 +1,5 @@
 using NetDM.Core;
-using NetDM.Host.Benchmarks;
+using NetDM.Benchmarks;
 using NetDM.Host.Transport;
 
 var workingDirectory = Directory.GetCurrentDirectory();

@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace NetDM.Host.Benchmarks;
+namespace NetDM.Benchmarks;
 
 /// <summary>
 /// A low-overhead, independent observation thread. It does not share

@@ -2,7 +2,9 @@ using System.IO.Compression;
 using System.Text.Json;
 using NetDM.Core;
 
-namespace NetDM.Host.Benchmarks;
+using Microsoft.Extensions.Logging;
+
+namespace NetDM.Benchmarks;
 
 /// <summary>
 /// A reproducible comparison using identical seed, network size and offered
