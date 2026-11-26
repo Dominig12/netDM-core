@@ -42,9 +42,9 @@
 
 | Переменная | Состояние |
 |---|---|
-| `NETDM_RESEARCH_MODE` | **нигде не читается**, включение безусловное (`research_shadow.dm:159`); флаг в скриптах вводит в заблуждение |
-| `NETDM_MESSENGER_MODE` | **нигде не читается**; `authoritative = TRUE` жёстко, `set_authoritative(FALSE)` возвращает FALSE |
-| `NETDM_RADIO_MODE` | читается, но дефолт `shadow` ломает речь → снимается вместе с L-5 |
+| `NETDM_RESEARCH_MODE` | **снят (L-6)**: код его не читал, власть задана безусловно; параметры `-ResearchMode` удалены из трёх скриптов |
+| `NETDM_MESSENGER_MODE` | **снят (L-4)**: код его не читал; параметры `-MessengerMode` удалены |
+| `NETDM_RADIO_MODE` | **снят (L-5)**: режим убран вместе с теневым пилотом; параметры `-RadioMode` удалены |
 | `NETDM_CAMERA_MODE`, `NETDM_NET_IMMERSION`, `NETDM_NET_LIFE` | **реальные механизмы**, но за env-флагом; по документу должны быть конфигом раунда, а не переменной окружения |
 
 ## Дублирующий авторитет (отдельные этапы, не входят в L-1…L-8)
@@ -90,4 +90,44 @@
 
 Попутно восстановлены `netdm_atmos_instance` и `netdm_tick_of`, случайно попавшие под рез: они не относились к сравнению и нужны доставке. Это тот же урок, что и с мессенджером — резать надо по одному шагу и сразу проверять.
 
-Остались L-6 (зеркало техуэба), L-7 (мелочи), L-8 (бенчмарки в production-хосте).
+Остался L-8 (бенчмарки в production-хосте).
+
+## L-6 закрыт: у зеркала техуэба один писатель (26.11.2026)
+
+Очередь называла L-6 «снять зеркало». Аудит кода перед резом показал обратное: само зеркало
+(seed, income, grant, debit, import, boost) нужно — без него `authorize()` спроецировал бы пустой
+реестр на веб и стёр бы его очки. Легаси оказалось не зеркало, а **сверка** зеркала с вебом и
+**второй путь покупки**.
+
+| Шаг | Что снято | Проверка |
+|---|---|---|
+| A | `console_purchased`, `send_purchases`, список `waiting` и барьер `confirmed_seq` — второй путь покупки, у которого не осталось вызовов: `research_node` консоли всегда идёт через `console_research` | сборка 0/0; `research_authoritative`, `research_p6`, `.../outbox` — PASS |
+| B | `compared()` — сверка баланса и знаний с вебом; `mismatch()` с выравниванием (`research_import` + `research_debit`), `mismatch_reasons`, `last_drift`/`max_drift`, `NETDM_RESEARCH_COMPARE` | те же три — PASS |
+| C | Поле `authoritative` у покупки и теневые ветки в `purchase_answered`, `purchase_accepted`, `expire_purchases`, `reset_session` | те же три — PASS |
+
+Исход эффекта «shadow» стал «foreign»: эффект покупки не этого раунда, применять нечего.
+`state()` показывает только реальные числа; ответы леджера считаются в `purchase_outcomes`
+(тест `research_authoritative` читает оттуда отказ `insufficient_points`).
+
+Побочно сняты фиктивные переключатели: `NETDM_RESEARCH_MODE`, `NETDM_MESSENGER_MODE`,
+`NETDM_RADIO_MODE` не читались кодом, поэтому параметры `-ResearchMode/-MessengerMode/-RadioMode`
+убраны из `play-bluemoon.ps1`, `start-bluemoon-stand.ps1` и `test-bluemoon-unit.ps1`, а подсказка
+стенда больше их не обещает. `play-bluemoon.ps1` потерял и зонтичный `-Mode`.
+
+Файл: **1680 → 1553 строки** (`research_shadow.dm`, −175/+48 в диффе этого захода).
+
+## L-7 закрыт: дублирующий сид и устаревшие комментарии (26.11.2026)
+
+| Что | Где | Почему | Проверка |
+|---|---|---|---|
+| Второй сид населения в том же тике | `netdm_observe.dm`, `publish_ack` | первый блок срабатывает раньше в том же вызове, второй не может добавить ничего | `network_life_physical` — PASS |
+| Описания «in Shadow mode» и сравнения, которого больше нет | доки полей `telemetry/research/messenger/radio/doors`, шапка `atmos_telemetry.dm` | документация обещала снятое | — |
+| Мёртвые счётчики сверки (`compared`, `matched`, `legacy_only`, `netdm_only`), `reasons`, `report["legacy"]`, неиспользуемый `NETDM_TELEMETRY_SETTLE` | `atmos_telemetry.dm` | учёт без второй стороны | `atmos_telemetry`, `network_air_alarm` — PASS |
+
+Заодно задержка доставки стала считаться: `push(latencies, ...)` на принятом отчёте, а
+`unmirrored` инкрементируется там, где отчёт не удалось опубликовать. Раньше `delivery_p50/p95`
+всегда печатали `-`, а счётчик не рос.
+
+Полный живой набор после L-6 и L-7: **23 из 24 PASS**, единственное падение — `door_station`
+(«The station needs door buttons: 2»): в герметичном мире нет кнопок blast-дверей. Это
+ограничение профиля, а не регрессия; из-за него `clean_run.lk` полного набора — `False`.
