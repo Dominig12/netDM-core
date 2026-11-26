@@ -139,9 +139,7 @@ internal static class DefenderTests
         Check(runtime.Agents.Deploy(owner, guarded.Id, Virus(), 3, 100).Succeeded, "the owner plants a virus too");
 
         // The owner repairs its own host: taking its own strain away is not an intrusion.
-        foreach (var host in new[] { deck.Id, guarded.Id })
-            runtime.Authority.Grant(owner, host, CapabilityCategory.Control, null, 600_000,
-                GrantSource.Granted, PrincipalId.None);
+        GrantWork(runtime, owner, deck.Id, guarded.Id);
         runtime.Knowledge.Remember(owner, guarded.Id, KnowledgeLevel.Observed, 100);
         var purge = runtime.Actions.GetAction("net.purge")!;
         var ownRepair = runtime.Actions.Execute(new ActionRequest(owner, deck.Id, guarded.Id,
@@ -152,9 +150,7 @@ internal static class DefenderTests
 
         // Somebody else clearing the guard is an intrusion the host can see.
         Check(runtime.Agents.Deploy(owner, guarded.Id, Ice(), 0, 100).Succeeded, "the guard is back on duty");
-        foreach (var host in new[] { deck.Id, guarded.Id })
-            runtime.Authority.Grant(intruder, host, CapabilityCategory.Control, null, 600_000,
-                GrantSource.Granted, PrincipalId.None);
+        GrantWork(runtime, intruder, deck.Id, guarded.Id);
         runtime.Knowledge.Remember(intruder, guarded.Id, KnowledgeLevel.Observed, 100);
         var hostile = runtime.Actions.Execute(new ActionRequest(intruder, deck.Id, guarded.Id,
             EntityId.None, ProcessId.None, CorrelationId.None, "purge-hostile"), purge);
@@ -213,6 +209,20 @@ internal static class DefenderTests
         runtime.Tick();
         Equal(before, runtime.Alerts.Level(vault.Id),
             "a host that already lets the principal look around raises nothing further");
+    }
+
+    /// <summary>Everything an action needs to run from a host: spend its compute and command the target.</summary>
+    private static void GrantWork(NetRunRuntime runtime, PrincipalId actor, HostId deck, HostId target)
+    {
+        foreach (var (host, category) in new[]
+                 {
+                     (deck, CapabilityCategory.Execution),
+                     (deck, CapabilityCategory.Control),
+                     (target, CapabilityCategory.Control)
+                 })
+        {
+            runtime.Authority.Grant(actor, host, category, null, 600_000, GrantSource.Granted, PrincipalId.None);
+        }
     }
 
     /// <summary>Grants an attacker what every attempt needs: a place to execute and knowledge of the target.</summary>
