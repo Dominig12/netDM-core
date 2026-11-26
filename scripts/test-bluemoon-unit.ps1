@@ -9,13 +9,7 @@ param(
     # Map config JSON for UNIT_TESTS builds without LOWMEMORYMODE, relative to the build directory.
     [string] $Map,
     [switch] $NoObserve,
-    [switch] $NetworkCameras,
-    # 'authoritative' lets the Host research ledger take over once the mirror is synchronized (P5 canary).
-    [ValidateSet('shadow', 'authoritative')] [string] $ResearchMode = 'shadow',
-    # 'authoritative' sends PDA messages through message servers over netDM instead of telecomms (P7).
-    [ValidateSet('shadow', 'authoritative')] [string] $MessengerMode = 'shadow',
-    # 'authoritative' sends radio speech to telecomms receivers over netDM; broadcasting stays subspace (P8).
-    [ValidateSet('shadow', 'authoritative')] [string] $RadioMode = 'shadow'
+    [switch] $NetworkCameras
 )
 # Runs focused BlueMoon unit tests in a real DreamDaemon with a live netDM Host on a private pipe.
 $ErrorActionPreference = 'Stop'
@@ -57,9 +51,6 @@ try {
     if (-not $ready) { throw 'Host IPC did not become ready.' }
     $gameEnv = $common + @{ NETDM_SERVER_ID = 'unit-p3'; NETDM_TEST_HTTP = "http://127.0.0.1:$port" }
     if (-not $NoObserve) { $gameEnv.NETDM_OBSERVE = '1' }
-    $gameEnv.NETDM_RESEARCH_MODE = $ResearchMode
-    $gameEnv.NETDM_MESSENGER_MODE = $MessengerMode
-    $gameEnv.NETDM_RADIO_MODE = $RadioMode
     if ($NetworkCameras) { $gameEnv.NETDM_CAMERA_MODE = 'authoritative' }
 # The dive layer is opt-in per round: the automated test round enables it explicitly.
 $gameEnv.NETDM_NET_IMMERSION = '1'

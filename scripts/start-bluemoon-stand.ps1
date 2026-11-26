@@ -9,12 +9,6 @@ param(
     [string] $BridgeWait = 'win32',
     # Logs the bridge worker counters every two minutes. The status call costs most of a tick, so it is off by default.
     [switch] $BridgeTrace,
-    # 'authoritative': the Host research ledger takes over research on the stand (P5 canary).
-    [ValidateSet('shadow', 'authoritative')] [string] $ResearchMode = 'shadow',
-    # 'authoritative': PDA messages go through message servers over netDM (P7).
-    [ValidateSet('shadow', 'authoritative')] [string] $MessengerMode = 'shadow',
-    # 'authoritative': radio speech reaches telecomms receivers over netDM (P8).
-    [ValidateSet('shadow', 'authoritative')] [string] $RadioMode = 'shadow',
     [switch] $NetworkCameras,
     [string] $HostDll = 'src/NetDM.Host/bin/Release/net10.0/NetDM.Host.dll',
     [string] $DreamDaemon = (Join-Path ${env:ProgramFiles(x86)} 'BYOND/bin/dd.exe')
@@ -44,9 +38,7 @@ try {
             'Logging__LogLevel__NetDM.Host.Transport.PipeHostedService' = $IpcLogLevel }) -NoNewWindow -PassThru `
         -RedirectStandardOutput (& $log 'host') -RedirectStandardError (& $log 'host-err')
     $game = Start-Process $DreamDaemon -ArgumentList 'tgstation.m.dmb', "$GamePort", '-trusted', '-invisible' `
-        -WorkingDirectory $build -Environment ($common + @{ NETDM_OBSERVE = '1'; NETDM_SERVER_ID = 'stand'; NETDM_RESEARCH_MODE = $ResearchMode
-            NETDM_MESSENGER_MODE = $MessengerMode
-            NETDM_RADIO_MODE = $RadioMode
+        -WorkingDirectory $build -Environment ($common + @{ NETDM_OBSERVE = '1'; NETDM_SERVER_ID = 'stand'
             NETDM_CAMERA_MODE = $(if ($NetworkCameras) { 'authoritative' } else { 'legacy' })
             NETDM_BRIDGE_WAIT = $BridgeWait; NETDM_BRIDGE_TRACE = $(if ($BridgeTrace) { '1' } else { '0' }) }) -NoNewWindow -PassThru `
         -RedirectStandardOutput (& $log 'dd') -RedirectStandardError (& $log 'dd-err')

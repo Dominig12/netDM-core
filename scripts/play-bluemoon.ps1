@@ -1,11 +1,6 @@
 ﻿param(
     # MetaStation and Box Station have telecomms and a message server; runtime is the small debug station.
     [ValidateSet('metastation', 'boxstation', 'runtime')] [string] $Map = 'metastation',
-    # One switch for research, messenger and radio; each can be overridden below.
-    [ValidateSet('shadow', 'authoritative')] [string] $Mode = 'authoritative',
-    [ValidateSet('', 'shadow', 'authoritative')] [string] $ResearchMode = '',
-    [ValidateSet('', 'shadow', 'authoritative')] [string] $MessengerMode = '',
-    [ValidateSet('', 'shadow', 'authoritative')] [string] $RadioMode = '',
     [switch] $NetworkCameras,
     [int] $GamePort = 51515,
     [int] $Minutes = 240,
@@ -27,10 +22,6 @@ foreach ($path in $BuildDirectory, $BridgeDll, $GameRepository) {
 }
 $dreamDaemon = Join-Path ${env:ProgramFiles(x86)} 'BYOND/bin/dd.exe'
 if (-not (Test-Path -LiteralPath $dreamDaemon)) { throw "BYOND is not installed: $dreamDaemon" }
-$research = if ($ResearchMode) { $ResearchMode } else { $Mode }
-$messenger = if ($MessengerMode) { $MessengerMode } else { $Mode }
-$radio = if ($RadioMode) { $RadioMode } else { $Mode }
-
 if (-not $NoBuild) {
     Write-Host '== Building the netDM Host'
     dotnet build src/NetDM.Host -c Release -v quiet -nologo | Select-String -Pattern ' error |Build succeeded' | ForEach-Object { $_.Line }
@@ -90,21 +81,21 @@ if ($Map -ne 'runtime') {
 
 Write-Host @"
 
-== Стенд netDM: карта=$Map исследования=$research мессенджер=$messenger радио=$radio
+== Стенд netDM: карта=$Map
 Сетевые камеры: $($NetworkCameras.IsPresent)
 Подключение: DreamSeeker -> Open location -> byond://127.0.0.1:$GamePort
 Локальное подключение получает права админа. Раунд: в лобби Start Now (вкладка Server) или Ready.
 
 Что проверить:
-  Исследования ($research)
+  Исследования (реестр Host)
     - Консоль R&D: исследовать узел; очки сервера консоли уменьшаются один раз.
     - ПКМ по консоли -> "Собрать очки на сервер": перевод с другого сервера сети.
     - Диск: "Download to disk", затем "Upload disk" на другой консоли — только знания, без очков.
-  Мессенджер ($messenger)
+  Мессенджер (через серверы сообщений)
     - Два КПК: сообщение приходит один раз, "Ответ" и "Блок" работают.
     - Выключить message server (серверная телекомма): "ERROR: Server is not responding."
     - КПК вдали от APC (космос, глухие техтоннели): отправителю приходит "not delivered".
-  Радио ($radio)
+  Радио (через телекомм)
     - Говорить в общий канал из разных отделов: слышат все.
     - Вдали от APC гарнитура не дотягивается до телекомма; обычная рация через 2 с шлёт резерв.
     - Выключить приёмники телекомма: речь по подпространству никто не слышит.
@@ -117,5 +108,5 @@ Write-Host @"
 Остановка: Ctrl+C или файл $BuildDirectory\netdm-stand.stop
 "@
 pwsh -NoProfile -File scripts\start-bluemoon-stand.ps1 -BuildDirectory $BuildDirectory -BridgeDll $BridgeDll -GamePort $GamePort `
-    -Minutes $Minutes -ResearchMode $research -MessengerMode $messenger -RadioMode $radio -DreamDaemon $dreamDaemon `
+    -Minutes $Minutes -DreamDaemon $dreamDaemon `
     -NetworkCameras:$($NetworkCameras.IsPresent)
