@@ -1,0 +1,8 @@
+LIBRARY netdm_byond
+EXPORTS
+    netdm_init
+    netdm_send
+    netdm_poll
+    netdm_status
+    netdm_reconnect
+    netdm_shutdown

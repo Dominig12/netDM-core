@@ -6,3 +6,9 @@ obj/
 TestResults/
 
 benchmarks/results/
+deploy/bluemoon/secrets/
+
+# Portable Win32 BYOND bridge build (native/byond/build.ps1).
+native/byond/toolchain/
+native/byond/build/
+native/byond/out/

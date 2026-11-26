@@ -1,0 +1,417 @@
+namespace NetRun.Core;
+
+/// <summary>The registered effect vocabulary (§7.1). An effect is never an arbitrary property write.</summary>
+public enum EffectKind : byte
+{
+    Damage, Repair, Drain, Recharge, Slow, Accelerate, Silence, Shield, Resistance,
+    Cloak, Reveal, Corrupt, Jam, Mark, Disable
+}
+
+/// <summary>How a second application of the same kind on the same target behaves (PRIM-003).</summary>
+public enum EffectStacking : byte
+{
+    /// <summary>Separate stacks up to the definition's limit.</summary>
+    Stack,
+    /// <summary>One instance whose duration is extended.</summary>
+    Refresh,
+    /// <summary>The newest application replaces the previous instance.</summary>
+    Replace,
+    /// <summary>One instance keeps the higher magnitude.</summary>
+    Strongest,
+    /// <summary>Instances coexist regardless of magnitude and do not interact.</summary>
+    Independent,
+    /// <summary>Only one instance of this kind may exist on the target; a second is refused.</summary>
+    Exclusive
+}
+
+public enum EffectStatus : byte
+{
+    Ok, Applied, Refreshed, Replaced, Stacked, Rejected,
+    UnknownKind, MagnitudeOutOfRange, DurationOutOfRange, TargetGone, LimitReached, UnknownEffect
+}
+
+public readonly record struct EffectInstanceId(ulong Value)
+{
+    public static EffectInstanceId None => default;
+
+    public bool IsNone => Value == 0;
+
+    public override string ToString() => Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+}
+
+/// <summary>
+/// The server-side definition of an effect: the only place that decides how strong, how long and how far
+/// an effect may be. A program supplies an intent inside these ranges and never a raw number of damage
+/// points, a duration or a removal of a critical effect (PRIM-003).
+/// </summary>
+public sealed record EffectDefinition(
+    EffectKind Kind,
+    int MaxMagnitude,
+    int MaxDurationMilliseconds,
+    int RangeHops,
+    int ComputeCost,
+    bool Removable,
+    EffectStacking Stacking = EffectStacking.Refresh,
+    int MaxStacks = 1,
+    string? Documentation = null);
+
+/// <summary>One live effect on one target.</summary>
+public sealed record EffectInstance(
+    EffectInstanceId Id,
+    EffectKind Kind,
+    HostId Target,
+    PrincipalId Source,
+    int Magnitude,
+    int Stacks,
+    long AppliedAtMilliseconds,
+    long ExpiresAtMilliseconds,
+    string Origin);
+
+/// <summary>
+/// What an effect actually changes in the world. The registry owns the rules; the owner of the state applies
+/// them, so a definition never reaches into a pool or a life by itself (ARCH-001).
+/// </summary>
+public interface IEffectTargets
+{
+    /// <summary>Takes compute out of the host. Returns how much was really taken.</summary>
+    long DrainCompute(HostId host, long milliCu);
+
+    /// <summary>Damages the core hosted there, after its resistance. Returns the damage taken.</summary>
+    int DamageLife(HostId host, int amount);
+
+    /// <summary>Repairs the core hosted there. Returns the amount restored.</summary>
+    int RepairLife(HostId host, int amount);
+
+    /// <summary>Damage the target currently resists, from active protective effects.</summary>
+    int Resistance(HostId host);
+}
+
+public sealed record EffectResult(EffectStatus Status, EffectInstance? Effect, int Applied = 0)
+{
+    /// <summary>Whether the effect both matched its definition and changed something.</summary>
+    public bool Changed => Status is EffectStatus.Applied or EffectStatus.Refreshed or EffectStatus.Replaced
+        or EffectStatus.Stacked && Applied > 0;
+}
+
+public sealed record EffectRegistryOptions(int MaxEffects = 16_384, int MaxEffectsPerTarget = 32);
+
+/// <summary>
+/// The authoritative effect registry and its live instances. Every application is checked against the
+/// definition, and the stacking rule is applied here rather than in the caller, so the same effect from
+/// a player, an NPC and a script behaves identically (§7.1, PRIM-001).
+/// </summary>
+public sealed class EffectRegistry(ISimulationClock clock, EffectRegistryOptions? options = null)
+{
+    private readonly ISimulationClock _clock = clock ?? throw new ArgumentNullException(nameof(clock));
+    private readonly EffectRegistryOptions _options = options ?? new EffectRegistryOptions();
+    private IEffectTargets? _targets;
+    private readonly Dictionary<EffectKind, EffectDefinition> _definitions = [];
+    private readonly Dictionary<ulong, EffectInstance> _instances = [];
+    private readonly Dictionary<ulong, List<ulong>> _byTarget = [];
+    private ulong _nextInstance;
+
+    public int DefinitionCount => _definitions.Count;
+
+    public int InstanceCount => _instances.Count;
+
+    public void Register(EffectDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (!Enum.IsDefined(definition.Kind))
+            throw new ArgumentException("Unknown effect kind.", nameof(definition));
+        if (definition.MaxMagnitude is < 1 or > 1_000_000 || definition.MaxDurationMilliseconds is < 0 or > 3_600_000 ||
+            definition.RangeHops is < 0 or > 64 || definition.ComputeCost is < 0 or > 10_000 ||
+            definition.MaxStacks is < 1 or > 64)
+            throw new ArgumentException($"Invalid definition for effect {definition.Kind}.", nameof(definition));
+        if (!_definitions.TryAdd(definition.Kind, definition))
+            throw new ArgumentException($"Effect {definition.Kind} is already registered.");
+    }
+
+    /// <summary>Connects the state an effect changes. Without it effects are recorded but inert.</summary>
+    public void AttachTargets(IEffectTargets targets) => _targets = targets ?? throw new ArgumentNullException(nameof(targets));
+
+    public EffectDefinition? Definition(EffectKind kind) => _definitions.GetValueOrDefault(kind);
+
+    /// <summary>
+    /// Applies an effect within the definition's bounds. Out-of-range magnitude or duration is refused
+    /// rather than clamped, so a caller cannot discover the ceiling by probing.
+    /// </summary>
+    /// <summary>
+    /// Applies an effect and then lets it change the state it names: a drain takes compute, damage reaches the
+    /// core hosted there, a shield resists the next damage. An effect that matched its definition but changed
+    /// nothing reports so, instead of claiming a result (PRIM-003).
+    /// </summary>
+    public EffectResult Apply(EffectKind kind, HostId target, PrincipalId source, int magnitude,
+        int durationMilliseconds, string origin)
+    {
+        var result = ApplyCore(kind, target, source, magnitude, durationMilliseconds, origin);
+        return result.Status is EffectStatus.Applied or EffectStatus.Refreshed or EffectStatus.Replaced
+            or EffectStatus.Stacked
+            ? result with { Applied = Consequence(result.Effect!) }
+            : result;
+    }
+
+    private int Consequence(EffectInstance instance)
+    {
+        if (_targets is null)
+            return 0;
+        switch (instance.Kind)
+        {
+            case EffectKind.Drain:
+                return (int)(_targets.DrainCompute(instance.Target, instance.Magnitude * 1000L) / 1000);
+            case EffectKind.Damage:
+                // Resistance from a live shield reduces the incoming damage, never below one point.
+                return _targets.DamageLife(instance.Target,
+                    Math.Max(1, instance.Magnitude - _targets.Resistance(instance.Target)));
+            case EffectKind.Repair:
+                return _targets.RepairLife(instance.Target, instance.Magnitude);
+            default:
+                // Perception and traffic effects change no pool: they stay live for the readers.
+                return instance.Magnitude;
+        }
+    }
+
+    private EffectResult ApplyCore(EffectKind kind, HostId target, PrincipalId source, int magnitude,
+        int durationMilliseconds, string origin)
+    {
+        if (!_definitions.TryGetValue(kind, out var definition))
+            return new EffectResult(EffectStatus.UnknownKind, null);
+        if (target.IsNone || source.IsNone || magnitude < 1 || magnitude > definition.MaxMagnitude)
+            return new EffectResult(EffectStatus.MagnitudeOutOfRange, null);
+        if (durationMilliseconds < 0 || durationMilliseconds > definition.MaxDurationMilliseconds)
+            return new EffectResult(EffectStatus.DurationOutOfRange, null);
+
+        var now = _clock.NowMilliseconds;
+        // A definition with a zero ceiling is instantaneous: it reports the application and keeps no
+        // instance, so an instant damage or repair never occupies the per-target budget.
+        if (definition.MaxDurationMilliseconds == 0)
+            return new EffectResult(EffectStatus.Applied,
+                new EffectInstance(EffectInstanceId.None, kind, target, source, magnitude, 1, now, now, origin));
+
+        if (_instances.Count >= _options.MaxEffects)
+            return new EffectResult(EffectStatus.LimitReached, null);
+        if (!_byTarget.TryGetValue(target.Value, out var targetEffects))
+        {
+            targetEffects = [];
+            _byTarget[target.Value] = targetEffects;
+        }
+        if (targetEffects.Count >= _options.MaxEffectsPerTarget)
+            return new EffectResult(EffectStatus.LimitReached, null);
+
+        var expiry = now + durationMilliseconds;
+        ExpireOn(target, now);
+
+        var existing = FindSame(kind, target, origin);
+        switch (definition.Stacking)
+        {
+            case EffectStacking.Exclusive when existing is not null:
+                return new EffectResult(EffectStatus.Rejected, existing);
+            case EffectStacking.Refresh when existing is not null:
+            {
+                var refreshed = existing with { ExpiresAtMilliseconds = expiry, Magnitude = magnitude };
+                _instances[refreshed.Id.Value] = refreshed;
+                return new EffectResult(EffectStatus.Refreshed, refreshed);
+            }
+            case EffectStacking.Replace when existing is not null:
+            {
+                var replaced = existing with
+                {
+                    Magnitude = magnitude, ExpiresAtMilliseconds = expiry, AppliedAtMilliseconds = now,
+                    Source = source, Origin = origin
+                };
+                _instances[replaced.Id.Value] = replaced;
+                return new EffectResult(EffectStatus.Replaced, replaced);
+            }
+            case EffectStacking.Strongest when existing is not null:
+            {
+                if (existing.Magnitude >= magnitude)
+                    return new EffectResult(EffectStatus.Rejected, existing);
+                var stronger = existing with
+                {
+                    Magnitude = magnitude, ExpiresAtMilliseconds = expiry, AppliedAtMilliseconds = now,
+                    Source = source, Origin = origin
+                };
+                _instances[stronger.Id.Value] = stronger;
+                return new EffectResult(EffectStatus.Replaced, stronger);
+            }
+            case EffectStacking.Stack when existing is not null && existing.Stacks < definition.MaxStacks:
+            {
+                var stacked = existing with
+                {
+                    Stacks = existing.Stacks + 1, ExpiresAtMilliseconds = expiry, AppliedAtMilliseconds = now
+                };
+                _instances[stacked.Id.Value] = stacked;
+                return new EffectResult(EffectStatus.Stacked, stacked);
+            }
+            case EffectStacking.Stack when existing is not null:
+                return new EffectResult(EffectStatus.Rejected, existing);
+        }
+
+        var instance = new EffectInstance(new EffectInstanceId(++_nextInstance), kind, target, source, magnitude,
+            1, now, expiry, origin);
+        _instances[instance.Id.Value] = instance;
+        _byTarget[target.Value].Add(instance.Id.Value);
+        return new EffectResult(EffectStatus.Applied, instance);
+    }
+
+    private EffectInstance? FindSame(EffectKind kind, HostId target, string origin)
+    {
+        if (!_byTarget.TryGetValue(target.Value, out var list))
+            return null;
+        foreach (var id in list)
+        {
+            if (!_instances.TryGetValue(id, out var instance) || instance.Kind != kind)
+                continue;
+            // Independent instances never merge, even with the same origin.
+            if (instance.Origin.Length == 0)
+                continue;
+            return instance;
+        }
+        return null;
+    }
+
+    /// <summary>Removes one effect. A definition that is not removable refuses removal.</summary>
+    public EffectStatus Remove(EffectInstanceId id)
+    {
+        if (!_instances.TryGetValue(id.Value, out var instance))
+            return EffectStatus.UnknownEffect;
+        if (_definitions.TryGetValue(instance.Kind, out var definition) && !definition.Removable)
+            return EffectStatus.Rejected;
+        return RemoveCore(instance) ? EffectStatus.Ok : EffectStatus.UnknownEffect;
+    }
+
+    /// <summary>
+    /// Removes the effects whose lifecycle ends with the thing that applied them, for example a stopped
+    /// program. Effects that the definition marks as persisting stay (PRIM-003).
+    /// </summary>
+    public int RemoveByOrigin(string origin)
+    {
+        if (string.IsNullOrEmpty(origin))
+            return 0;
+        var removed = 0;
+        foreach (var instance in _instances.Values.ToArray())
+        {
+            if (!string.Equals(instance.Origin, origin, StringComparison.Ordinal))
+                continue;
+            if (_definitions.TryGetValue(instance.Kind, out var definition) && !definition.Removable)
+                continue;
+            if (RemoveCore(instance))
+                removed++;
+        }
+        return removed;
+    }
+
+    /// <summary>Removes everything on a target, for example when the target host is destroyed.</summary>
+    public int RemoveTarget(HostId target)
+    {
+        if (!_byTarget.TryGetValue(target.Value, out var list))
+            return 0;
+        var removed = 0;
+        foreach (var id in list.ToArray())
+            if (_instances.TryGetValue(id, out var instance) && RemoveCore(instance))
+                removed++;
+        _byTarget.Remove(target.Value);
+        return removed;
+    }
+
+    private bool RemoveCore(EffectInstance instance)
+    {
+        if (!_instances.Remove(instance.Id.Value))
+            return false;
+        if (_byTarget.TryGetValue(instance.Target.Value, out var list))
+            list.Remove(instance.Id.Value);
+        return true;
+    }
+
+    private void ExpireOn(HostId target, long now)
+    {
+        if (!_byTarget.TryGetValue(target.Value, out var list))
+            return;
+        foreach (var id in list.ToArray())
+        {
+            if (_instances.TryGetValue(id, out var instance) && instance.ExpiresAtMilliseconds <= now)
+                RemoveCore(instance);
+        }
+    }
+
+    /// <summary>Expires every effect whose duration ran out. Called by the owner with game time.</summary>
+    public int Tick(long nowMilliseconds)
+    {
+        var expired = 0;
+        foreach (var instance in _instances.Values.ToArray())
+        {
+            if (instance.ExpiresAtMilliseconds > nowMilliseconds)
+                continue;
+            if (RemoveCore(instance))
+                expired++;
+        }
+        return expired;
+    }
+
+    /// <summary>
+    /// Whether the host hides what stands on it from other observers (§8.2 CLOAK / REVEAL): a live cloak with no
+    /// live reveal on the same host. The rule lives here, next to the instances it reads, so the map and any
+    /// future perception share one answer instead of each inventing its own.
+    /// </summary>
+    public bool IsMasked(HostId host)
+    {
+        if (host.IsNone || !_byTarget.TryGetValue(host.Value, out var list))
+            return false;
+        var now = _clock.NowMilliseconds;
+        var cloaked = false;
+        var revealed = false;
+        foreach (var id in list)
+        {
+            if (!_instances.TryGetValue(id, out var instance) || instance.ExpiresAtMilliseconds <= now)
+                continue;
+            if (instance.Kind == EffectKind.Cloak)
+                cloaked = true;
+            else if (instance.Kind == EffectKind.Reveal)
+                revealed = true;
+        }
+        return cloaked && !revealed;
+    }
+
+    /// <summary>Live effects on a target, newest last. A bounded read model for projections.</summary>
+    public EffectInstance[] On(HostId target, int limit)    {
+        if (!_byTarget.TryGetValue(target.Value, out var list))
+            return [];
+        var count = Math.Min(Math.Max(limit, 0), list.Count);
+        var result = new EffectInstance[count];
+        var index = 0;
+        foreach (var id in list)
+        {
+            if (index >= count)
+                break;
+            if (_instances.TryGetValue(id, out var instance))
+                result[index++] = instance;
+        }
+        return count == index ? result : result[..index];
+    }
+
+    /// <summary>
+    /// The starting vocabulary of the MVP (§7.3). Magnitudes are authoring defaults, not balance: the
+    /// definitions are configuration and content replaces them through registration.
+    /// </summary>
+    public static IEnumerable<EffectDefinition> MvpDefaults()
+    {
+        yield return new EffectDefinition(EffectKind.Damage, 40, 0, 0, 2, false, EffectStacking.Independent, 1,
+            "Мгновенное повреждение целостности.");
+        yield return new EffectDefinition(EffectKind.Repair, 30, 0, 0, 3, false, EffectStacking.Independent, 1,
+            "Восстановление целостности из разрешённого источника.");
+        yield return new EffectDefinition(EffectKind.Drain, 20, 3_000, 1, 2, true, EffectStacking.Stack, 3,
+            "Расход вычислительного буфера цели.");
+        yield return new EffectDefinition(EffectKind.Cloak, 1, 15_000, 0, 4, true, EffectStacking.Refresh, 1,
+            "Маскировка присутствия: снижает обнаружимость, не даёт неуязвимости.");
+        yield return new EffectDefinition(EffectKind.Reveal, 1, 8_000, 1, 3, true, EffectStacking.Refresh, 1,
+            "Раскрытие замаскированной цели.");
+        yield return new EffectDefinition(EffectKind.Shield, 20, 10_000, 0, 4, true, EffectStacking.Replace, 1,
+            "Временное сопротивление входящему повреждению.");
+        yield return new EffectDefinition(EffectKind.Silence, 1, 6_000, 1, 3, true, EffectStacking.Refresh, 1,
+            "Временная потеря канала связи цели.");
+        yield return new EffectDefinition(EffectKind.Jam, 1, 5_000, 2, 3, true, EffectStacking.Refresh, 1,
+            "Ограничение связности участка сети.");
+        yield return new EffectDefinition(EffectKind.Mark, 1, 60_000, 1, 1, true, EffectStacking.Independent, 1,
+            "Метка наблюдения на цели.");
+    }
+}

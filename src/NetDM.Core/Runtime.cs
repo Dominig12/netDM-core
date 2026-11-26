@@ -100,6 +100,9 @@ public sealed class NetworkRuntime
     private long _sampleCounter;
     private readonly ConcurrentDictionary<NodeId, long> _traffic = new();
 
+    /// <summary>Upper bound of sampled traffic entries before the sampler starts over.</summary>
+    public const int MaxTrafficEntries = 4_096;
+
     public TopologyStore Topology { get; } = new();
     public RouteCache Cache { get; } = new();
     public NetworkMetrics Metrics { get; } = new();
@@ -162,8 +165,14 @@ public sealed class NetworkRuntime
 
         // Sample one route in 16: sampled activity is not packet throughput.
         if (result.Found && (Interlocked.Increment(ref _sampleCounter) & 15) == 0)
+        {
+            // The sampler describes recent activity, so it is capped: an unbounded dictionary of every node
+            // the observatory ever routed past is a leak, not a metric (ARCH-004).
+            if (_traffic.Count >= MaxTrafficEntries)
+                _traffic.Clear();
             foreach (var node in result.Path)
                 _traffic.AddOrUpdate(node, 1, (_, value) => value + 1);
+        }
     }
 
     public long Traffic(NodeId id) => _traffic.TryGetValue(id, out var hits) ? hits : 0;

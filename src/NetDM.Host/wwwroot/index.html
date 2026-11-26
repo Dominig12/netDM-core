@@ -373,6 +373,13 @@
         <div class="panel-head">
           <div><strong>Topology explorer</strong><span id="map-count">Waiting for snapshot</span></div>
           <div class="map-tools">
+            <label class="map-source-label" for="map-source">SOURCE</label>
+            <select id="map-source" class="map-source-select" title="Choose network topology">
+              <option value="game" selected>SS13 · LIVE GAME</option>
+              <option value="benchmark">BENCHMARK</option>
+            </select>
+            <label class="map-source-label" for="map-layer">Z</label>
+            <select id="map-layer" class="map-layer-select" title="Z-level"><option value="1">1</option></select>
             <span class="legend"><i class="legend-line"></i> LINK</span>
             <span class="legend"><i class="legend-node"></i> NODE</span>
             <span class="legend"><i class="legend-hot"></i> ROUTE ACTIVITY</span>
@@ -385,7 +392,7 @@
           <div class="map-overlay top-left"><span class="mini-label">VIEWPORT</span><strong id="viewport-text">–</strong></div>
           <div class="map-overlay bottom-left"><span class="mini-label">TOPOLOGY VERSION</span><strong id="graph-version">0</strong><span class="mini-label">CONNECTIVITY VERSION</span><strong id="connectivity-version">0</strong></div>
           <div class="map-overlay bottom-right"><span>SCROLL TO ZOOM</span><span>DRAG TO PAN</span><span>CLICK A NODE</span></div>
-          <div id="map-empty" class="map-empty"><span class="map-empty-symbol">◎</span><strong>No topology loaded</strong><p>Start a benchmark to build the network.</p></div>
+          <div id="map-empty" class="map-empty"><span class="map-empty-symbol">◎</span><strong>No topology loaded</strong><p>Start SS13 or switch to benchmark topology.</p></div>
         </div>
         <div class="map-footer"><span id="map-status">SPATIAL INDEX · IDLE</span><span id="node-details">SELECT A NODE TO INSPECT IT</span></div>
       </section>

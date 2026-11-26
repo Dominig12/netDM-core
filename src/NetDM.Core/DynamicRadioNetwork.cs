@@ -5,14 +5,20 @@ namespace NetDM.Core;
 /// <summary>
 /// Radio profile for a logical node. Channel 0 is reserved for unconfigured devices.
 /// A wireless link exists when both powered/enabled endpoints are on the same channel,
-/// on the same Z level, and mutually within each other's range.
+/// on the same Z level, and mutually within each other's range. Two access points never
+/// pair: infrastructure radio must not bridge wired segments that are not adjacent.
 /// </summary>
 public readonly record struct RadioProfile(
     int Range,
     uint Channel,
     uint Cost = 8,
-    bool Enabled = true)
+    bool Enabled = true,
+    bool AccessPoint = false)
 {
+    /// <summary>Channel match and the access-point rule; range and Z are checked by the caller.</summary>
+    public bool PairsWith(RadioProfile other) =>
+        Channel == other.Channel && !(AccessPoint && other.AccessPoint);
+
     public void Validate()
     {
         if (Range is < 1 or > 128)
@@ -178,7 +184,7 @@ public sealed class DynamicRadioNetwork(NetworkRuntime runtime)
                 var desiredRadio =
                     profileA is { Enabled: true } a &&
                     profileB is { Enabled: true } b &&
-                    a.Channel == b.Channel &&
+                    a.PairsWith(b) &&
                     posA is { } pa && posB is { } pb &&
                     pa.Z == pb.Z &&
                     InRange(pa, pb, Math.Min(a.Range, b.Range));

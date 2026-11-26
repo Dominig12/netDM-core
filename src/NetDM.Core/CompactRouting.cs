@@ -12,16 +12,18 @@ public sealed class CompactGraph
     private readonly NodeId[] _ids;
     private readonly int[] _offsets;
     private readonly Arc[] _arcs;
+    private readonly bool[] _forwarding;
     private readonly Dictionary<NodeId, int> _indices;
 
     private CompactGraph(long version, long connectivityVersion, NodeId[] ids,
-        int[] offsets, Arc[] arcs, Dictionary<NodeId, int> indices)
+        int[] offsets, Arc[] arcs, bool[] forwarding, Dictionary<NodeId, int> indices)
     {
         Version = version;
         ConnectivityVersion = connectivityVersion;
         _ids = ids;
         _offsets = offsets;
         _arcs = arcs;
+        _forwarding = forwarding;
         _indices = indices;
     }
 
@@ -33,9 +35,11 @@ public sealed class CompactGraph
     /// <summary>Array payload estimate only; excludes dictionary/object overhead.</summary>
     public long PayloadBytes => (long)_ids.Length * sizeof(ulong)
         + (long)_offsets.Length * sizeof(int)
+        + (long)_forwarding.Length * sizeof(bool)
         + (long)_arcs.Length * (sizeof(int) + sizeof(uint));
 
     public NodeId IdAt(int index) => _ids[index];
+    internal bool CanForward(int index) => _forwarding[index];
     public bool TryIndex(NodeId id, out int index) => _indices.TryGetValue(id, out index);
     public ReadOnlySpan<Arc> Neighbors(int index) =>
         _arcs.AsSpan(_offsets[index], _offsets[index + 1] - _offsets[index]);
@@ -46,16 +50,19 @@ public sealed class CompactGraph
         var indices = new Dictionary<NodeId, int>(ids.Length);
         for (var i = 0; i < ids.Length; i++) indices.Add(ids[i], i);
         var offsets = new int[ids.Length + 1];
+        var forwarding = new bool[ids.Length];
         var arcs = new List<Arc>(ids.Length * 4);
         for (var i = 0; i < ids.Length; i++)
         {
             offsets[i] = arcs.Count;
-            foreach (var edge in snapshot.Nodes[ids[i]].Links.Values)
+            var node = snapshot.Nodes[ids[i]];
+            forwarding[i] = node.CanForward;
+            foreach (var edge in node.Links.Values)
                 arcs.Add(new Arc(indices[edge.To], edge.Cost));
         }
         offsets[ids.Length] = arcs.Count;
         return new CompactGraph(snapshot.Version, snapshot.ConnectivityVersion,
-            ids, offsets, arcs.ToArray(), indices);
+            ids, offsets, arcs.ToArray(), forwarding, indices);
     }
 }
 
@@ -88,6 +95,8 @@ public static class CompactRouter
                     Restore(graph, parent, start, end), explored);
             foreach (var arc in graph.Neighbors(u))
             {
+                if (arc.Target != end && !graph.CanForward(arc.Target))
+                    continue;
                 var next = checked(cost + arc.Cost);
                 if (next >= dist[arc.Target]) continue;
                 dist[arc.Target] = next;
@@ -156,6 +165,8 @@ public static class CompactRouter
             Consider(node);
             foreach (var arc in graph.Neighbors(node))
             {
+                if (arc.Target != start && arc.Target != end && !graph.CanForward(arc.Target))
+                    continue;
                 var next = checked(distance + arc.Cost);
                 if (next >= distances[arc.Target]) continue;
                 distances[arc.Target] = next;

@@ -7,7 +7,7 @@ param(
     [ValidateRange(10,1000)][int]$ViewportQueries = 120,
     [ValidateRange(0,250)][int]$MoveBatches = 32,
     [string]$OutputDirectory = 'benchmarks/results',
-    [string]$BaseUrl = 'http://127.0.0.1:5087',
+    [string]$BaseUrl = 'http://127.0.0.1:5080',
     [switch]$LaunchHost
 )
 
@@ -26,7 +26,7 @@ try {
     if ($LaunchHost) {
         $stdout = Join-Path $destination 'host-stdout.log'
         $stderr = Join-Path $destination 'host-stderr.log'
-        $hostProcess = Start-Process -FilePath dotnet -ArgumentList @('run','--project','src/NetDM.Host','-c','Release','--no-build') -WorkingDirectory $root -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $hostProcess = Start-Process -FilePath dotnet -ArgumentList @('run','--project','src/NetDM.BenchmarkHost','-c','Release','--no-build') -WorkingDirectory $root -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     }
     $healthy = $false
     for ($i=0; $i -lt 80; $i++) {
@@ -38,7 +38,7 @@ try {
             Start-Sleep -Milliseconds 500
         }
     }
-    if (-not $healthy) { throw "No healthy netDM.Host at $BaseUrl" }
+    if (-not $healthy) { throw "No healthy netDM benchmark host at $BaseUrl" }
     foreach ($nodes in $counts) {
         foreach ($seed in $seedsParsed) {
             $label = "nodes-$nodes-seed-$seed"

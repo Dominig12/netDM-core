@@ -130,6 +130,8 @@ public sealed partial class SharedMediumNetwork
     // allocation size is bounded by occupied airtime regions, not elapsed time.
     private readonly Dictionary<RadioMediumCell, (long Used, long Background)> _spatialAirtime = new();
     private long _spatialTick = -1;
+    /// <summary>The tick the channel-wide airtime table belongs to. Older entries are dead weight and go.</summary>
+    private long _airtimeTick = -1;
     private long _spatialHops, _spatialBusy, _spatialBytes, _spatialCellReservations;
     private long _interactiveHopTransmissions, _backgroundHopTransmissions;
     private long _interactiveHopBytes, _backgroundHopBytes, _protectedBackgroundDeferrals;
@@ -184,6 +186,22 @@ public sealed partial class SharedMediumNetwork
     public long BytesPerTick => _bytesPerTick;
     public SharedRadioSearchMode SearchMode => _searchMode;
     public RadioAirtimeScope AirtimeScope => _airtimeScope;
+
+    /// <summary>Channels that currently hold airtime in this tick. Bounded by <see cref="MaxAirtimeDomains"/>.</summary>
+    public int ActiveAirtimeDomains
+    {
+        get
+        {
+            lock (_airtimeLock)
+                return _airtime.Count;
+        }
+    }
+
+    /// <summary>
+    /// Upper bound of distinct (channel, level) airtime slots in one tick. A world that would need more has
+    /// more channels than the simulation can serve in a single tick, and refusing is honest backpressure.
+    /// </summary>
+    public const int MaxAirtimeDomains = 4_096;
     public SharedMediumSnapshot Snapshot => Volatile.Read(ref _current);
 
     public SharedMediumStatistics Stats()
@@ -310,6 +328,125 @@ public sealed partial class SharedMediumNetwork
             Volatile.Write(ref _current, next);
             return new SharedMediumUpdateResult(next.Version, physical.Version,
                 moves.Count, changedRadios, next.Cells.Count);
+        }
+    }
+
+    /// <summary>
+    /// Apply BYOND-originated add/remove/move/cable batches while preserving
+    /// SharedMedium ownership of the physical snapshot. Rebuild radio membership
+    /// from retained profiles, dropping removed nodes atomically.
+    /// This intentionally uses a conservative full membership rebuild; game
+    /// batches are bounded and routing readers always see one coherent snapshot.
+    /// Profile replacements in <paramref name="radios"/> apply to the post-batch nodes in
+    /// the same publication, so a wired/radio attachment switch never has an
+    /// intermediate state with both paths. They are validated before any mutation.
+    /// </summary>
+    public BatchResult ApplyExternalTopology(IReadOnlyList<TopologyChange> changes,
+        IReadOnlyList<RadioNodeUpdate>? radios = null)
+    {
+        ArgumentNullException.ThrowIfNull(changes);
+        radios ??= [];
+        if (changes.Count > MaxExternalChanges || radios.Count > MaxExternalChanges ||
+            changes.Count + radios.Count < 1)
+            throw new ArgumentOutOfRangeException(nameof(changes));
+        lock (_writer)
+        {
+            var before = Snapshot;
+            VerifyOwnership(before);
+            ValidateProfileReplacements(before.Physical, changes, radios);
+            var result = changes.Count == 0
+                ? new BatchResult(before.Physical.Version, 0, 0) : _runtime.Apply(changes);
+            var physical = _runtime.Topology.Snapshot;
+            var devices = before.Devices.ToBuilder();
+            foreach (var id in before.Devices.Keys)
+                if (!physical.Nodes.ContainsKey(id)) devices.Remove(id);
+            // A node removed and added again in one batch is a new node without the old radio.
+            foreach (var change in changes)
+                if (change.Operation == TopologyOperation.RemoveNode) devices.Remove(change.A);
+            var changedRadios = 0;
+            foreach (var update in radios)
+            {
+                var present = devices.TryGetValue(update.Id, out var previous);
+                if (update.Profile is { Enabled: true } profile)
+                {
+                    if (present && previous == profile) continue;
+                    devices[update.Id] = profile;
+                }
+                else if (!present || !devices.Remove(update.Id)) continue;
+                changedRadios++;
+            }
+            if (result.Applied == 0 && changedRadios == 0) return result;
+            var cells = ImmutableDictionary.CreateBuilder<RadioMediumCell, ImmutableHashSet<NodeId>>();
+            foreach (var device in devices)
+                if (physical.Nodes[device.Key].Position is { } position)
+                    AddToCell(cells, device.Key, CellOf(device.Value, position));
+            var nextDevices = devices.ToImmutable();
+            var nextCells = cells.ToImmutable();
+            // Only nodes that exist feed the incremental dense update; ignored IDs never reach it.
+            var affected = changes.SelectMany(c => new[] { c.A, c.B })
+                .Concat(radios.Select(update => update.Id))
+                .Where(id => id.Value != 0 && physical.Nodes.ContainsKey(id)).Distinct().ToArray();
+            result = result with { Applied = result.Applied + changedRadios };
+            var next = new SharedMediumSnapshot(checked(before.Version + 1),
+                physical, nextDevices, nextCells)
+            {
+                HasPhysicalLinks = physical.Nodes.Values.Any(n => n.Links.Count != 0),
+                // The dense ID table is immutable. Add/remove operations
+                // require a full membership rebuild, not WithChanges().
+                Dense = before.Dense is null ? null :
+                    changes.Any(c => c.Operation is TopologyOperation.AddNode or
+                        TopologyOperation.RemoveNode)
+                        ? DenseRadioIndex.Build(physical, nextDevices, nextCells)
+                        : before.Dense.WithChanges(physical, nextDevices, nextCells, affected)
+            };
+            _cache.Clear();
+            Volatile.Write(ref _current, next);
+            return result;
+        }
+    }
+
+    /// <summary>Upper bound of one external batch: client facts plus derived device follow-ups.</summary>
+    public const int MaxExternalChanges = 16_384;
+
+    /// <summary>Profiles must target distinct nodes that exist with a position after the batch.</summary>
+    private void ValidateProfileReplacements(TopologySnapshot before,
+        IReadOnlyList<TopologyChange> changes, IReadOnlyList<RadioNodeUpdate> radios)
+    {
+        if (radios.Count == 0)
+            return;
+        // Mirrors the store: adding a present node and moving or removing a missing one are no-ops.
+        var after = new Dictionary<NodeId, (bool Present, NodePosition? Position)>();
+        foreach (var change in changes)
+        {
+            (bool Present, NodePosition? Position) state = after.TryGetValue(change.A, out var simulated) ? simulated
+                : before.Nodes.TryGetValue(change.A, out var existing) ? (true, existing.Position) : (false, null);
+            switch (change.Operation)
+            {
+                case TopologyOperation.AddNode when !state.Present:
+                    after[change.A] = (true, change.Position);
+                    break;
+                case TopologyOperation.MoveNode when state.Present && change.Position is not null:
+                    after[change.A] = (true, change.Position);
+                    break;
+                case TopologyOperation.RemoveNode when state.Present:
+                    after[change.A] = (false, null);
+                    break;
+            }
+        }
+        var seen = new HashSet<NodeId>();
+        foreach (var update in radios)
+        {
+            if (!update.ChangeProfile || update.Position is not null || !seen.Add(update.Id))
+                throw new ArgumentException("Radio replacements must be distinct profile-only updates.");
+            var (present, position) = after.TryGetValue(update.Id, out var changed) ? changed
+                : before.Nodes.TryGetValue(update.Id, out var node) ? (true, node.Position) : (false, null);
+            if (!present)
+                throw new ArgumentException("Radio replacement must target a node that exists after the batch.");
+            if (update.Profile is not { Enabled: true } profile)
+                continue;
+            profile.Validate();
+            if (position is null || profile.Range > _maximumRadioRange || profile.Cost < _minimumRadioCost)
+                throw new ArgumentException("Radio replacement needs a positioned node and bounded profile.");
         }
     }
 
@@ -462,6 +599,8 @@ public sealed partial class SharedMediumNetwork
             }
             void Relax(NodeId candidate, uint weight)
             {
+                if (candidate != target && !snapshot.Physical.Nodes[candidate].CanForward)
+                    return;
                 var next = checked(distance + weight);
                 if (costs.TryGetValue(candidate, out var old) && old <= next) return;
                 costs[candidate] = next;
@@ -551,6 +690,8 @@ public sealed partial class SharedMediumNetwork
 
             void Relax(NodeId candidate, uint weight)
             {
+                if (candidate != target && !snapshot.Physical.Nodes[candidate].CanForward)
+                    return;
                 var next = checked(cost + weight);
                 if (distances.TryGetValue(candidate, out var prior) && next >= prior)
                     return;
@@ -643,6 +784,8 @@ public sealed partial class SharedMediumNetwork
 
                 void Relax(NodeId nextNode, uint weight)
                 {
+                    if (nextNode != target && !snapshot.Physical.Nodes[nextNode].CanForward)
+                        return;
                     var candidateCost = checked(cost + weight);
                     if (costs.TryGetValue(nextNode, out var previous) &&
                         candidateCost >= previous)
@@ -683,7 +826,8 @@ public sealed partial class SharedMediumNetwork
                     foreach (var neighbor in members)
                     {
                         if (neighbor == node ||
-                            !snapshot.Devices.TryGetValue(neighbor, out var other))
+                            !snapshot.Devices.TryGetValue(neighbor, out var other) ||
+                            !profile.PairsWith(other))
                             continue;
                         var destination = snapshot.Physical.Nodes[neighbor].Position!.Value;
                         if (!Within(origin, destination,
@@ -714,12 +858,15 @@ public sealed partial class SharedMediumNetwork
     /// transmission will succeed. Used to wake a waiting packet when its
     /// original wireless/cable hop has physically recovered.
     /// </summary>
-    public bool HasUsableHop(NodeId from, NodeId to)
+    public bool HasUsableHop(NodeId from, NodeId to) => HasUsableHop(from, to, true, true);
+
+    internal bool HasUsableHop(NodeId from, NodeId to, bool isFirstHop, bool isLastHop)
     {
         var snapshot = Snapshot;
         if (from == to ||
             !snapshot.Physical.Nodes.TryGetValue(from, out var node) ||
-            !snapshot.Physical.Nodes.ContainsKey(to))
+            !snapshot.Physical.Nodes.TryGetValue(to, out var target) ||
+            (!isFirstHop && !node.CanForward) || (!isLastHop && !target.CanForward))
             return false;
         return node.Links.ContainsKey(to) ||
             RadioCost(snapshot, from, to, out _) is not null;
@@ -739,7 +886,27 @@ public sealed partial class SharedMediumNetwork
     /// </summary>
     public RadioHopOutcome TryTransmitHop(NodeId from, NodeId to, int bytes, long tick,
         PacketTrafficClass trafficClass = PacketTrafficClass.Background,
-        int interactiveReservePercent = 0)
+        int interactiveReservePercent = 0) =>
+        TryTransmitHop(from, to, bytes, tick, trafficClass, interactiveReservePercent, true, true);
+
+    /// <summary>
+    /// Whether a forwarded hop would go over cable: both ends allow it and the wire is not
+    /// costlier than radio. No airtime is reserved; a false answer leaves the hop to
+    /// <see cref="TryTransmitHop(NodeId, NodeId, int, long, PacketTrafficClass, int)"/>.
+    /// </summary>
+    internal bool IsCableHop(NodeId from, NodeId to, bool isLastHop)
+    {
+        var snapshot = Snapshot;
+        if (from == to || !snapshot.Physical.Nodes.TryGetValue(from, out var node) ||
+            !snapshot.Physical.Nodes.TryGetValue(to, out var target) || !node.CanForward ||
+            (!isLastHop && !target.CanForward) || !node.Links.TryGetValue(to, out var edge))
+            return false;
+        var radio = RadioCost(snapshot, from, to, out _);
+        return (ulong)edge.Cost <= (ulong)(radio ?? uint.MaxValue);
+    }
+
+    internal RadioHopOutcome TryTransmitHop(NodeId from, NodeId to, int bytes, long tick,
+        PacketTrafficClass trafficClass, int interactiveReservePercent, bool isFirstHop, bool isLastHop)
     {
         if (bytes is < 1 or > 1_000_000)
             throw new ArgumentOutOfRangeException(nameof(bytes));
@@ -751,7 +918,8 @@ public sealed partial class SharedMediumNetwork
         var snapshot = Snapshot;
         if (from == to ||
             !snapshot.Physical.Nodes.TryGetValue(from, out var node) ||
-            !snapshot.Physical.Nodes.ContainsKey(to))
+            !snapshot.Physical.Nodes.TryGetValue(to, out var target) ||
+            (!isFirstHop && !node.CanForward) || (!isLastHop && !target.CanForward))
             return RadioHopOutcome.LinkUnavailable;
 
         var wire = node.Links.TryGetValue(to, out var edge)
@@ -768,9 +936,18 @@ public sealed partial class SharedMediumNetwork
                 _bytesPerTick * (100 - interactiveReservePercent) / 100);
             if (_airtimeScope == RadioAirtimeScope.ChannelWide)
             {
+                if (tick < _airtimeTick) return RadioHopOutcome.OldTick;
+                // The table only ever describes the current tick. Advancing it drops every idle channel
+                // instead of keeping one entry per channel ever used (ARCH-004).
+                if (tick > _airtimeTick)
+                {
+                    _airtimeTick = tick;
+                    _airtime.Clear();
+                }
+                if (!_airtime.ContainsKey(domain) && _airtime.Count >= MaxAirtimeDomains)
+                    return RadioHopOutcome.ChannelBusy;
                 var slot = _airtime.TryGetValue(domain, out var existing)
                     ? existing : (Tick: -1L, Used: 0L, Background: 0L);
-                if (slot.Tick > tick) return RadioHopOutcome.OldTick;
                 if (bytes > _bytesPerTick) return RadioHopOutcome.PacketTooLarge;
                 var used = slot.Tick == tick ? slot.Used : 0L;
                 var background = slot.Tick == tick ? slot.Background : 0L;
@@ -909,7 +1086,7 @@ public sealed partial class SharedMediumNetwork
         for (var i = 1; i < route.Path.Count; i++)
         {
             var a = route.Path[i - 1]; var b = route.Path[i];
-            if (a == b)
+            if (a == b || (i > 1 && !snapshot.Physical.Nodes[a].CanForward))
             {
                 if (needsRevalidation)
                     RegisterRejection(payloadBytes, ref _rejectedStaleRoute);
@@ -939,16 +1116,26 @@ public sealed partial class SharedMediumNetwork
         Interlocked.Add(ref _attemptedWirelessHops, radioHops);
         lock (_airtimeLock)
         {
+            if (tick < _airtimeTick)
+            {
+                RegisterRejection(payloadBytes, ref _rejectedOldTick);
+                return false;
+            }
+            if (tick > _airtimeTick)
+            {
+                _airtimeTick = tick;
+                _airtime.Clear();
+            }
             // Never partially debit a multi-hop transfer.
             foreach (var (domain, bytes) in needed)
             {
-                var slot = _airtime.TryGetValue(domain, out var existing)
-                    ? existing : (Tick: -1L, Used: 0L, Background: 0L);
-                if (slot.Tick > tick)
+                if (!_airtime.ContainsKey(domain) && _airtime.Count >= MaxAirtimeDomains)
                 {
-                    RegisterRejection(payloadBytes, ref _rejectedOldTick);
+                    RegisterRejection(payloadBytes, ref _rejectedCapacity);
                     return false;
                 }
+                var slot = _airtime.TryGetValue(domain, out var existing)
+                    ? existing : (Tick: -1L, Used: 0L, Background: 0L);
                 // A single transfer consumes one airtime allocation PER radio hop.
                 // Distinguish packets that can never fit from temporary saturation.
                 if (bytes > _bytesPerTick)
@@ -1002,6 +1189,10 @@ public sealed partial class SharedMediumNetwork
         return result;
     }
 
+    /// <summary>Radio partners of one node on a pinned snapshot, for diagnostics and views.</summary>
+    public static IEnumerable<NodeId> RadioPartners(SharedMediumSnapshot snapshot, NodeId id) =>
+        RadioNeighbors(snapshot, id).Select(edge => edge.To);
+
     private static IEnumerable<Edge> RadioNeighbors(SharedMediumSnapshot snapshot, NodeId id)
     {
         if (!snapshot.Devices.TryGetValue(id, out var profile)) yield break;
@@ -1023,7 +1214,8 @@ public sealed partial class SharedMediumNetwork
             foreach (var candidate in members)
             {
                 if (candidate == id ||
-                    !snapshot.Devices.TryGetValue(candidate, out var other)) continue;
+                    !snapshot.Devices.TryGetValue(candidate, out var other) ||
+                    !profile.PairsWith(other)) continue;
                 var destination = snapshot.Physical.Nodes[candidate].Position!.Value;
                 if (!Within(origin, destination, Math.Min(profile.Range, other.Range)))
                     continue;
@@ -1038,7 +1230,7 @@ public sealed partial class SharedMediumNetwork
         domain = default;
         if (!snapshot.Devices.TryGetValue(a, out var left) ||
             !snapshot.Devices.TryGetValue(b, out var right) ||
-            left.Channel != right.Channel) return null;
+            !left.PairsWith(right)) return null;
         var p = snapshot.Physical.Nodes[a].Position!.Value;
         var q = snapshot.Physical.Nodes[b].Position!.Value;
         if (p.Z != q.Z ||

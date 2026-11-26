@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using NetDM.Core;
 
-namespace NetDM.Host.Benchmarks;
+using Microsoft.Extensions.Logging;
+
+namespace NetDM.Benchmarks;
 
 public sealed record ComparisonOptions(
     int Nodes = 10_000,

@@ -7,7 +7,8 @@ public enum WorkPriority { Critical = 0, Interactive = 1, Background = 2 }
 public sealed record WorkSchedulerOptions(
     int Workers = 2,
     int QueueCapacity = 256,
-    int BudgetMillisecondsPer100Ms = 65)
+    int BudgetMillisecondsPer100Ms = 65,
+    int DeliveryBudgetMillisecondsPer100Ms = 25)
 {
     public void Validate()
     {
@@ -16,6 +17,10 @@ public sealed record WorkSchedulerOptions(
             throw new ArgumentOutOfRangeException(nameof(QueueCapacity));
         if (BudgetMillisecondsPer100Ms is < 0 or > 100)
             throw new ArgumentOutOfRangeException(nameof(BudgetMillisecondsPer100Ms));
+        // The delivery share is carved out of the whole budget, never added to it; without a budget it is unused.
+        if (DeliveryBudgetMillisecondsPer100Ms < 0 ||
+            (BudgetMillisecondsPer100Ms > 0 && DeliveryBudgetMillisecondsPer100Ms > BudgetMillisecondsPer100Ms))
+            throw new ArgumentOutOfRangeException(nameof(DeliveryBudgetMillisecondsPer100Ms));
     }
 }
 
@@ -24,7 +29,9 @@ public sealed record WorkSchedulerCounters(
     int BackgroundQueued, int PeakQueued, long Accepted, long Rejected,
     long Completed, long Cancelled, long Failed,
     double QueueWaitP50Us, double QueueWaitP95Us, double WorkP95Us,
-    int BudgetMillisecondsPer100Ms);
+    int BudgetMillisecondsPer100Ms,
+    /// <summary>Jobs that waited for the next window in the delivery lane and in the background lane.</summary>
+    long BudgetWaitsDelivery, long BudgetWaitsBackground);
 
 /// <summary>
 /// A process-wide, bounded CPU-work executor. All accepted jobs are served by
@@ -38,6 +45,7 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
     private interface IWork
     {
         long SubmittedAt { get; }
+        WorkPriority Priority { get; }
         CancellationToken Cancellation { get; }
         bool WasCancelled { get; }
         bool WasFailed { get; }
@@ -45,13 +53,14 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
         void Cancel();
     }
 
-    private sealed class Work<T>(Func<CancellationToken, T> action,
+    private sealed class Work<T>(WorkPriority priority, Func<CancellationToken, T> action,
         CancellationToken cancellation) : IWork
     {
         private readonly TaskCompletionSource<T> _completion =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public long SubmittedAt { get; } = Stopwatch.GetTimestamp();
+        public WorkPriority Priority => priority;
         public CancellationToken Cancellation => cancellation;
         public bool WasCancelled { get; private set; }
         public bool WasFailed { get; private set; }
@@ -81,7 +90,7 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
     }
 
     private const int WindowSamples = 1024;
-    private static readonly long WindowTicks = 100L * Stopwatch.Frequency / 1000L;
+
     private static readonly int[] WeightedOrder = [0, 0, 0, 0, 1, 1, 2];
     private readonly Queue<IWork>[] _queues = [new(), new(), new()];
     private readonly object _gate = new();
@@ -94,13 +103,17 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
     private int _queueCount, _peak, _running, _cursor;
     private long _accepted, _rejected, _completed, _cancelled, _failed, _latencyIndex;
     private bool _stopping;
-    private readonly object _budgetGate = new();
-    private long _budgetWindowStart = Stopwatch.GetTimestamp(), _spentTicks;
+    /// <summary>The window budget, or null when the budget is off.</summary>
+    private readonly WorkBudgetWindow? _budget;
+    private long _budgetWaitsDelivery, _budgetWaitsBackground;
 
     public PriorityWorkScheduler(WorkSchedulerOptions options)
     {
         options.Validate();
         _options = options;
+        _budget = options.BudgetMillisecondsPer100Ms == 0
+            ? null
+            : new WorkBudgetWindow(options.BudgetMillisecondsPer100Ms, options.DeliveryBudgetMillisecondsPer100Ms);
         _workers = Enumerable.Range(0, options.Workers)
             .Select(_ => Task.Run(WorkerAsync)).ToArray();
     }
@@ -133,7 +146,8 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
             Interlocked.Read(ref _rejected), Interlocked.Read(ref _completed),
             Interlocked.Read(ref _cancelled), Interlocked.Read(ref _failed),
             Quantile(waits, .5), Quantile(waits, .95), Quantile(works, .95),
-            _options.BudgetMillisecondsPer100Ms);
+            _options.BudgetMillisecondsPer100Ms,
+            Interlocked.Read(ref _budgetWaitsDelivery), Interlocked.Read(ref _budgetWaitsBackground));
     }
 
     /// <summary>
@@ -160,7 +174,7 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
                 result = null;
                 return false;
             }
-            var item = new Work<T>(action, cancellationToken);
+            var item = new Work<T>(priority, action, cancellationToken);
             _queues[(int)priority].Enqueue(item);
             _queueCount++;
             _peak = Math.Max(_peak, _queueCount);
@@ -179,18 +193,44 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
             catch (OperationCanceledException) { break; }
 
             IWork? item = null;
+            var waitMilliseconds = 0;
+            WorkPriority? refused = null;
+            var queued = false;
             lock (_gate)
             {
                 for (var i = 0; i < WeightedOrder.Length; i++)
                 {
                     var bucket = WeightedOrder[_cursor++ % WeightedOrder.Length];
                     if (_queues[bucket].Count == 0) continue;
+                    queued = true;
+                    // The lane is asked before the item leaves its queue: a worker never parks with work
+                    // in hand, so another lane can use the window (ADR-0009).
+                    if (_budget is not null &&
+                        !_budget.TryEnter((WorkPriority)bucket, Microseconds(Stopwatch.GetTimestamp()),
+                            out var laneWait))
+                    {
+                        waitMilliseconds = Math.Max(waitMilliseconds, laneWait);
+                        refused ??= (WorkPriority)bucket;
+                        continue;
+                    }
                     item = _queues[bucket].Dequeue();
                     _queueCount--;
                     break;
                 }
             }
-            if (item is null) continue;
+            if (item is null)
+            {
+                if (queued && waitMilliseconds > 0)
+                {
+                    if (refused == WorkPriority.Background)
+                        Interlocked.Increment(ref _budgetWaitsBackground);
+                    else
+                        Interlocked.Increment(ref _budgetWaitsDelivery);
+                    try { await Task.Delay(waitMilliseconds, _shutdown.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { break; }
+                }
+                continue;
+            }
 
             if (item.Cancellation.IsCancellationRequested)
             {
@@ -198,11 +238,6 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
                 Interlocked.Increment(ref _cancelled);
                 continue;
             }
-            try
-            {
-                await AwaitWindowBudgetAsync(_shutdown.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) { item.Cancel(); break; }
             if (item.Cancellation.IsCancellationRequested)
             {
                 item.Cancel();
@@ -216,7 +251,7 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
             finally
             {
                 var ticks = Stopwatch.GetTimestamp() - start;
-                ChargeBudget(ticks);
+                _budget?.Charge(item.Priority, Microseconds(ticks), Microseconds(Stopwatch.GetTimestamp()));
                 Interlocked.Decrement(ref _running);
                 // Use per-task metrics from the TaskCompletionSource state.
                 if (item.WasCancelled) Interlocked.Increment(ref _cancelled);
@@ -226,46 +261,6 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
                 Interlocked.Exchange(ref _queueWaits[(int)position], queuedUs);
                 Interlocked.Exchange(ref _workTimes[(int)position], Microseconds(ticks));
             }
-        }
-    }
-
-    private async Task AwaitWindowBudgetAsync(CancellationToken token)
-    {
-        if (_options.BudgetMillisecondsPer100Ms == 0) return;
-        while (true)
-        {
-            int waitMs;
-            lock (_budgetGate)
-            {
-                var now = Stopwatch.GetTimestamp();
-                if (now - _budgetWindowStart >= WindowTicks)
-                {
-                    _budgetWindowStart = now;
-                    _spentTicks = 0;
-                }
-                var limit = (long)_options.BudgetMillisecondsPer100Ms *
-                    Stopwatch.Frequency / 1_000L;
-                if (_spentTicks < limit) return;
-                waitMs = (int)Math.Max(1, Math.Ceiling(
-                    (double)(_budgetWindowStart + WindowTicks - now) * 1_000 /
-                    Stopwatch.Frequency));
-            }
-            await Task.Delay(waitMs, token).ConfigureAwait(false);
-        }
-    }
-
-    private void ChargeBudget(long elapsedTicks)
-    {
-        if (_options.BudgetMillisecondsPer100Ms == 0) return;
-        lock (_budgetGate)
-        {
-            var now = Stopwatch.GetTimestamp();
-            if (now - _budgetWindowStart >= WindowTicks)
-            {
-                _budgetWindowStart = now;
-                _spentTicks = 0;
-            }
-            _spentTicks += elapsedTicks;
         }
     }
 

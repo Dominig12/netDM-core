@@ -1,4 +1,4 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
-  <ItemGroup><ProjectReference Include="../../src/NetDM.Core/NetDM.Core.csproj" /></ItemGroup>
+  <ItemGroup><ProjectReference Include="../../src/NetDM.Core/NetDM.Core.csproj" /><ProjectReference Include="../../src/NetDM.Services/NetDM.Services.csproj" /></ItemGroup>
 </Project>

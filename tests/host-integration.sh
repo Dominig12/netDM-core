@@ -2,12 +2,16 @@
 set -euo pipefail
 
 base="http://127.0.0.1:5087"
+# The benchmark surface lives in its own developer process (ADR-0008).
+bench="http://127.0.0.1:5080"
 log_file="${RUNNER_TEMP:-/tmp}/netdm-host.log"
 dotnet run --project src/NetDM.Host --configuration Release --no-build >"$log_file" 2>&1 &
 host_pid=$!
+dotnet run --project src/NetDM.BenchmarkHost --configuration Release --no-build >>"$log_file" 2>&1 &
+bench_pid=$!
 cleanup() {
-  kill "$host_pid" 2>/dev/null || true
-  wait "$host_pid" 2>/dev/null || true
+  kill "$host_pid" "$bench_pid" 2>/dev/null || true
+  wait "$host_pid" "$bench_pid" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'cat "$log_file" >&2' ERR
@@ -18,6 +22,11 @@ for i in $(seq 1 30); do
 done
 
 curl -fsS "$base/api/health" | python3 -c 'import json,sys; assert json.load(sys.stdin)["status"]=="ok"'
+for i in $(seq 1 30); do
+  if curl -fsS "$bench/api/health" >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+curl -fsS "$bench/api/health" | python3 -c 'import json,sys; assert json.load(sys.stdin)["role"]=="benchmarks"'
 curl -fsS "$base/" > "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 grep -q 'Network Observatory' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 grep -q 'CPU Work Scheduler' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
@@ -28,11 +37,11 @@ node --check src/NetDM.Host/wwwroot/app.js
 
 # Run an isolated comparison before starting the live workload. It validates every
 # alternative route against baseline cost and verifies the resulting path in-core.
-curl -fsS -X POST "$base/api/comparison/start" \
+curl -fsS -X POST "$bench/api/comparison/start" \
   -H 'Content-Type: application/json' \
   -d '{"nodes":160,"routes":20,"viewportQueries":20,"moveBatches":4,"seed":7331}' >/dev/null
 for i in $(seq 1 25); do
-  curl -fsS "$base/api/comparison" > "${RUNNER_TEMP:-/tmp}/netdm-comparison.json"
+  curl -fsS "$bench/api/comparison" > "${RUNNER_TEMP:-/tmp}/netdm-comparison.json"
   status="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "${RUNNER_TEMP:-/tmp}/netdm-comparison.json")"
   if [[ "$status" == "complete" ]]; then break; fi
   if [[ "$status" == "failed" ]]; then
@@ -56,7 +65,7 @@ assert report["movement"]["batches"] == 4, report
 print("Cold-cache routing + spatial + CSR comparison: PASS")
 PY
 
-curl -fsS -X POST "$base/api/benchmark/start" \
+curl -fsS -X POST "$bench/api/benchmark/start" \
   -H 'Content-Type: application/json' \
   -d '{"nodes":100,"routesPerSecond":40,"movesPerSecond":20,"linkChangesPerSecond":2,"durationSeconds":9,"seed":1337}' \
   >/dev/null
@@ -65,7 +74,7 @@ sleep 4
 curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-metrics.json"
 curl -fsS "$base/api/health" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["processId"]>0,d'
 curl -fsS "$base/api/map?minX=-10&minY=-10&maxX=150&maxY=150&limit=1000" > "${RUNNER_TEMP:-/tmp}/netdm-map.json"
-curl -fsS "$base/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-history.json"
+curl -fsS "$bench/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-history.json"
 
 python3 - <<'PY'
 import json, os
@@ -87,7 +96,7 @@ assert isinstance(v["nodes"][0]["id"], str), v
 assert len(h) > 0 and h[-1]["actualRoutesPerSecond"] >= 0, h
 print("Host HTTP + benchmark + visualizer integration: PASS")
 PY
-curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null
+curl -fsS -X POST "$bench/api/benchmark/stop" >/dev/null
 
 # Run a second scenario: radio links follow motion and temporary outages.
 # This is a real DynamicRadioNetwork, not a cosmetic map animation.
@@ -96,12 +105,12 @@ for i in $(seq 1 20); do
   if [[ "$state" == "stopped" || "$state" == "complete" ]]; then break; fi
   sleep 1
 done
-curl -fsS -X POST "$base/api/benchmark/start" \
+curl -fsS -X POST "$bench/api/benchmark/start" \
   -H 'Content-Type: application/json' \
   -d '{"nodes":100,"routesPerSecond":40,"movesPerSecond":90,"linkChangesPerSecond":40,"durationSeconds":9,"seed":2601,"wirelessEnabled":true,"radioRange":14}' >/dev/null
 sleep 4
 curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-radio-metrics.json"
-curl -fsS "$base/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-radio-history.json"
+curl -fsS "$bench/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-radio-history.json"
 python3 - <<'PY'
 import json, os
 dir=os.environ.get("RUNNER_TEMP","/tmp")
@@ -119,7 +128,7 @@ assert any(x["radioLinks"] > 0 for x in h), h
 assert any(x["radioLinksRemovedPerSecond"] > 0 for x in h), h
 print("Dynamic radio benchmark / topology churn / telemetry: PASS")
 PY
-curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null
+curl -fsS -X POST "$bench/api/benchmark/stop" >/dev/null
 
 # Shared-medium model: a dense radio network remains sparse in the physical graph.
 # The routing engine discovers neighbors lazily and reserves a per-channel airtime budget.
@@ -128,13 +137,13 @@ for i in $(seq 1 20); do
   if [[ "$status" == "stopped" || "$status" == "complete" ]]; then break; fi
   sleep 1
 done
-curl -fsS -X POST "$base/api/benchmark/start" \
+curl -fsS -X POST "$bench/api/benchmark/start" \
   -H 'Content-Type: application/json' \
   -d '{"nodes":180,"routesPerSecond":60,"movesPerSecond":30,"linkChangesPerSecond":6,"durationSeconds":9,"seed":632,"wirelessEnabled":true,"radioModel":"shared","radioRange":128,"mediumBytesPerTick":512}' >/dev/null
 sleep 4
 curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-shared-metrics.json"
 curl -fsS "$base/api/map?minX=-20&minY=-20&maxX=180&maxY=180&limit=1000" > "${RUNNER_TEMP:-/tmp}/netdm-shared-map.json"
-curl -fsS "$base/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-shared-history.json"
+curl -fsS "$bench/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-shared-history.json"
 python3 - <<'PY'
 import json, os
 directory=os.environ.get("RUNNER_TEMP","/tmp")
@@ -169,7 +178,7 @@ assert all(sample["schedulerQueued"]>=0 for sample in h),h
 assert all(sample["rejectedTooLargePerSecond"]>=0 for sample in h),h
 print("Shared-medium routing / domain cells / airtime diagnostics: PASS")
 PY
-curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null
+curl -fsS -X POST "$bench/api/benchmark/stop" >/dev/null
 
 # The same scheduler is shared by IPC routes and background benchmark queries.
 curl -fsS "$base/api/scheduler" > "${RUNNER_TEMP:-/tmp}/netdm-scheduler.json"
@@ -214,7 +223,7 @@ assert s["runId"] and s["total"]==3,s
 print("Three-scenario suite accepted:",s["runId"])
 PY
 # Manual starts must not overwrite a stage or its pending report snapshot.
-http_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$base/api/benchmark/start" \
+http_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$bench/api/benchmark/start" \
   -H 'Content-Type: application/json' \
   -d '{"nodes":90,"routesPerSecond":10,"durationSeconds":2}')"
 test "$http_code" = "409"
@@ -335,13 +344,13 @@ PY
 # from the legacy whole-path airtime reservation.
 grep -q 'A\* · Original allocations (control)' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 grep -q 'HOPWISE · One hop per simulation tick' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
-curl -fsS -X POST "$base/api/benchmark/start" \
+curl -fsS -X POST "$bench/api/benchmark/start" \
   -H 'Content-Type: application/json' \
   -d '{"nodes":121,"routesPerSecond":75,"movesPerSecond":0,"linkChangesPerSecond":0,"durationSeconds":7,"seed":1337,"wirelessEnabled":true,"radioModel":"shared","radioRange":14,"mediumBytesPerTick":512,"sharedSearch":"astar","packetTransportEnabled":true,"dedicatedPacketTicks":true,"packetTickWorkBudgetMs":25,"packetQueueCapacity":256,"packetMaxAdvancesPerTick":256,"adaptivePacketVisits":true,"packetPreRouteBackpressure":true}' \
   > "${RUNNER_TEMP:-/tmp}/netdm-packet-start.json"
 sleep 5
 curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-packet-metrics.json"
-curl -fsS "$base/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-packet-history.json"
+curl -fsS "$bench/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-packet-history.json"
 curl -fsS "$base/api/packets" > "${RUNNER_TEMP:-/tmp}/netdm-packet-stats.json"
 python3 - <<'PY'
 import json,os
@@ -435,7 +444,7 @@ assert m["runtime"]["totalRouteAllocatedBytes"]>=0,m
 assert m["runtime"]["gcTotalPauseMilliseconds"]>=0,m
 print("A* radio + packet forwarding + GC diagnostics HTTP integration: PASS")
 PY
-curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null
+curl -fsS -X POST "$bench/api/benchmark/stop" >/dev/null
 
 # Dedicated tick mode is the default for new hopwise experiments. The old
 # shared-queue mode remains available for A/B comparison; do not conflate
@@ -460,11 +469,11 @@ grep -q 'K · SS13 mixed load' "${RUNNER_TEMP:-/tmp}/netdm-index.html"
 
 # One low-rate mixed gameplay simulation: player commands and background jobs
 # must share transport yet appear in separate per-class telemetry.
-curl -fsS -X POST "$base/api/benchmark/start" -H 'Content-Type: application/json' \
+curl -fsS -X POST "$bench/api/benchmark/start" -H 'Content-Type: application/json' \
   -d '{"nodes":121,"routesPerSecond":70,"movesPerSecond":20,"linkChangesPerSecond":2,"durationSeconds":4,"seed":1337,"wirelessEnabled":true,"radioModel":"shared","sharedSearch":"astar-dense","packetTransportEnabled":true,"spatialReuseEnabled":true,"dedicatedPacketTicks":true,"packetQueueCapacity":128,"packetMaxAdvancesPerTick":128,"packetPreRouteBackpressure":true,"eventDrivenPacketWaiting":true,"eventDrivenRerouteCapacity":true,"prioritizeInteractiveTraffic":true,"interactiveReservedSlots":12,"trafficProfile":"ss13-mixed","interactiveTrafficPercent":30,"burstPeriodSeconds":10,"burstDurationSeconds":2,"burstMultiplier":2}' >/dev/null
 sleep 3
 curl -fsS "$base/api/metrics" > "${RUNNER_TEMP:-/tmp}/netdm-gameplay-metrics.json"
-curl -fsS "$base/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-gameplay-history.json"
+curl -fsS "$bench/api/history" > "${RUNNER_TEMP:-/tmp}/netdm-gameplay-history.json"
 python3 - <<'PY'
 import json,os
 root=os.environ.get("RUNNER_TEMP","/tmp")
@@ -489,4 +498,4 @@ assert h and all("interactiveDeliveryP95Ticks" in row for row in h),h
 assert all(row["interactivePacketsQueued"]>=0 for row in h),h
 print("Mixed SS13 traffic / weighted priority / per-class telemetry: PASS")
 PY
-curl -fsS -X POST "$base/api/benchmark/stop" >/dev/null
+curl -fsS -X POST "$bench/api/benchmark/stop" >/dev/null
