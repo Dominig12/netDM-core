@@ -17,7 +17,7 @@
 
 ```powershell
 dotnet build src/NetDM.Host -c Release                 # сборка всего C#-слоя, 0 предупреждений
-dotnet run --project tests/NetRun.Tests -c Release     # домен NETRUN, 479 утверждений
+dotnet run --project tests/NetRun.Tests -c Release     # домен NETRUN (по команде владельца)
 dotnet run --project tests/NetDM.SmokeTests -c Release # транспорт и сервисы
 pwsh -NoProfile -File tests/host-ipc.ps1               # живой Host через IPC: NETDM_IPC_PASS
 pwsh -File scripts/check-all.ps1 -Only host            # группа проверок Host целиком
@@ -34,10 +34,17 @@ pwsh -File scripts/check-all.ps1 -Only host            # группа прове
 
 | Проверка | Результат |
 |---|---|
-| Домен (`tests/NetRun.Tests`) | 479 утверждений, PASS |
-| Хост (`scripts/check-all.ps1 -Only host`) | PASS (сборка, smoke, домен, живой IPC) |
-| Окно (`jest NetrunView`) | 29 тестов, PASS |
-| Живой мир (`scripts/bluemoon-netdm-tests.txt`) | **23 из 24**; единственное падение `door_station` — в герметичном мире нет кнопок blast-дверей |
+| Домен (`tests/NetRun.Tests`) | написано 481 прежних + `DefenderTests`; прогон — по команде владельца |
+| Сборка (`dotnet build src/NetDM.Host`, `tests/NetRun.Tests`) | **0 предупреждений, 0 ошибок** |
+| Типы окна (`yarn tgui:tsc`) | PASS (exit 0) |
+| Окно (`jest NetrunView`) | 29 прежних + 11 новых (слои карты, трафик); прогон — по команде владельца |
+| Живой мир (`scripts/bluemoon-netdm-tests.txt`) | последний измеренный: **23 из 24**, единственное падение `door_station` — в герметичном мире нет кнопок blast-дверей |
 | Сквозной путь NETRUN в игре | ядро → присутствие → переход по маршруту (`netrun_client_life`) |
 
-Работа не завершена: остался легаси-слой L-8 (бенчмарки в production-хосте), слои карты UI-003 и остаток контента §12 (Lockdown, вирусы по маршрутам, след в знаниях). Точки входа и препятствия — в [status.md](status.md) §23.
+За второй заход 26.11.2026 добавлены: след защитника в знаниях (§9.4), тревога от сноса ICE и от гостя
+у закрытого хоста, IDS как компонент защиты, затухание тревоги на тике, слои карты (движение, тревога,
+свежесть) и вкладка «Трафик». Подробности и границы — [status.md](status.md) §32–§35.
+
+Работа не завершена: остались слой пакетов на карте (нужны концы маршрута в квитанции транспорта),
+мост principal→identity для опознания нарушителя, легаси-слой L-8 (первый прогон CI), `door_station`
+и проверочный проход по всему написанному. Точки входа и препятствия — в [status.md](status.md) §35.
