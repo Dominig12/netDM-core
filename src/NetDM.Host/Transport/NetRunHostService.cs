@@ -734,6 +734,10 @@ internal sealed class NetRunHostService :  BackgroundService, INetRunTransport, 
                 continue;
             var from = other.Host.Value;
             var to = other.Destination.Value;
+            // A cloak hides what stands on a host from other observers; the owner of the presence always sees
+            // its own move, because hiding from yourself would only break the window (§8.2, §9.4).
+            if (_runtime.Effects.IsMasked(other.Host))
+                continue;
             // An edge to an unknown host would disclose that the host exists, so only a fully known move is
             // reported even though the transport itself knows about every packet (AT-12).
             if (!known.Contains(from) || !known.Contains(to))

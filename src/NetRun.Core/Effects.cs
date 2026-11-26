@@ -348,9 +348,32 @@ public sealed class EffectRegistry(ISimulationClock clock, EffectRegistryOptions
         return expired;
     }
 
-    /// <summary>Live effects on a target, newest last. A bounded read model for projections.</summary>
-    public EffectInstance[] On(HostId target, int limit)
+    /// <summary>
+    /// Whether the host hides what stands on it from other observers (§8.2 CLOAK / REVEAL): a live cloak with no
+    /// live reveal on the same host. The rule lives here, next to the instances it reads, so the map and any
+    /// future perception share one answer instead of each inventing its own.
+    /// </summary>
+    public bool IsMasked(HostId host)
     {
+        if (host.IsNone || !_byTarget.TryGetValue(host.Value, out var list))
+            return false;
+        var now = _clock.NowMilliseconds;
+        var cloaked = false;
+        var revealed = false;
+        foreach (var id in list)
+        {
+            if (!_instances.TryGetValue(id, out var instance) || instance.ExpiresAtMilliseconds <= now)
+                continue;
+            if (instance.Kind == EffectKind.Cloak)
+                cloaked = true;
+            else if (instance.Kind == EffectKind.Reveal)
+                revealed = true;
+        }
+        return cloaked && !revealed;
+    }
+
+    /// <summary>Live effects on a target, newest last. A bounded read model for projections.</summary>
+    public EffectInstance[] On(HostId target, int limit)    {
         if (!_byTarget.TryGetValue(target.Value, out var list))
             return [];
         var count = Math.Min(Math.Max(limit, 0), list.Count);

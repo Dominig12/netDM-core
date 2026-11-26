@@ -143,6 +143,13 @@ public static class BuiltinActions
         pipeline.Register(new StealthBreachAction());
         pipeline.Register(new NormalBreachAction());
         pipeline.Register(new ForcedBreachAction());
+        // The abilities of §8.2 that the MVP needs. Each one is an ordinary action over a registered effect,
+        // so it costs compute, obeys a cooldown and is refused by the same rules for every actor.
+        pipeline.Register(new DisruptAction());
+        pipeline.Register(new DrainAction());
+        pipeline.Register(new ShieldAction());
+        pipeline.Register(new CloakAction());
+        pipeline.Register(new RevealAction());
     }
 }
 
