@@ -25,9 +25,9 @@
 | Шаг | Что | Gate |
 |---|---|---|
 | **L8-1 — сделано** | Перенести четыре файла в `src/NetDM.Benchmarks`, переименовать namespace; хост ссылается на библиотеку временно | `dotnet build` — 0 предупреждений; smoke-тесты — PASS; `host-ipc.ps1` — `NETDM_IPC_PASS` (первый прогон в составе `check-all` оборвался таймаутом чтения, повторный прошёл) |
-| **L8-2 — в работе** | Добавить `src/NetDM.BenchmarkHost` с маршрутами; отвязать `/api/metrics` и `/api/map` от `BenchmarkRunner` | Бенчмарк-хост проверен по HTTP 26.11.2026: `/api/benchmark` — `idle`, `POST /api/benchmark/start` — `202`, прогон завершился (`status=complete`), `/api/metrics` отвечает. Отвязка игрового хоста и его `404` — следующий шаг |
+| **L8-2 — сделано** | Добавить `src/NetDM.BenchmarkHost` с маршрутами и `/api/health`; отвязать `/api/metrics` и `/api/map` от `BenchmarkRunner` | Бенчмарк-хост: `idle` → `POST start` `202` → `status=complete` → `/api/metrics`; `run-profiles.ps1 -LaunchHost` поднял его и прошёл прогон (`CSR · Dijkstra`, 41.5 µs, `nodes-160-seed-7331.json`) |
 | L8-3 | Убрать ссылку хоста на библиотеку и фильтр `deployment` для маршрутов бенчмарков | `dotnet build` по всем csproj, `check-all.ps1 -Only host`, живой набор DM |
-| L8-4 | Обновить workflows и скрипты профилей на адрес бенчмарк-хоста | Локальный прогон `run-profiles.ps1` против бенчмарк-хоста |
+| **L8-4 — в работе** | Обновить workflows и скрипты профилей на адрес бенчмарк-хоста | `run-profiles.ps1` обновлён и проверен локально (см. L8-2). **Осталось:** `tests/host-integration.sh` и три workflow (`build.yml`, `gameplay-benchmark.yml`, `routing-profiles.yml`) всё ещё запускают игровой хост и ходят на его `/api/benchmark*`; до их правки шаг «HTTP host, benchmark and visualizer integration» в CI будет падать — это ожидаемо, а не зелёный результат |
 | L8-5 | Записать результат в [legacy-removal.md](legacy-removal.md) и [status.md](status.md) | — |
 
 Перенос начат 26.11.2026: шаг L8-1 — коммит `d5f2d62`, шаг L8-2 (хост инструмента) — коммит `ee75c08`.

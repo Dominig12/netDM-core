@@ -14,6 +14,7 @@ builder.Services.AddSingleton<ThreeScenarioBenchmarkSuite>();
 builder.Services.AddSingleton<RoutingComparisonRunner>();
 var app = builder.Build();
 
+app.MapGet("/api/health", () => Results.Ok(new { status = "ok", role = "benchmarks" }));
 app.MapGet("/api/benchmark", (BenchmarkRunner benchmark) => Results.Ok(benchmark.State()));
 
 app.MapPost("/api/benchmark/start", (BenchmarkOptions options, BenchmarkRunner benchmark, RoutingComparisonRunner comparison) =>
