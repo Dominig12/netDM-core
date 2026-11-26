@@ -96,6 +96,12 @@ public sealed class AgentRegistry(
     private readonly Dictionary<ulong, AgentSnapshot> _agents = [];
     private readonly Dictionary<ulong, AgentDefinition> _definitions = [];
     private IAgentNetwork? _network;
+
+    /// <summary>
+    /// Hosts adjacent to this one on the published graph, as the agent network sees them: the same links a
+    /// virus may use, so an alarm can travel exactly as far as a copy would (§9.3).
+    /// </summary>
+    public HostId[] NeighboursOf(HostId host) => _network?.Neighbours(host) ?? [];
     private ulong _nextId;
 
     public int Count => _agents.Count;

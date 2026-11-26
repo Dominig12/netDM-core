@@ -198,7 +198,15 @@ public sealed class NetRunRuntime : IEffectTargets
     {
         var events = Actions.DrainEvents();
         foreach (var item in events)
+        {
             _publishedTopics[item.Topic] = _publishedTopics.GetValueOrDefault(item.Topic) + 1;
+            // §9.3: an alarm reaches the neighbours over the links that exist, one hop and no further.
+            // The host that noticed raised its own level; its neighbours only become suspicious.
+            if (item.Topic == "security.breach.detected" && Hosts.Get(item.Payload) is { } alarmed)
+                foreach (var neighbour in Agents.NeighboursOf(alarmed.Id))
+                    if (!neighbour.IsNone && neighbour != alarmed.Id)
+                        Alerts.Raise(neighbour, 1, "neighbour_alerted");
+        }
         return events.Length;
     }
 
