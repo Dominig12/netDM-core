@@ -72,7 +72,9 @@ public sealed record AgentOptions(
     int MaxAgents = 4_096,
     int MaxAgentsPerOwner = 256,
     int MaxAgentsPerHost = 8,
-    long DefaultBudget = 3);
+    long DefaultBudget = 3,
+    /// <summary>How many existing links a virus may travel in one spread: one is the neighbourhood (§12.2).</summary>
+    int SpreadHops = 1);
 
 /// <summary>
 /// Viruses and ICE (§12). An agent is a process with an owner, a strain, an integrity and a finite budget of
@@ -89,6 +91,8 @@ public sealed class AgentRegistry(
     private readonly HostRegistry _hosts = hosts ?? throw new ArgumentNullException(nameof(hosts));
     private readonly ResourceLedger _ledger = ledger ?? throw new ArgumentNullException(nameof(ledger));
     private readonly AgentOptions _options = options ?? new AgentOptions();
+    /// <summary>The furthest a strain may travel in one spread, so a misconfiguration cannot flood the world.</summary>
+    private const int MaxSpreadHopLimit = 8;
     private readonly Dictionary<ulong, AgentSnapshot> _agents = [];
     private readonly Dictionary<ulong, AgentDefinition> _definitions = [];
     private IAgentNetwork? _network;
@@ -210,9 +214,9 @@ public sealed class AgentRegistry(
                 NextSpreadAt = now + definition.SpreadIntervalMilliseconds
             };
             var infected = false;
-            foreach (var neighbour in _network.Neighbours(agent.Host))
+            foreach (var neighbour in Reachable(agent.Host))
             {
-                if (neighbour == agent.Host || CountOn(neighbour) >= definition.MaxCopiesPerHost)
+                if (CountOn(neighbour) >= definition.MaxCopiesPerHost)
                     continue;
                 var child = Deploy(agent.Owner, neighbour, definition, moved.SpreadsLeft,
                     Math.Max(1, agent.Integrity - definition.IntegrityLossPerHop));
@@ -229,6 +233,36 @@ public sealed class AgentRegistry(
                 continue;
         }
         return spread;
+    }
+
+    /// <summary>
+    /// Hosts a virus may reach from its own, nearest first: as many hops as the options allow, over the
+    /// links that already exist. A strain limited to one hop never leaves the neighbourhood, and one that
+    /// may travel further still infects only hosts the network actually connects (§12.2, AGENT-001).
+    /// </summary>
+    private IEnumerable<HostId> Reachable(HostId origin)
+    {
+        if (_network is null || _options.SpreadHops <= 0)
+            yield break;
+        var seen = new HashSet<ulong> { origin.Value };
+        var frontier = new List<HostId> { origin };
+        for (var hop = 0; hop < Math.Min(_options.SpreadHops, MaxSpreadHopLimit); hop++)
+        {
+            var next = new List<HostId>();
+            foreach (var host in frontier)
+            {
+                foreach (var candidate in _network.Neighbours(host))
+                {
+                    if (!seen.Add(candidate.Value))
+                        continue;
+                    next.Add(candidate);
+                    yield return candidate;
+                }
+            }
+            if (next.Count == 0)
+                yield break;
+            frontier = next;
+        }
     }
 
     /// <summary>Removes one agent by id. A cleaned agent frees whatever its host reserved implicitly.</summary>

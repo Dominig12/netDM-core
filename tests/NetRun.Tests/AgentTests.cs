@@ -164,5 +164,32 @@ internal static class AgentTests
             "an owner sees only its own agents");
         Check(runtime.Agents.OwnedBy(stranger, 8).Length >= 1 && runtime.Agents.OwnedBy(actor, 8).All(agent => agent.Owner == actor),
             "the listings are separate");
+
+        // §12.2: a strain that may travel two hops reaches the host behind a full neighbour; the same
+        // strain with the default single hop never leaves its own neighbourhood. CountOn is per registry,
+        // so the blocking copy is placed through the registry under test.
+        var near = runtime.RegisterHost(new HostDefinition("near.1", HostClass.Server,
+            Compute: new ComputeComponent(20, 5), Memory: new MemoryComponent(4))).Host!;
+        var middle = runtime.RegisterHost(new HostDefinition("middle.1", HostClass.Server,
+            Compute: new ComputeComponent(20, 5), Memory: new MemoryComponent(4))).Host!;
+        var behind = runtime.RegisterHost(new HostDefinition("behind.1", HostClass.Server,
+            Compute: new ComputeComponent(20, 5), Memory: new MemoryComponent(4))).Host!;
+        graph.Link(near.Id, middle.Id);
+        graph.Link(middle.Id, behind.Id);
+        var tight = Virus with { MaxCopiesPerHost = 1 };
+        var oneHop = new AgentRegistry(clock, runtime.Hosts, runtime.Resources, new AgentOptions(SpreadHops: 1));
+        oneHop.AttachNetwork(graph);
+        oneHop.Deploy(actor, middle.Id, Ice, 0, 100);
+        oneHop.Deploy(actor, near.Id, tight, 3, 100);
+        clock.Advance(1_100);
+        oneHop.Tick();
+        Equal(0, oneHop.On(behind.Id, 8).Length, "one hop does not reach the host behind a full neighbour");
+        var twoHop = new AgentRegistry(clock, runtime.Hosts, runtime.Resources, new AgentOptions(SpreadHops: 2));
+        twoHop.AttachNetwork(graph);
+        twoHop.Deploy(actor, middle.Id, Ice, 0, 100);
+        twoHop.Deploy(actor, near.Id, tight, 3, 100);
+        clock.Advance(1_100);
+        twoHop.Tick();
+        Check(twoHop.On(behind.Id, 8).Length == 1, "two hops reach it over the links that exist");
     }
 }
