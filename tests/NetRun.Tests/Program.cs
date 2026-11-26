@@ -52,6 +52,7 @@ internal static class Program
             ExternalWorldTests.Run();
         if (Matches("agent"))
             AgentTests.Run();
+        AlertTests.Run();
 
         Console.WriteLine($"All NetRun.Core checks passed ({Count} assertions).");
         return Environment.ExitCode;
