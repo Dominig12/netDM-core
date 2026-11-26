@@ -53,7 +53,11 @@ internal static class BreachTests
         Equal(AuthorizationStatus.Ok,
             runtime.Authority.Authorize(actor, open, CapabilityCategory.Control, null, SecurityProfile.Open).Status,
             "the breach granted control of the host");
-        var breachGrant = runtime.Authority.All(16).Single(grant => grant.Target == open && grant.Source == GrantSource.Breach);
+        var breachGrant = runtime.Authority.All(16).Single(grant => grant.Target == open &&
+            grant.Source == GrantSource.Breach && grant.Category == CapabilityCategory.Control);
+        Check(runtime.Authority.All(16).Any(grant => grant.Target == open &&
+                grant.Source == GrantSource.Breach && grant.Category == CapabilityCategory.Read),
+            "the same break-in also lets the intruder read what it broke into");
         clock.Advance(90_001);
         Equal(AuthorizationStatus.Expired, runtime.Authority.Recheck(
             new CapabilityToken(breachGrant.Id, actor, open, CapabilityCategory.Control, null, breachGrant.Fence)),

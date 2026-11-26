@@ -209,7 +209,10 @@ public sealed class CapabilityAuthority(ISimulationClock clock, CapabilityAuthor
         var implicitAllowed = profile switch
         {
             SecurityProfile.Open => category is CapabilityCategory.Discovery or CapabilityCategory.Read,
-            SecurityProfile.Standard or SecurityProfile.Secure => false,
+            // Local discovery is how a network is found at all (§4.2): a standard host answers it without a
+            // grant, while reading, control and execution still need one. Without this a standard station is
+            // invisible and nothing can ever be learned about it, which makes the whole map unreachable.
+            SecurityProfile.Standard => category == CapabilityCategory.Discovery,
             _ => false
         };
         return implicitAllowed

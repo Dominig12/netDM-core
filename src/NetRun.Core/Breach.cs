@@ -106,6 +106,10 @@ public abstract class BreachActionBase(BreachMode mode, CapabilityCategory categ
                 return new ActionExecution(ActionStatus.Rejected, granted.Status.ToString());
             grantId = granted.Token.Grant.Value;
             grantedUntil = scope.NowMilliseconds + lifetime;
+            // A host that was broken into can also be looked at: the break-in is the access. This is a second
+            // grant of another category, not a ladder — every check still names the category it needs (§9.1).
+            if (category != CapabilityCategory.Read)
+                scope.GrantCapability(CapabilityCategory.Read, null, lifetime, GrantSource.Breach);
         }
         if (detected)
         {

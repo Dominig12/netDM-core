@@ -67,6 +67,11 @@ internal static class DefenderTests
         Equal(KnowledgeLevel.Unknown, runtime.Knowledge.Level(bystander, deck.Id),
             "an observer with no guard on the target learns nothing");
 
+        // The break-in is the access: the intruder may now look at what it broke into, not only drive it.
+        Equal(AuthorizationStatus.Ok, runtime.Authority.Authorize(attacker, target.Id,
+            CapabilityCategory.Read, null, SecurityProfile.Standard).Status,
+            "a host that was broken into can be read");
+
         // A host without a guard raises its own alarm but has nobody to tell.
         var otherDeck = runtime.RegisterHost(new HostDefinition("deck.bare", HostClass.Cyberdeck,
             Compute: new ComputeComponent(60, 20), Memory: new MemoryComponent(4))).Host!;
