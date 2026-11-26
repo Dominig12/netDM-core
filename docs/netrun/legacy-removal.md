@@ -36,7 +36,7 @@
 | L-5 | Shadow-выборка радио (`radio_shadow.ask/answered/legacy_broadcast`), `NETDM_RADIO_MODE`, `set_authoritative`, C#-`radio_reach` (107 строк + регистрация) | П+М | при `RadioMode=shadow` `rx_instances` пуст → `uplink()` возвращает TRUE без доставки → **речь пропадает молча** | ≈150 DM + 117 C# | средне-высокий | `radio_uplink`; живой раунд без env-флага: `uplink_counters["relayed"] > 0` |
 | L-6 | Зеркало техуэба в `research_shadow.dm`: `console_purchased`/`waiting`/`send_purchases` (ноль вызовов), `compared`, `mirror_lost`, `legacy_*` и безусловные записи в леджер | П+М+Д | половина зеркала (покупки) мертва с переходом на `console_research`; `legacy_boost` пишет в леджер без `owns()`, пока `projected()` пишет обратно | ≈250–300 из 1679 | высокий | `research_authoritative`, `research_p6`, `.../outbox`; ручная проверка консоли и дисков |
 | L-7 | Дублирующий сид населения (`netdm_observe.dm:662-663`) и устаревшие комментарии «in Shadow mode» | М | второй блок в том же тике не может сработать раньше первого | ~8 строк | низкий | `network_life_physical`, `map_audit` |
-| L-8 | Бенчмарки из production-хоста (`Benchmarks/*`, 1971 строка; маршруты `/api/benchmark*`, `/api/comparison*`, `/api/history`, `/api/packets`; `/api/map` через `benchmark.ActiveSharedMedium`) | П | `Program.cs` уже прячет их при `NetDM:Deployment` — значит они не часть игры; транспорт их не использует | 1971 C# + ~120 в `Program.cs` | средний по игре, высокий по CI | план принят: [ADR-0008](adr/0008-benchmarks-outside-host.md), шаги L8-1…L8-5; gate после каждого — сборка по всем csproj, smoke, `host-ipc.ps1`, шаг L8-4 — живой прогон профилей |
+| **L-8 — снято** | Бенчмарки из production-хоста (`Benchmarks/*`, 1971 строка; маршруты `/api/benchmark*`, `/api/comparison*`, `/api/history`, `/api/packets`; `/api/map` через `benchmark.ActiveSharedMedium`) | П | `Program.cs` уже прячет их при `NetDM:Deployment` — значит они не часть игры; транспорт их не использует | 1971 C# + ~120 в `Program.cs` | средний по игре, высокий по CI | [ADR-0008](adr/0008-benchmarks-outside-host.md) выполнен по шагам: L8-1 — библиотека `NetDM.Benchmarks`; L8-2 — отдельный `NetDM.BenchmarkHost` на своём порту (проверен по HTTP и профильным скриптом); L8-3 — игровой хост без маршрутов, DI и ссылки (живой хост: `/api/metrics` и `/api/map` — 200, `/api/benchmark` — 404, `NetDM.Benchmarks.dll` в выходе нет); L8-4 — `host-integration.sh` и три workflow собирают и запускают оба процесса. **Оговорка:** CI не запускался локально (WSL без дистрибутива), поэтому интеграционный шаг и workflows считаются непроверенными до первого прогона на GitHub. |
 
 ## Фиктивные переключатели — снять или сделать конфигом раунда
 
@@ -90,7 +90,7 @@
 
 Попутно восстановлены `netdm_atmos_instance` и `netdm_tick_of`, случайно попавшие под рез: они не относились к сравнению и нужны доставке. Это тот же урок, что и с мессенджером — резать надо по одному шагу и сразу проверять.
 
-Остался L-8 (бенчмарки в production-хосте).
+Очередь снятия легаси закрыта.
 
 ## L-6 закрыт: у зеркала техуэба один писатель (26.11.2026)
 
