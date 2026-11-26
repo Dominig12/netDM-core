@@ -8,7 +8,7 @@ public sealed record WorkSchedulerOptions(
     int Workers = 2,
     int QueueCapacity = 256,
     int BudgetMillisecondsPer100Ms = 65,
-    int DeliveryBudgetMillisecondsPer100Ms = 25)
+    int DeliveryBudgetMillisecondsPer100Ms = 0)
 {
     public void Validate()
     {
