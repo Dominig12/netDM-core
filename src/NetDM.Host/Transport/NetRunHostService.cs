@@ -551,7 +551,8 @@ internal sealed class NetRunHostService :  BackgroundService, INetRunTransport, 
                     host.Powered && host.Operational,
                     resources?.BufferCu ?? 0,
                     _runtime.Effects.On(host.Id, 8).Length,
-                    identified));
+                    identified,
+                    _runtime.Alerts.Level(host.Id).ToString()));
             }
             return views.ToArray();
         }
@@ -727,7 +728,9 @@ internal sealed class NetRunHostService :  BackgroundService, INetRunTransport, 
 /// <summary>One host as an observer may see it. A name appears only when the identity was established.</summary>
 internal sealed record ObservationView(
     ulong Host, string Name, ulong Node, string HostClass, string Level, int Confidence, long AgeMs, bool Stale,
-    bool Available, double BufferCu, int Effects, bool Identified);
+    bool Available, double BufferCu, int Effects, bool Identified,
+    /// <summary>The host's own alert level (§9.3), so a known host shows whether it is on guard.</summary>
+    string Alert);
 
 internal sealed record HostStateView(
     ulong Host, ulong Generation, string Name, string HostClass, bool Powered, bool Operational,
