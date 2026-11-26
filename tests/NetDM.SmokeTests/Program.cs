@@ -78,6 +78,7 @@ Task.WaitAll(tasks);
 Check(errors.IsEmpty);
 
 await CheckSchedulerAsync();
+CheckWorkBudgetWindow();
 CheckSharedMedium();
 CheckSharedMediumOracle();
 CheckRadioAStar();
@@ -293,6 +294,37 @@ static async Task CheckSchedulerAsync()
     catch (InvalidOperationException) { observedFailure = true; }
     Check(observedFailure);
     Check(SpinWait.SpinUntil(() => scheduler.Capture().Failed == 1, 3000));
+}
+
+// P8: the window budget keeps a share for delivery work. The rule is decided from the window state,
+// so it is checked without waiting for real windows or depending on thread timing.
+static void CheckWorkBudgetWindow()
+{
+    var budget = new WorkBudgetWindow(totalMillisecondsPerWindow: 40, deliveryMillisecondsPerWindow: 35);
+    Check(budget.TryEnter(WorkPriority.Background, 0, out _)); // An idle window admits any work.
+    budget.Charge(WorkPriority.Background, 20_000, 1_000);
+    // Background work stops at the share reserved for deliveries.
+    Check(!budget.TryEnter(WorkPriority.Background, 2_000, out var wait));
+    Check(wait is > 0 and <= 100); // The wait ends with the window.
+    // Delivery work may still spend the whole window.
+    Check(budget.TryEnter(WorkPriority.Interactive, 2_000, out _));
+    Check(budget.TryEnter(WorkPriority.Critical, 2_000, out _));
+    budget.Charge(WorkPriority.Interactive, 30_000, 3_000);
+    Check(!budget.TryEnter(WorkPriority.Interactive, 4_000, out _)); // A spent window is the ceiling.
+    Check(budget.TryEnter(WorkPriority.Critical, 101_000, out _)); // The next window opens again.
+
+    var off = new WorkBudgetWindow(totalMillisecondsPerWindow: 0, deliveryMillisecondsPerWindow: 0);
+    Check(off.Disabled && off.TryEnter(WorkPriority.Background, 0, out _)); // A disabled budget admits at once.
+    var rejected = false;
+    try { _ = new WorkBudgetWindow(totalMillisecondsPerWindow: 20, deliveryMillisecondsPerWindow: 21); }
+    catch (ArgumentOutOfRangeException) { rejected = true; }
+    Check(rejected); // A share larger than the budget is refused.
+
+    // The scheduler exposes the lane waits it actually performs.
+    var counters = new PriorityWorkScheduler(new WorkSchedulerOptions(
+        Workers: 1, QueueCapacity: 4, BudgetMillisecondsPer100Ms: 40,
+        DeliveryBudgetMillisecondsPer100Ms: 35)).Capture();
+    Check(counters is { BudgetWaitsDelivery: 0, BudgetWaitsBackground: 0 });
 }
 
 static void CheckSharedMedium()
