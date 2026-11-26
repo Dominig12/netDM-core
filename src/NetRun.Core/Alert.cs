@@ -103,27 +103,35 @@ public sealed class AlertRegistry(ISimulationClock clock, HostAlertOptions? opti
 
     /// <summary>
     /// Steps down every host whose level has stood for <see cref="HostAlertOptions.StepDownMilliseconds"/>
-    /// without a new reason. Called by the runtime tick; returns how many hosts moved.
+    /// without a new reason. Called by the runtime tick; returns how many hosts moved. Several quiet windows may
+    /// have passed since the last look — a paused or lagging round must not leave a host alarmed longer than the
+    /// silence allows — so the step count follows the elapsed time and the remainder is kept for the next one.
     /// </summary>
     public int Sweep()
     {
         if (_states.Count == 0)
             return 0;
         var now = _clock.NowMilliseconds;
+        var window = Math.Max(1, _options.StepDownMilliseconds);
         var moved = 0;
         foreach (var (key, state) in _states.ToArray())
         {
-            if (now - state.RaisedAtMilliseconds < _options.StepDownMilliseconds)
+            var elapsed = now - state.RaisedAtMilliseconds;
+            if (elapsed < window)
                 continue;
-            if (state.Level <= HostAlertLevel.Suspicious)
+            var steps = (int)Math.Min((long)HostAlertLevel.Lockdown, elapsed / window);
+            var level = (int)state.Level - steps;
+            moved++;
+            if (level <= (int)HostAlertLevel.Normal)
             {
                 _states.Remove(key);
+                continue;
             }
-            else
+            _states[key] = state with
             {
-                _states[key] = state with { Level = state.Level - 1, RaisedAtMilliseconds = now };
-            }
-            moved++;
+                Level = (HostAlertLevel)level,
+                RaisedAtMilliseconds = state.RaisedAtMilliseconds + steps * window
+            };
         }
         return moved;
     }
