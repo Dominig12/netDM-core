@@ -78,11 +78,17 @@ public abstract class BreachActionBase(BreachMode mode, CapabilityCategory categ
         if (host is null)
             return new ActionExecution(ActionStatus.TargetDestroyed, "unknown_host");
         var profile = host.Security?.Profile ?? SecurityProfile.Standard;
-        var difficulty = Difficulty(profile);
+        // ICE defends what it sits on (§12.2): each strain adds difficulty, and a defended host always notices
+        // the attempt. It is not an extra action — the breach simply has a harder time and leaves a trace.
+        var ice = 0;
+        foreach (var agent in scope.World.Agents(scope.TargetHost, 8))
+            if (agent.Kind == AgentKind.Ice)
+                ice++;
+        var difficulty = Difficulty(profile) + Math.Min(2, ice);
         var power = (int)mode;
         var succeeded = power >= difficulty;
         // Loud modes are always noticed; a quiet one is noticed only by a host that is watching closely.
-        var detected = mode == BreachMode.Forced || (mode == BreachMode.Normal && difficulty >= 2) ||
+        var detected = ice > 0 || mode == BreachMode.Forced || (mode == BreachMode.Normal && difficulty >= 2) ||
             (mode == BreachMode.Stealth && difficulty >= 3);
         var grantedUntil = 0L;
         var grantId = 0UL;
@@ -101,6 +107,8 @@ public abstract class BreachActionBase(BreachMode mode, CapabilityCategory categ
             scope.ApplyEffect(EffectKind.Mark, scope.TargetHost, 1, 30_000, $"breach:{context.OperationId.Value}");
             scope.Emit("security.breach.detected", host.Name);
         }
+        if (ice > 0)
+            scope.Emit("security.ice.engaged", host.Name);
         scope.Emit(succeeded ? "security.breach.granted" : "security.breach.failed", host.Name);
         var payload = JsonSerializer.Serialize(new
         {

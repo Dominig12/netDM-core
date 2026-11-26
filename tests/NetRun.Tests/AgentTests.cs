@@ -39,6 +39,9 @@ internal static class AgentTests
         ComputeCu: 1, MemorySlots: 1, SpreadIntervalMilliseconds: 5_000, MaxGeneration: 0,
         MaxCopiesPerHost: 1, IntegrityLossPerHop: 0);
 
+    /// <summary>The JSON payload of an action outcome, as the client would read it.</summary>
+    private static string Text(ActionOutcome outcome) => outcome.Result ?? string.Empty;
+
     public static void Run()
     {
         Section("agents");
@@ -120,7 +123,38 @@ internal static class AgentTests
         runtime.DestroyHost(doomed.Id, doomed.Generation);
         Equal(0, runtime.Agents.On(doomed.Id, 8).Length, "the agent died with its host");
 
-        // The owner sees its own agents and nobody else's.
+        // ICE defends the host it sits on: the same breach that wins against the bare profile now loses, and
+        // the attempt is always noticed (§12.2).
+        var hardened = runtime.RegisterHost(new HostDefinition("hardened.1", HostClass.Server,
+            Compute: new ComputeComponent(20, 5), Memory: new MemoryComponent(4),
+            Security: new SecurityComponent(SecurityProfile.Standard, 4, 2))).Host!;
+        var breacher = runtime.NewPrincipal();
+        runtime.Authority.Grant(breacher, hardened.Id, CapabilityCategory.Execution, null, 600_000,
+            GrantSource.Granted, PrincipalId.None);
+        runtime.Authority.Grant(breacher, hardened.Id, CapabilityCategory.Read, null, 600_000,
+            GrantSource.Granted, PrincipalId.None);
+        runtime.Authority.Grant(breacher, hardened.Id, CapabilityCategory.Discovery, null, 600_000,
+            GrantSource.Granted, PrincipalId.None);
+        runtime.Knowledge.Remember(breacher, hardened.Id, KnowledgeLevel.Observed, 90);
+        var stealthBreach = runtime.Actions.GetAction("security.breach.stealth")!;
+        var bare = runtime.Actions.Execute(new ActionRequest(breacher, hardened.Id, hardened.Id, EntityId.None,
+            ProcessId.None, CorrelationId.None, "br-bare"), stealthBreach);
+        Equal(ActionStatus.Committed, bare.Status, "a normal breach runs against a standard host");
+        Check(Text(bare).Contains("\"success\":true", StringComparison.Ordinal),
+            "without ICE a quiet attempt takes a standard host");
+        runtime.Agents.Deploy(actor, hardened.Id, Ice, 0, 100);
+        // The breach has its own cooldown: wait it out like a player would.
+        clock.Advance(4_100);
+        var guarded = runtime.Actions.Execute(new ActionRequest(breacher, hardened.Id, hardened.Id, EntityId.None,
+            ProcessId.None, CorrelationId.None, "br-ice"), stealthBreach);
+        Equal(ActionStatus.Committed, guarded.Status, "the attempt still runs, it just has a harder time");
+        var guardedText = Text(guarded);
+        Check(guardedText.Contains("\"success\":false", StringComparison.Ordinal),
+            "ICE raises the bar enough to stop the same quiet attempt");
+        Check(guardedText.Contains("\"detected\":true", StringComparison.Ordinal),
+            "a defended host always notices the attempt");
+
+        // The owner sees its own agents and nobody else''s.
         var stranger = runtime.NewPrincipal();
         var fresh = runtime.RegisterHost(new HostDefinition("fresh.1", HostClass.Server,
             Compute: new ComputeComponent(20, 5), Memory: new MemoryComponent(4))).Host!;
