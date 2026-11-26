@@ -615,6 +615,21 @@ RESULT netrun_client_life status=0 wall=15,1 PASS, clean_run.lk: True
 устройствами на разных АПЦ — пункт §19 «живой переход» подтверждён на том же коде, что и полоса
 доставки. Единственным незакрытым пунктом §19 остаётся UI-003 (слои карты с движением).
 
+## 29. Остаток §12: точки входа (26.11.2026)
+
+Три пункта, которые документ §12 и этот статус держат открытыми, с точными местами кода — чтобы
+следующий заход не искал их заново.
+
+| Пункт | Где начинать | Что уже есть | Чего не хватает |
+|---|---|---|---|
+| Lockdown как состояние тревоги (§9.3) | `src/NetRun.Core/Security.cs` (`SecurityProfile`, `Authorize`), `Breach.cs` (`Commit`, `Difficulty`) | `SecurityProfile.Quarantine` уже отказывает обычным правам; `BreachActionBase.Difficulty` считает профиль + ICE | Отдельного изменяемого состояния тревоги на хост (Normal → Suspicious → Alert → Hostile → Lockdown), его роста при обнаружении, затухания и явного влияния на `Authorize`/`Difficulty` |
+| Вирусы по маршрутам, а не только к соседям (§12) | `src/NetRun.Core/Agents.cs` (`AgentRegistry.Tick`, `IAgentNetwork.Neighbours`) | Распространение по существующим связям, бюджет копий, ослабление за переход, предел поколений | Многошаговой достижимости: либо `IAgentNetwork.Reachable(host, hops)`, либо BFS по `Neighbours` внутри `Tick` с пределом в `AgentOptions` |
+| След в знаниях защитника (§9.4) | `src/NetRun.Core/Knowledge.cs` (`KnowledgeStore.Remember`), `Breach.cs` (обнаружение), `Effects.cs` (`Mark`) | Знание по паре (наблюдатель, хост), уровни Anomaly→Identified; при обнаружении ставится `Mark` на хост и публикуется `security.breach.detected` | Записи знания **владельцу хоста** о попытке (сейчас `Mark` ставится на цель, а не на нарушителя), чтобы защитник видел, кто и откуда приходил |
+
+Порядок: Lockdown — модель и тесты в `NetRun.Tests`; вирусы — `Agents.cs` + тест в `AgentTests`;
+след — `Knowledge.cs` + `BreachTests`. Каждый пункт заканчивается зелёным `NetRun.Tests` и записью
+в этом файле.
+
 ## 26. Легаси-очистка: L-6 и L-7 закрыты (26.11.2026)
 
 | Что | Итог |
