@@ -525,7 +525,13 @@
 
 ### Живая приёмка (26.11.2026, полный набор)
 
-`test-bluemoon-unit.ps1` с `NETDM_NET_LIFE=1`: **22 из 23 PASS** за один прогон, включая `netrun_adapter`, `netrun_client`, `radio_uplink`, `messenger_authoritative`, `research_authoritative`, `research_authoritative/outbox`, `atmos_telemetry`, `network_life_physical`, `network_immersion_dive`. Единственное падение — `door_station`, и оно картозависимое: в герметичном мире `Runtime Station` нет кнопок blast-дверей.
+`test-bluemoon-unit.ps1` с `NETDM_NET_LIFE=1`, финальный прогон: **23 из 24 PASS**.
+
+Прошли: `netrun_client_life` (ядро → присутствие → переход), `netrun_client`, `netrun_adapter`, `radio_uplink`, `messenger_authoritative`, `research_authoritative` с `outbox`, `research_p6`, `atmos_telemetry`, `network_life_physical`, `network_immersion_dive`, все карт-тесты и `verb_proc_ids`.
+
+Единственное падение — `door_station`: в герметичном мире `Runtime Station` нет кнопок blast-дверей. Это ограничение профиля, не код.
+
+Прочее финальное состояние: `check-all.ps1 -Only host` — PASS (2 + 7 + 3 + 123 с); Jest `NetrunView` — 27 из 27; герметичная DM-сборка — 0 ошибок, 0 предупреждений.
 ### Покрытие клиентской части цифровой жизни
 
 Клиентский путь цифровой жизни теперь покрыт живым тестом: `/datum/unit_test/netdm_observe/netrun_client_life` (отдельный файл, написан целиком) создаёт ядро через окно, читает проекцию, запрашивает копию и входит в мир — и каждый шаг проверяет, что окно получило **решение** Host, а не тишину.
