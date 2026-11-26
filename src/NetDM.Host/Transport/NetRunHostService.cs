@@ -589,6 +589,8 @@ internal sealed class NetRunHostService :  BackgroundService, INetRunTransport, 
                 principal = principal.Value,
                 hosts = views,
                 links = Links(views),
+                // Real movement the observer may see, for the map layer (§15.2). Nothing here is invented.
+                visuals = Visuals(principal, views, operationLimit),
                 actions = _runtime.Actions.Catalogue(actionLimit).Select(action => new
                 {
                     id = action.Id,
@@ -611,6 +613,22 @@ internal sealed class NetRunHostService :  BackgroundService, INetRunTransport, 
                     reason = operation.Reason,
                     result = operation.Result
                 }).ToArray(),
+                // The traffic tab (§15.1): this observer's own requests, with the hosts they went between and
+                // when each one ended. NETDM decides the route; this is the request, not a packet trace.
+                traffic = principal.IsNone
+                    ? []
+                    : _runtime.Actions.RecentTraces(principal, operationLimit).Select(trace => new
+                    {
+                        operation = trace.OperationId.Value,
+                        kind = trace.Kind.ToString().ToLowerInvariant(),
+                        category = trace.Category.ToString().ToLowerInvariant(),
+                        status = trace.Status.ToString().ToLowerInvariant(),
+                        from = trace.ExecutionHost.Value,
+                        to = trace.TargetHost.Value,
+                        at = trace.IssuedAtMilliseconds,
+                        doneAt = trace.CompletedAtMilliseconds,
+                        reason = trace.Reason
+                    }).ToArray(),
                 programs = _runtime.Programs.OwnedBy(principal, operationLimit).Select(program => new
                 {
                     process = program.Process.Value,
@@ -674,6 +692,65 @@ internal sealed class NetRunHostService :  BackgroundService, INetRunTransport, 
                 knowledge = new { known = views.Length, stale, total = records.Length }
             };
         }
+    }
+
+    /// <summary>
+    /// Movement an observer may see (UI-003, §15.2, AT-12): its own presence always, and any other presence only
+    /// while it is actually moving between two hosts the observer already knows. A resting stranger is never
+    /// drawn, and neither end of a traced move is a host the projection did not already contain.
+    /// </summary>
+    private object[] Visuals(PrincipalId principal, ObservationView[] views, int limit)
+    {
+        if (limit <= 0)
+            return [];
+        var known = new HashSet<ulong>(views.Length);
+        foreach (var view in views)
+            known.Add(view.Host);
+        var result = new List<object>(Math.Min(limit, 16));
+        if (!principal.IsNone)
+        {
+            foreach (var own in _runtime.Presences.ControlledBy(principal, limit))
+            {
+                if (result.Count >= limit)
+                    break;
+                result.Add(new
+                {
+                    kind = "presence",
+                    own = true,
+                    host = own.Host.Value,
+                    destination = own.Destination.Value,
+                    state = own.State.ToString().ToLowerInvariant(),
+                    hops = own.Hops,
+                    startedAt = own.StartedAtMilliseconds,
+                    arriveAt = own.ArriveAtMilliseconds
+                });
+            }
+        }
+        foreach (var other in _runtime.Presences.All(Math.Max(limit, 16)))
+        {
+            if (result.Count >= limit)
+                break;
+            if (other.Controller == principal || !other.Moving)
+                continue;
+            var from = other.Host.Value;
+            var to = other.Destination.Value;
+            // An edge to an unknown host would disclose that the host exists, so only a fully known move is
+            // reported even though the transport itself knows about every packet (AT-12).
+            if (!known.Contains(from) || !known.Contains(to))
+                continue;
+            result.Add(new
+            {
+                kind = "travel",
+                own = false,
+                host = from,
+                destination = to,
+                state = other.State.ToString().ToLowerInvariant(),
+                hops = other.Hops,
+                startedAt = other.StartedAtMilliseconds,
+                arriveAt = other.ArriveAtMilliseconds
+            });
+        }
+        return result.ToArray();
     }
 
     /// <summary>
