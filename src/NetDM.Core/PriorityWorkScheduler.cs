@@ -8,7 +8,7 @@ public sealed record WorkSchedulerOptions(
     int Workers = 2,
     int QueueCapacity = 256,
     int BudgetMillisecondsPer100Ms = 65,
-    int DeliveryBudgetMillisecondsPer100Ms = 0)
+    int DeliveryBudgetMillisecondsPer100Ms = 25)
 {
     public void Validate()
     {
@@ -193,18 +193,44 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
             catch (OperationCanceledException) { break; }
 
             IWork? item = null;
+            var waitMilliseconds = 0;
+            WorkPriority? refused = null;
+            var queued = false;
             lock (_gate)
             {
                 for (var i = 0; i < WeightedOrder.Length; i++)
                 {
                     var bucket = WeightedOrder[_cursor++ % WeightedOrder.Length];
                     if (_queues[bucket].Count == 0) continue;
+                    queued = true;
+                    // The lane is asked before the item leaves its queue: a worker never parks with work
+                    // in hand, so another lane can use the window (ADR-0009).
+                    if (_budget is not null &&
+                        !_budget.TryEnter((WorkPriority)bucket, Microseconds(Stopwatch.GetTimestamp()),
+                            out var laneWait))
+                    {
+                        waitMilliseconds = Math.Max(waitMilliseconds, laneWait);
+                        refused ??= (WorkPriority)bucket;
+                        continue;
+                    }
                     item = _queues[bucket].Dequeue();
                     _queueCount--;
                     break;
                 }
             }
-            if (item is null) continue;
+            if (item is null)
+            {
+                if (queued && waitMilliseconds > 0)
+                {
+                    if (refused == WorkPriority.Background)
+                        Interlocked.Increment(ref _budgetWaitsBackground);
+                    else
+                        Interlocked.Increment(ref _budgetWaitsDelivery);
+                    try { await Task.Delay(waitMilliseconds, _shutdown.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { break; }
+                }
+                continue;
+            }
 
             if (item.Cancellation.IsCancellationRequested)
             {
@@ -212,11 +238,6 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
                 Interlocked.Increment(ref _cancelled);
                 continue;
             }
-            try
-            {
-                await AwaitWindowBudgetAsync(item.Priority, _shutdown.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) { item.Cancel(); break; }
             if (item.Cancellation.IsCancellationRequested)
             {
                 item.Cancel();
@@ -240,26 +261,6 @@ public sealed class PriorityWorkScheduler : IAsyncDisposable
                 Interlocked.Exchange(ref _queueWaits[(int)position], queuedUs);
                 Interlocked.Exchange(ref _workTimes[(int)position], Microseconds(ticks));
             }
-        }
-    }
-
-    /// <summary>
-    /// Waits for the lane's share of the window. Delivery work (critical and interactive) may spend the
-    /// whole budget; background work stops at the share reserved for delivery, so a flood of reroutes
-    /// never delays a service delivery (P8).
-    /// </summary>
-    private async Task AwaitWindowBudgetAsync(WorkPriority priority, CancellationToken token)
-    {
-        if (_budget is null) return;
-        while (true)
-        {
-            if (_budget.TryEnter(priority, Microseconds(Stopwatch.GetTimestamp()), out var waitMs))
-                return;
-            if (priority == WorkPriority.Background)
-                Interlocked.Increment(ref _budgetWaitsBackground);
-            else
-                Interlocked.Increment(ref _budgetWaitsDelivery);
-            await Task.Delay(waitMs, token).ConfigureAwait(false);
         }
     }
 
