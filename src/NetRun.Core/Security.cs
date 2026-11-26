@@ -172,13 +172,14 @@ public sealed class CapabilityAuthority(ISimulationClock clock, CapabilityAuthor
     /// express: a quarantined host authorizes nothing, a secure host never answers discovery implicitly.
     /// </summary>
     public AuthorizationResult Authorize(PrincipalId subject, HostId target, CapabilityCategory category,
-        string? serviceKey, SecurityProfile profile = SecurityProfile.Standard)
+        string? serviceKey, SecurityProfile profile = SecurityProfile.Standard, bool lockdown = false)
     {
         if (subject.IsNone || target.IsNone)
             return new AuthorizationResult(AuthorizationStatus.Denied, CapabilityToken.None);
         // Lockdown is not absolute: it refuses ordinary authority, but it must stay breakable and it must not
-        // hide whether something is there. A breach grant and plain discovery still pass.
-        var quarantine = profile == SecurityProfile.Quarantine;
+        // hide whether something is there. A breach grant and plain discovery still pass. A host that raised
+        // its own alert to Lockdown (§9.3) is treated like a quarantine: no implicit authority, no defaults.
+        var quarantine = profile == SecurityProfile.Quarantine || lockdown;
 
         var now = _clock.NowMilliseconds;
         CapabilityGrant? best = null;

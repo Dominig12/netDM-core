@@ -486,7 +486,8 @@ public sealed class ActionPipeline(
         var targetHost = _hosts.Get(request.TargetHost);
         var profile = targetHost?.Security?.Profile ?? SecurityProfile.Standard;
         var authorization = _authority.Authorize(request.Principal, request.TargetHost,
-            descriptor.RequiredCapability, descriptor.ServiceKey, profile);
+            descriptor.RequiredCapability, descriptor.ServiceKey, profile,
+            lockdown: LockedDown(request.TargetHost));
         if (!authorization.Allowed)
             // One refusal for every way of not being allowed: the code and the reason must not tell an
             // observer whether the target exists or which policy refused it (PRIM-002, AT-12).
@@ -888,7 +889,8 @@ public sealed class ActionPipeline(
             return AuthorizationStatus.Denied;
         var profile = host.Security?.Profile ?? SecurityProfile.Standard;
         var check = _authority.Authorize(prepared.Context.Principal, prepared.Context.TargetHost,
-            descriptor.RequiredCapability, descriptor.ServiceKey, profile);
+            descriptor.RequiredCapability, descriptor.ServiceKey, profile,
+            lockdown: LockedDown(prepared.Context.TargetHost));
         return check.Allowed ? AuthorizationStatus.Ok : check.Status;
     }
 
@@ -993,6 +995,10 @@ public sealed class ActionPipeline(
     }
 
     private AlertRegistry? _alerts;
+
+    /// <summary>Whether the host raised its own alert to Lockdown (§9.3): ordinary authority then stops.</summary>
+    private bool LockedDown(HostId host) =>
+        (_alerts?.Level(host) ?? HostAlertLevel.Normal) >= HostAlertLevel.Lockdown;
 
     private sealed class MutationScope(ActionPipeline pipeline, ActionContext context) : INetRunMutationScope
     {
