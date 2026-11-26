@@ -77,7 +77,11 @@ public sealed class AlertRegistry(ISimulationClock clock, HostAlertOptions? opti
             var oldest = _states.Values.OrderBy(state => state.RaisedAtMilliseconds).First();
             _states.Remove(oldest.Host.Value);
         }
-        var created = new HostAlertState(host, HostAlertLevel.Suspicious, now, reason);
+        // A loud signal may skip levels on a host that was quiet: the first raise counts its steps too,
+        // otherwise a forced attempt would only ever make a fresh host "suspicious".
+        var level = (HostAlertLevel)Math.Min((int)HostAlertLevel.Lockdown,
+            (int)HostAlertLevel.Suspicious + steps - 1);
+        var created = new HostAlertState(host, level, now, reason);
         _states[host.Value] = created;
         return created;
     }
