@@ -58,6 +58,8 @@ public sealed class NetRunRuntime : IEffectTargets
         Effects.AttachTargets(new EffectTargets(this));
         Lives = new DigitalLifeRegistry(clock, Hosts, Resources);
         Presences = new PresenceRegistry(clock, Hosts, Lives);
+        Agents = new AgentRegistry(clock, Hosts, Resources);
+        Actions.AttachAgents(Agents);
         Actions.AttachLives(Lives);
         if (_options.RegisterMvpEffects)
         {
@@ -86,6 +88,9 @@ public sealed class NetRunRuntime : IEffectTargets
 
     /// <summary>Where digital presences stand and how they travel (§8.1).</summary>
     public PresenceRegistry Presences { get; }
+
+    /// <summary>Viruses and ICE that live on the network (§12).</summary>
+    public AgentRegistry Agents { get; }
 
     /// <summary>Connects the transport that plans travel routes.</summary>
     public void AttachRoutePlanner(IRoutePlanner planner) => Presences.AttachPlanner(planner);
@@ -150,6 +155,7 @@ public sealed class NetRunRuntime : IEffectTargets
         Programs.CancelHost(host.Id);
         Lives.OnHostDestroyed(host.Id);
         Presences.OnHostDestroyed(host.Id);
+        Agents.OnHostDestroyed(host.Id);
         return result;
     }
 
@@ -173,6 +179,7 @@ public sealed class NetRunRuntime : IEffectTargets
         Programs.Reap();
         Lives.Tick();
         Presences.Tick();
+        Agents.Tick();
         var instructions = Programs.Advance(now);
         var published = PublishEvents();
         return new NetRunTickResult(now, expiredReservations, effects, operations, published, instructions);

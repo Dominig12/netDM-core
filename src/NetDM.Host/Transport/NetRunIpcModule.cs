@@ -15,7 +15,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         "netrun_principal", "netrun_host", "netrun_destroy", "netrun_lifecycle",
         "netrun_grant", "netrun_revoke", "netrun_actions", "netrun_execute", "netrun_complete",
         "netrun_knowledge", "netrun_view", "netrun_panel", "netrun_program", "netrun_program_stop",
-        "netrun_life", "netrun_presence", "netrun_state"
+        "netrun_life", "netrun_presence", "netrun_agent", "netrun_state"
     ];
 
     // NETRUN administration has to work while the map snapshot is still being synchronized: the domain
@@ -40,6 +40,7 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
         "netrun_program_stop" => ProgramStop(payload),
         "netrun_life" => LifeOperation(payload),
         "netrun_presence" => PresenceOperation(payload),
+        "netrun_agent" => AgentOperation(payload),
         "netrun_state" => State(payload),
         _ => new HostIpcResult(false, "unknown_operation", null)
     };
@@ -401,6 +402,82 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
                 reason = presence.Reason
             });
     }
+
+    /// <summary>
+    /// Viruses and ICE: place a strain, list what lives on a host or belongs to the observer, clean one, or purge
+    /// a whole host. The port decides; this only carries the request (§12).
+    /// </summary>
+    private HostIpcResult AgentOperation(JsonElement? payload)
+    {
+        if (payload is not { ValueKind: JsonValueKind.Object } body)
+            return new HostIpcResult(false, "invalid_request", null);
+        var action = Text(body, "action") ?? "";
+        switch (action)
+        {
+            case "deploy":
+            {
+                if (Text(body, "principal") is not { Length: > 0 } name || Integer(body, "host") is not { } host || host <= 0)
+                    return new HostIpcResult(false, "invalid_request", null);
+                var owner = netrun.Principal(name);
+                if (owner.IsNone)
+                    return new HostIpcResult(false, "limit_exceeded", null);
+                var kind = (Text(body, "kind") ?? "virus") == "ice" ? NetRun.Core.AgentKind.Ice : NetRun.Core.AgentKind.Virus;
+                var definition = new NetRun.Core.AgentDefinition(
+                    Text(body, "strain") ?? "net.strain",
+                    kind,
+                    ComputeCu: Clamp(Integer(body, "computeCu"), 0, 64, 2),
+                    MemorySlots: Clamp(Integer(body, "memorySlots"), 0, 32, 1),
+                    SpreadIntervalMilliseconds: Clamp(Integer(body, "intervalMs"), 200, 600_000, 5_000),
+                    MaxGeneration: Clamp(Integer(body, "generations"), 0, 16, 3),
+                    MaxCopiesPerHost: Clamp(Integer(body, "copies"), 1, 64, 2),
+                    IntegrityLossPerHop: Clamp(Integer(body, "lossPerHop"), 0, 100, 5));
+                var placed = netrun.DeployAgent(owner, new HostId((ulong)host), definition,
+                    Clamp(Integer(body, "budget"), 0, 64, 3), Clamp(Integer(body, "integrity"), 1, 100, 100));
+                return placed.Agent is null
+                    ? new HostIpcResult(false, StatusCode(placed.Status), new { status = StatusCode(placed.Status), reason = placed.Reason })
+                    : new HostIpcResult(true, null, AgentDto(placed.Agent));
+            }
+            case "list":
+            {
+                if (Integer(body, "host") is { } host && host > 0)
+                    return new HostIpcResult(true, null, new { status = "ok", agents = netrun.AgentsOn(new HostId((ulong)host), 32).Select(AgentDto).ToArray() });
+                if (Text(body, "principal") is not { Length: > 0 } name)
+                    return new HostIpcResult(false, "invalid_request", null);
+                var owner = netrun.Principal(name);
+                return new HostIpcResult(true, null, new { status = "ok", agents = netrun.AgentsOf(owner, 32).Select(AgentDto).ToArray() });
+            }
+            case "clean":
+            {
+                if (Integer(body, "agent") is not { } id || id <= 0 || Text(body, "principal") is not { Length: > 0 } name)
+                    return new HostIpcResult(false, "invalid_request", null);
+                var actor = netrun.Principal(name);
+                var cleaned = netrun.CleanAgent(actor, (ulong)id);
+                return new HostIpcResult(cleaned.Succeeded, cleaned.Succeeded ? null : StatusCode(cleaned.Status),
+                    new { status = StatusCode(cleaned.Status) });
+            }
+            case "purge":
+            {
+                if (Integer(body, "host") is not { } host || host <= 0)
+                    return new HostIpcResult(false, "invalid_request", null);
+                var removed = netrun.PurgeAgentsOn(new HostId((ulong)host));
+                return new HostIpcResult(true, null, new { status = "ok", removed });
+            }
+            default:
+                return new HostIpcResult(false, "unknown_action", null);
+        }
+    }
+
+    private static object AgentDto(NetRun.Core.AgentSnapshot agent) => new
+    {
+        id = agent.Id,
+        strain = agent.Strain,
+        kind = agent.Kind == NetRun.Core.AgentKind.Ice ? "ice" : "virus",
+        host = agent.Host.Value,
+        generation = agent.Generation,
+        integrity = agent.Integrity,
+        spreads = agent.SpreadsLeft,
+        nextSpreadAt = agent.NextSpreadAt
+    };
 
     private HostIpcResult LifeOperation(JsonElement? payload)
     {

@@ -129,6 +129,9 @@ public interface INetRunWorldReader
 
     EffectInstance[] Effects(HostId target, int limit);
 
+    /// <summary>Agents living on a host, bounded (§12).</summary>
+    AgentSnapshot[] Agents(HostId host, int limit);
+
     /// <summary>
     /// Hosts this principal may discover, bounded. A host it may not discover never appears, so a
     /// selector can never reveal a hidden object through a count or an error (PRIM-002, AT-12).
@@ -153,6 +156,9 @@ public interface INetRunMutationScope
 
     /// <summary>The read model of the committing host, so a result can be built from authoritative state.</summary>
     INetRunWorldReader World { get; }
+
+    /// <summary>Removes every agent on a host, as a repair. Returns how many were removed.</summary>
+    int PurgeAgents(HostId host);
 
     /// <summary>Applies a registered effect within its server-side definition bounds.</summary>
     EffectResult ApplyEffect(EffectKind kind, HostId target, int magnitude, int durationMilliseconds, string origin);
@@ -331,6 +337,7 @@ public sealed class ActionPipeline(
     private INetRunTransport? _transport;
     private IHopDistance? _hops;
     private DigitalLifeRegistry? _lives;
+    private AgentRegistry? _agents;
     private ulong _nextOperation;
 
     public int ActionCount => _actions.Count;
@@ -354,6 +361,9 @@ public sealed class ActionPipeline(
     /// the declared range is not enforced, which is why the composition root always attaches it.
     /// </summary>
     public void AttachRange(IHopDistance hops) => _hops = hops ?? throw new ArgumentNullException(nameof(hops));
+
+    /// <summary>Connects the agents, so a repair can clear a host.</summary>
+    public void AttachAgents(AgentRegistry agents) => _agents = agents ?? throw new ArgumentNullException(nameof(agents));
 
     /// <summary>Connects the digital lives, so an operation is fenced to the generation that controls them.</summary>
     public void AttachLives(DigitalLifeRegistry lives) => _lives = lives ?? throw new ArgumentNullException(nameof(lives));
@@ -930,6 +940,7 @@ public sealed class ActionPipeline(
         public ResourceSnapshot? Resources(HostId host) => pipeline._resources.Snapshot(host);
 
         public EffectInstance[] Effects(HostId target, int limit) => pipeline.EffectsReader(target, limit);
+        public AgentSnapshot[] Agents(HostId host, int limit) => pipeline._agents?.On(host, limit) ?? [];
 
         public KnowledgeLevel KnowledgeOf(PrincipalId principal, HostId host) =>
             pipeline._knowledge?.Level(principal, host) ?? KnowledgeLevel.Unknown;
@@ -982,6 +993,8 @@ public sealed class ActionPipeline(
         public long NowMilliseconds => pipeline._clock.NowMilliseconds;
 
         public INetRunWorldReader World => new WorldReader(pipeline, pipeline._clock.NowMilliseconds);
+
+        public int PurgeAgents(HostId host) => pipeline._agents?.Purge(host) ?? 0;
 
         public EffectResult ApplyEffect(EffectKind kind, HostId target, int magnitude, int durationMilliseconds,
             string origin) =>

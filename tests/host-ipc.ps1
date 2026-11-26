@@ -2170,6 +2170,24 @@ stop
         execution = $lifeDeckId; target = $lifeDeckId; key = 'nr-life-stale'; identity = $lifeId; control = 1 } }
     Assert-True ($staleAction.result.status -ceq 'forbidden' -and $staleAction.result.reason -ceq 'life_generation') "the retired generation cannot act: $($staleAction | ConvertTo-Json -Compress -Depth 4)"
 
+    # Agents (§12): a strain is placed on an owned host, listed, costs the host compute, and is purged.
+    $strainHost = Invoke-Next @{ op = 'netrun_host'; payload = @{ name = 'netrun.strain'; class = 'Server'
+        capacityCu = 30; rateCu = 10; memorySlots = 4; node = 42; wired = $true } }
+    $strainHostId = $strainHost.result.host
+    Assert-True ($strainHost.ok) 'a host for a strain is declared'
+    $beforeBuffer = (Invoke-Next @{ op = 'netrun_view'; payload = @{ principal = 'ckey-operator' } }).result
+    $deployed = Invoke-Next @{ op = 'netrun_agent'; payload = @{ action = 'deploy'; principal = 'ckey-operator'
+        host = $strainHostId; strain = 'test.virus'; kind = 'virus'; computeCu = 2; memorySlots = 1
+        intervalMs = 1000; generations = 2; copies = 2; budget = 2; integrity = 100 } }
+    Assert-True ($deployed.ok -and $deployed.result.id -gt 0 -and $deployed.result.kind -ceq 'virus') "a strain is placed: $($deployed | ConvertTo-Json -Compress -Depth 4)"
+    $listed = Invoke-Next @{ op = 'netrun_agent'; payload = @{ action = 'list'; host = $strainHostId } }
+    Assert-True ($listed.ok -and $listed.result.agents.Count -eq 1) "the strain lives on its host: $($listed | ConvertTo-Json -Compress -Depth 4)"
+    $panelWithAgents = Invoke-Next @{ op = 'netrun_panel'; payload = @{ principal = 'ckey-operator' } }
+    Assert-True ($panelWithAgents.ok -and $panelWithAgents.result.agents.Count -ge 1) 'the owner sees its own strain in the projection'
+    $purged = Invoke-Next @{ op = 'netrun_agent'; payload = @{ action = 'purge'; host = $strainHostId } }
+    Assert-True ($purged.ok -and $purged.result.removed -eq 1) 'a purge clears the host'
+    $afterPurge = Invoke-Next @{ op = 'netrun_agent'; payload = @{ action = 'list'; host = $strainHostId } }
+    Assert-True ($afterPurge.ok -and $afterPurge.result.agents.Count -eq 0) 'nothing is left after the purge'
     $state = Invoke-Next @{ op = 'netrun_state'; payload = @{ limit = 16 } }
     $deckState = $state.result.hosts | Where-Object { $_.host -eq $deckHost } | Select-Object -First 1
     Assert-True ($state.ok -and $null -ne $deckState -and $deckState.bufferCu -lt 40) "the buffer reflects spent compute: $($deckState | ConvertTo-Json -Compress)"

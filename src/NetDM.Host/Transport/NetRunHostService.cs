@@ -13,7 +13,7 @@ namespace NetDM.Host.Transport;
 /// single logical writer is what keeps its composed invariants true. The gate is never held across an
 /// await or IPC I/O.
 /// </summary>
-internal sealed class NetRunHostService : BackgroundService, INetRunTransport, IHopDistance, IRoutePlanner
+internal sealed class NetRunHostService :  BackgroundService, INetRunTransport, IHopDistance, IRoutePlanner, IAgentNetwork
 {
     /// <summary>NETRUN reads the same monotonic quantum clock as the transport, in milliseconds.</summary>
     private sealed class QuantumClock(GameNetworkService game) : ISimulationClock
@@ -40,6 +40,7 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
         _runtime.Actions.AttachTransport(this);
         _runtime.Actions.AttachRange(this);
         _runtime.AttachRoutePlanner(this);
+        _runtime.Agents.AttachNetwork(this);
     }
 
     public long TickCount => Volatile.Read(ref _ticks);
@@ -278,6 +279,26 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
         return route.Found && route.Path.Count >= 2 ? route.Path.Count - 1 : null;
     }
 
+    /// <summary>
+    /// Hosts adjacent to this one on the published graph. A virus spreads only where a cable already runs, so
+    /// its reach is the network's reach (§12.1); a host without a node has no neighbours.
+    /// </summary>
+    public HostId[] Neighbours(HostId host)
+    {
+        var node = _runtime.Hosts.Get(host)?.Network?.Node;
+        if (node is null)
+            return [];
+        var physical = _game.Snapshot.Physical;
+        if (!physical.Nodes.TryGetValue(node.Value, out var placed))
+            return [];
+        var result = new List<HostId>();
+        foreach (var neighbour in placed.Links.Keys)
+            foreach (var candidate in _runtime.Hosts.All(4_096))
+                if (candidate.Network?.Node == neighbour)
+                    result.Add(candidate.Id);
+        return [.. result.Distinct()];
+    }
+
     /// <summary>Finalizes an accepted remote operation with what the world reported.</summary>
     public ActionOutcome Complete(OperationId operation, ActionStatus status, string? reason, string? result)
     {
@@ -390,6 +411,38 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
     {
         lock (_gate)
             return _runtime.Presences.Get(identity);
+    }
+
+    // ---- Agents: viruses and ICE (§12) -----------------------------------------------------------------------
+
+    public AgentResult DeployAgent(PrincipalId owner, HostId host, AgentDefinition definition, long budget, int integrity)
+    {
+        lock (_gate)
+            return _runtime.Agents.Deploy(owner, host, definition, budget, integrity);
+    }
+
+    public AgentSnapshot[] AgentsOn(HostId host, int limit)
+    {
+        lock (_gate)
+            return _runtime.Agents.On(host, limit);
+    }
+
+    public AgentSnapshot[] AgentsOf(PrincipalId owner, int limit)
+    {
+        lock (_gate)
+            return _runtime.Agents.OwnedBy(owner, limit);
+    }
+
+    public AgentResult CleanAgent(PrincipalId actor, ulong id)
+    {
+        lock (_gate)
+            return _runtime.Agents.Clean(actor, id);
+    }
+
+    public int PurgeAgentsOn(HostId host)
+    {
+        lock (_gate)
+            return _runtime.Agents.Purge(host);
     }
 
     /// <summary>The backups one identity holds, newest first. The window needs them to offer a restore.</summary>
@@ -589,6 +642,17 @@ internal sealed class NetRunHostService : BackgroundService, INetRunTransport, I
                     arriveAt = presence.ArriveAtMilliseconds
                 }).FirstOrDefault(),
                 // The backups of the observer's own core: what it may restore, and when each copy was taken.
+                // The observer's own strains: what it planted and what still lives.
+                agents = _runtime.Agents.OwnedBy(principal, 16).Select(agent => new
+                {
+                    id = agent.Id,
+                    strain = agent.Strain,
+                    kind = agent.Kind == AgentKind.Ice ? "ice" : "virus",
+                    host = agent.Host.Value,
+                    generation = agent.Generation,
+                    integrity = agent.Integrity,
+                    spreads = agent.SpreadsLeft
+                }).ToArray(),
                 backups = BackupsFor(principal, 8),
                 lives = _runtime.Lives.ControlledBy(principal, operationLimit).Select(core => new
                 {

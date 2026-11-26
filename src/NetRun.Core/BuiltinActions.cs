@@ -134,6 +134,7 @@ public static class BuiltinActions
         ArgumentNullException.ThrowIfNull(pipeline);
         pipeline.Register(new InspectAction());
         pipeline.Register(new ScanAction());
+    pipeline.Register(new PurgeAction());
         // The first operation that reaches the physical world. Two actions rather than one parameterised
         // command, so a context menu, a hotkey and a preset can all name exactly what they will do.
         pipeline.Register(new DoorOpenAction());
@@ -199,5 +200,37 @@ public abstract class RemoteDoorAction(bool open) : IRemoteGameAction
         // so the idempotency key is built in that alphabet rather than reusing the internal notation.
         return scope.Send(RemoteDoorAction.ServiceType, instance, "set_state",
             string.Create(CultureInfo.InvariantCulture, $"nr-{context.OperationId.Value}"), arguments);
+    }
+}
+/// <summary>
+/// Cleaning a host of agents (§12.2): a repair action, not a hostile one. It needs control of the host and
+/// costs compute, and it reports what it actually removed instead of claiming a clean machine.
+/// </summary>
+public sealed class PurgeAction : IGameAction
+{
+    public ActionDescriptor Descriptor { get; } = new(
+        "net.purge", 1, ActionKind.Command, ActionCategory.Security,
+        CapabilityCategory.Control, "net.purge", ComputeCost: 2, MemoryCost: 0, CooldownMilliseconds: 5_000,
+        RangeHops: 4, DisplayName: "Очистка",
+        Documentation: "Снимает с известного хоста вирусы и ICE. Требует контроля над хостом.",
+        Parameters: [new ActionParameter("host", ParameterType.Integer, true, "Идентификатор хоста")]);
+
+    public string ContentDigest => "net.purge";
+
+    public ActionValidation Validate(in ActionContext context, INetRunWorldReader world)
+    {
+        if (!world.Knows(context.Principal, context.TargetHost, KnowledgeLevel.Observed))
+            return new ActionValidation(ActionStatus.InvalidState, "not_known");
+        return ActionValidation.Pass;
+    }
+
+    public ActionExecution Commit(in ActionContext context, INetRunMutationScope scope)
+    {
+        if (scope.World.Host(scope.TargetHost) is null)
+            return new ActionExecution(ActionStatus.TargetDestroyed, "unknown_host");
+        var removed = scope.PurgeAgents(scope.TargetHost);
+        scope.Emit("net.agents.purged", $"{{\"host\":{scope.TargetHost.Value},\"removed\":{removed}}}");
+        return new ActionExecution(ActionStatus.Ok, null,
+            $"{{\"host\":{scope.TargetHost.Value},\"removed\":{removed}}}");
     }
 }
