@@ -962,3 +962,29 @@ N раз, печатает падения по раундам и отдельн�
 `PresenceRegistry.HostOf`, `DigitalLifeRegistry` с контроллером), тревога от прочих событий
 (уничтожение ICE, IDS, вторжение в пространство), UI-003 (слои карты с движением), `door_station`
 как ограничение герметичного профиля и первый прогон CI для L8-4.
+### Передача состояния на конец сессии (26.11.2026)
+
+Собрано компилятором (не прогоном): `dotnet build src/NetDM.Host` и `dotnet build tests/NetRun.Tests` —
+**0 предупреждений, 0 ошибок** в обоих. Значит, весь новый код домена (тревога, её связка с конвейером,
+`lockdown` в правах, распространение к соседям, проекции) и оба новых теста синтаксически и типово
+корректны.
+
+**Не прогнано намеренно** (по договорённости с владельцем — запуск по его команде):
+
+| Проверка | Зачем |
+|---|---|
+| `dotnet run --project tests/NetRun.Tests` | 481 прежних + `AlertTests` + `AlertIntegrationTests`; возможны семантические правки в новых тестах |
+| `jest NetrunView` и `tsc --noEmit` | колонка «Тревога» и необязательное поле `alert` в модели |
+| `scripts/build-bluemoon-unit-dmb.ps1` + живой набор | регистрация всех консолей нодами, правка `network_life_physical`, `NetworkSpace` не менялся в этот заход |
+
+**Порядок первого прогона, чтобы падения не смешивались:**
+
+1. `dotnet build src/NetDM.Host -c Release` — уже зелёный;
+2. `dotnet run --project tests/NetRun.Tests -c Release` — домен;
+3. `cd tgui; node .yarn/releases/yarn-4.18.1.cjs jest packages/tgui/interfaces/NetrunView` и `tsc --noEmit`;
+4. герметичная DM-сборка;
+5. `pwsh -File scripts/repeat-live-suite.ps1 -BuildDirectory C:\nrun\src -BridgeDll native\byond\build\netdm_byond.dll -Rounds 2` — он сам отделит «плавает» от «сломано».
+
+**Открытые пункты:** след в знаниях защитника (мост principal→identity), тревога от прочих событий,
+UI-003 (слои карты с движением), `door_station` как ограничение профиля, первый прогон CI для L8-4 и
+сам проверочный проход выше.
