@@ -34,8 +34,12 @@ public sealed record MemoryComponent(int Slots);
 /// <summary>Virtual storage of files, data and snapshots, in bytes.</summary>
 public sealed record StorageComponent(long Bytes);
 
-/// <summary>Security posture and the limits of the defensive components installed here.</summary>
-public sealed record SecurityComponent(SecurityProfile Profile, int MaxServices, int MaxPresences);
+/// <summary>
+/// Security posture and the limits of the defensive components installed here. <paramref name="IntrusionDetection"/>
+/// is an IDS (§9.3): it does not stop an attempt, it makes a quiet one noticed. Only ICE defends and identifies.
+/// </summary>
+public sealed record SecurityComponent(SecurityProfile Profile, int MaxServices, int MaxPresences,
+    bool IntrusionDetection = false);
 
 /// <summary>
 /// The contracts a host offers, as service type to instance name. A caller addresses the instance it may
@@ -91,7 +95,7 @@ public sealed record HostDefinition(
             .Append(compute is null ? "-" : $"{compute.CapacityCu},{compute.RateCuPerSecond}").Append('|')
             .Append(memory?.Slots ?? -1).Append('|')
             .Append(storage?.Bytes ?? -1).Append('|')
-            .Append(security is null ? "-" : $"{(byte)security.Profile},{security.MaxServices},{security.MaxPresences}")
+            .Append(security is null ? "-" : $"{(byte)security.Profile},{security.MaxServices},{security.MaxPresences},{(security.IntrusionDetection ? 1 : 0)}")
             .Append('|')
             .Append(services?.Canonical() ?? "-")
             .ToString();

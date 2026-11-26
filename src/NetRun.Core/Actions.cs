@@ -169,6 +169,12 @@ public interface INetRunMutationScope
     /// <summary>Stores what the acting principal has just learned, for example from a scan.</summary>
     void Remember(HostId host, KnowledgeLevel level, int confidence);
 
+    /// <summary>
+    /// Stores what another observer has just learned. A defender that traced an intrusion learns where the
+    /// attempt came from; the intruder cannot write into somebody else's knowledge by asking to (§9.4).
+    /// </summary>
+    void RememberFor(PrincipalId observer, HostId host, KnowledgeLevel level, int confidence);
+
     /// <summary>The alert level of the committing target (§9.3); Normal when nothing raised it.</summary>
     HostAlertLevel AlertLevel();
 
@@ -274,6 +280,22 @@ public sealed record ActionOutcome(
 
 /// <summary>An event produced by a committed action, waiting for the owner to publish it.</summary>
 public sealed record ActionEvent(string Topic, string Payload, OperationId Operation, long AtMilliseconds);
+
+/// <summary>
+/// One operation as the traffic view needs it: what was asked, between which hosts, when, and how it ended.
+/// It is a projection of the operation log, not a record of packets: NETDM decides how the request travels
+/// and this model never claims to know a route it did not see (§15.2, §15.3).
+/// </summary>
+public sealed record ActionTrace(
+    OperationId OperationId,
+    ActionKind Kind,
+    ActionCategory Category,
+    ActionStatus Status,
+    HostId ExecutionHost,
+    HostId TargetHost,
+    long IssuedAtMilliseconds,
+    long CompletedAtMilliseconds,
+    string? Reason);
 
 public sealed record ActionPipelineOptions(
     int MaxOperations = 16_384,
@@ -786,6 +808,29 @@ public sealed class ActionPipeline(
     }
 
     /// <summary>
+    /// The operations of one principal, newest first, with the hosts they went between and when they ended.
+    /// A request to a host the observer may not see is still its own request, so it is reported to its owner
+    /// and to nobody else (§15.3).
+    /// </summary>
+    public ActionTrace[] RecentTraces(PrincipalId principal, int limit)
+    {
+        if (principal.IsNone || limit <= 0)
+            return [];
+        var result = new List<ActionTrace>(Math.Min(limit, 32));
+        foreach (var record in _operations.Values.OrderByDescending(record => record.Id.Value))
+        {
+            if (result.Count >= limit)
+                break;
+            if (record.Principal != principal)
+                continue;
+            result.Add(new ActionTrace(record.Id, record.Descriptor.Kind, record.Descriptor.Category,
+                MapState(record.State), record.ExecutionHost, record.TargetHost, record.CreatedAt,
+                record.CompletedAt, record.Reason));
+        }
+        return result.ToArray();
+    }
+
+    /// <summary>
     /// Records an event a program produced after its own committed step. It goes through the same queue and the
     /// same topic counters as the events of actions, so a program cannot invent a system event (PRIM-004).
     /// </summary>
@@ -1021,6 +1066,13 @@ public sealed class ActionPipeline(
 
         public void Remember(HostId host, KnowledgeLevel level, int confidence) =>
             pipeline._knowledge?.Remember(context.Principal, host, level, confidence);
+
+        public void RememberFor(PrincipalId observer, HostId host, KnowledgeLevel level, int confidence)
+        {
+            if (observer.IsNone)
+                return;
+            pipeline._knowledge?.Remember(observer, host, level, confidence);
+        }
 
         public HostAlertLevel AlertLevel() =>
             pipeline._alerts?.Level(context.TargetHost) ?? HostAlertLevel.Normal;

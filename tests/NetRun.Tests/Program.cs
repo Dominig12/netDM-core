@@ -52,6 +52,8 @@ internal static class Program
             ExternalWorldTests.Run();
         if (Matches("agent"))
             AgentTests.Run();
+        if (Matches("defender"))
+            DefenderTests.Run();
         AlertTests.Run();
         AlertIntegrationTests.Run();
 

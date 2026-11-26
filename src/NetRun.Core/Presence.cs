@@ -11,7 +11,10 @@ public sealed record PresenceSnapshot(
     HostId Destination,
     int Hops,
     long ArriveAtMilliseconds,
-    string? Reason)
+    string? Reason,
+    // When the current move left. Together with the arrival it makes the travel measurable rather than guessed,
+    // so a map can draw real progress instead of an animation with invented timing (§15.2).
+    long StartedAtMilliseconds = 0)
 {
     public bool Moving => State == PresenceState.Traveling;
 }
@@ -33,6 +36,16 @@ public interface IRoutePlanner
 {
     /// <summary>The route between two hosts, or null when the transport cannot reach the destination.</summary>
     RoutePlan? Plan(HostId from, HostId to);
+}
+
+/// <summary>
+/// Notified when a presence lands at a host (§8.1). The registry records where presences stand; what a host
+/// makes of an arrival — an alarm, a trace, nothing at all — is a policy decided outside it, by the owner.
+/// </summary>
+public interface IPresenceArrivalSink
+{
+    /// <summary>Called after the presence has actually arrived at <paramref name="host"/> from <paramref name="source"/>.</summary>
+    void Arrived(PrincipalId controller, HostId host, HostId source);
 }
 
 public sealed record PresenceOptions(
@@ -61,19 +74,28 @@ public sealed class PresenceRegistry(
         public HostId Source = HostId.None;
         public int Hops;
         public long ArriveAt;
+        public long StartedAt;
         public string? Reason;
 
-        public PresenceSnapshot Snapshot() => new(Identity, Controller, Host, State, Destination, Hops, ArriveAt, Reason);
+        public PresenceSnapshot Snapshot() => new(Identity, Controller, Host, State, Destination, Hops, ArriveAt,
+            Reason, StartedAt);
     }
 
     private readonly ISimulationClock _clock = clock ?? throw new ArgumentNullException(nameof(clock));
     private readonly HostRegistry _hosts = hosts ?? throw new ArgumentNullException(nameof(hosts));
     private readonly DigitalLifeRegistry _lives = lives ?? throw new ArgumentNullException(nameof(lives));
     private IRoutePlanner? _routes;
+    private IPresenceArrivalSink? _arrivals;
     private readonly PresenceOptions _options = options ?? new PresenceOptions();
     private readonly Dictionary<ulong, Record> _presences = [];
 
     public int Count => _presences.Count;
+
+    /// <summary>
+    /// Connects whatever has to know that a presence landed — a host that checks who arrived and raises its
+    /// own alarm. The registry stays a record of places; the judgement belongs to the owner.
+    /// </summary>
+    public void AttachArrivals(IPresenceArrivalSink sink) => _arrivals = sink ?? throw new ArgumentNullException(nameof(sink));
 
     /// <summary>
     /// Connects the transport that plans routes. Without it travel is refused rather than guessed, because a
@@ -142,6 +164,7 @@ public sealed class PresenceRegistry(
         var travel = Math.Clamp(route.TravelMilliseconds, _options.PerHopMilliseconds,
             _options.MaxTravelMilliseconds);
         record.ArriveAt = _clock.NowMilliseconds + travel;
+        record.StartedAt = _clock.NowMilliseconds;
         record.Reason = null;
         return new PresenceResult(PresenceStatus.Ok, record.Snapshot());
     }
@@ -158,6 +181,7 @@ public sealed class PresenceRegistry(
         record.Destination = HostId.None;
         record.Hops = 0;
         record.ArriveAt = 0;
+        record.StartedAt = 0;
         record.Reason = reason;
         return new PresenceResult(PresenceStatus.Ok, record.Snapshot());
     }
@@ -191,14 +215,19 @@ public sealed class PresenceRegistry(
                 Return(record, "route_lost");
                 continue;
             }
+            var source = record.Source;
             record.Host = record.Destination;
             record.State = PresenceState.Idle;
             record.Destination = HostId.None;
             record.Source = HostId.None;
             record.Hops = 0;
             record.ArriveAt = 0;
+            record.StartedAt = 0;
             record.Reason = null;
             arrived++;
+            // The arrival itself is already authoritative; what the host makes of it is a consequence, not a
+            // condition, so a sink that refuses to listen can never stop a presence from landing (§8.1).
+            _arrivals?.Arrived(record.Controller, record.Host, source);
         }
         return arrived;
     }
@@ -211,6 +240,7 @@ public sealed class PresenceRegistry(
         record.Source = HostId.None;
         record.Hops = 0;
         record.ArriveAt = 0;
+        record.StartedAt = 0;
         record.Reason = reason;
     }
 

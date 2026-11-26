@@ -63,6 +63,9 @@ public sealed class NetRunRuntime : IEffectTargets
         Alerts = new AlertRegistry(clock);
         Actions.AttachAlerts(Alerts);
         Actions.AttachLives(Lives);
+        // A closed host notices a stranger arriving at it: the alarm and the trace are policy, so they live
+        // here rather than inside the registry that only records where presences stand (§9.3, §9.4).
+        Presences.AttachArrivals(new ArrivalPolicy(this));
         if (_options.RegisterMvpEffects)
         {
             foreach (var definition in EffectRegistry.MvpDefaults())
@@ -136,6 +139,8 @@ public sealed class NetRunRuntime : IEffectTargets
             Resources.Detach(previous.Id);
             Authority.RevokeTarget(previous.Id);
             Effects.RemoveTarget(previous.Id);
+            // A new generation is a new watch: the alarm of the object that is gone does not describe this one.
+            Alerts.Forget(previous.Id);
             Actions.CancelTarget(previous.Id, "rebound");
         }
         Resources.Attach(host.Id, definition.Compute, definition.Memory, definition.Storage);
@@ -156,6 +161,8 @@ public sealed class NetRunRuntime : IEffectTargets
         Authority.RevokeTarget(host.Id);
         Effects.RemoveTarget(host.Id);
         Knowledge.Forget(host.Id);
+        // A projection of a host that no longer exists must not keep describing it as alarmed.
+        Alerts.Forget(host.Id);
         Actions.CancelTarget(host.Id, "target_destroyed");
         Programs.CancelHost(host.Id);
         Lives.OnHostDestroyed(host.Id);
@@ -185,6 +192,8 @@ public sealed class NetRunRuntime : IEffectTargets
         Lives.Tick();
         Presences.Tick();
         Agents.Tick();
+        // An alarm that nothing renews steps back down on its own, whether or not somebody is watching.
+        Alerts.Sweep();
         var instructions = Programs.Advance(now);
         var published = PublishEvents();
         return new NetRunTickResult(now, expiredReservations, effects, operations, published, instructions);
@@ -256,6 +265,42 @@ public sealed class NetRunRuntime : IEffectTargets
 
         public int Resistance(HostId host) => ((IEffectTargets)runtime).Resistance(host);
     }
+
+    /// <summary>
+    /// What a host makes of a presence landing on it (§9.3, §9.4). An ordinary host does not check papers: the
+    /// arrival changes nothing, because a presence is not authority (§8.1). A secured or quarantined host
+    /// notices the stranger, raises its own alarm and lets its guards learn the way the arrival came. The
+    /// arrival itself is never refused here — the defence is a reaction, not a wall (§9.3, SEC-002).
+    /// </summary>
+    private sealed class ArrivalPolicy(NetRunRuntime runtime) : IPresenceArrivalSink
+    {
+        /// <summary>How many guards are told about one arrival; the same bound the rest of the domain uses.</summary>
+        private const int GuardSlots = 8;
+
+        public void Arrived(PrincipalId controller, HostId host, HostId source)
+        {
+            if (controller.IsNone || host.IsNone)
+                return;
+            if (runtime.Hosts.Get(host) is not { } snapshot)
+                return;
+            var security = snapshot.Security;
+            if (security is null || security.Profile < SecurityProfile.Secure)
+                return;
+            // A host that already lets this principal look around has nothing to be alarmed about.
+            if (runtime.Authority.Authorize(controller, host, CapabilityCategory.Discovery, null, security.Profile).Allowed)
+                return;
+            runtime.Alerts.Raise(host, 1, "presence_intrusion");
+            if (source.IsNone || source == host)
+                return;
+            foreach (var guard in runtime.Agents.On(host, GuardSlots))
+            {
+                if (guard.Kind != AgentKind.Ice || guard.Owner.IsNone || guard.Owner == controller)
+                    continue;
+                runtime.Knowledge.Remember(guard.Owner, source, KnowledgeLevel.Observed, 55);
+            }
+        }
+    }
+
     private static ulong NextSlot(ref ulong counter, int limit)
     {
         if (counter >= (ulong)limit)

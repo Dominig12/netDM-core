@@ -228,7 +228,16 @@ public sealed class PurgeAction : IGameAction
     {
         if (scope.World.Host(scope.TargetHost) is null)
             return new ActionExecution(ActionStatus.TargetDestroyed, "unknown_host");
+        var before = scope.World.Agents(scope.TargetHost, 16);
         var removed = scope.PurgeAgents(scope.TargetHost);
+        // §9.3: a host notices its guard going down. Taking the knowledge of its own ICE away is maintenance
+        // when the guard's owner does it and an intrusion when anybody else does.
+        var hostile = 0;
+        foreach (var agent in before)
+            if (agent.Kind == AgentKind.Ice && agent.Owner != scope.Principal)
+                hostile++;
+        if (hostile > 0)
+            scope.RaiseAlert(2, "ice_destroyed");
         scope.Emit("net.agents.purged", $"{{\"host\":{scope.TargetHost.Value},\"removed\":{removed}}}");
         return new ActionExecution(ActionStatus.Ok, null,
             $"{{\"host\":{scope.TargetHost.Value},\"removed\":{removed}}}");

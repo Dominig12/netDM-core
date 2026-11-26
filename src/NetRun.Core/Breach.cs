@@ -78,10 +78,13 @@ public abstract class BreachActionBase(BreachMode mode, CapabilityCategory categ
         if (host is null)
             return new ActionExecution(ActionStatus.TargetDestroyed, "unknown_host");
         var profile = host.Security?.Profile ?? SecurityProfile.Standard;
+        // A host may watch its own traffic: an IDS does not stop an attempt, but a quiet one is no longer
+        // quiet. It names nobody. ICE is stronger — it defends the host and always sees (§9.3, §12.2).
+        var watching = host.Security?.IntrusionDetection ?? false;
         // ICE defends what it sits on (§12.2): each strain adds difficulty, and a defended host always notices
         // the attempt. It is not an extra action — the breach simply has a harder time and leaves a trace.
         var ice = 0;
-        foreach (var agent in scope.World.Agents(scope.TargetHost, 8))
+        foreach (var agent in scope.World.Agents(scope.TargetHost, AgentSlots))
             if (agent.Kind == AgentKind.Ice)
                 ice++;
         // A host already on high alert is harder to take: the defenders are watching its traffic (§9.3).
@@ -90,7 +93,8 @@ public abstract class BreachActionBase(BreachMode mode, CapabilityCategory categ
         var power = (int)mode;
         var succeeded = power >= difficulty;
         // Loud modes are always noticed; a quiet one is noticed only by a host that is watching closely.
-        var detected = ice > 0 || mode == BreachMode.Forced || (mode == BreachMode.Normal && difficulty >= 2) ||
+        var loud = mode == BreachMode.Forced || ice > 0;
+        var detected = loud || watching || (mode == BreachMode.Normal && difficulty >= 2) ||
             (mode == BreachMode.Stealth && difficulty >= 3);
         var grantedUntil = 0L;
         var grantId = 0UL;
@@ -109,7 +113,10 @@ public abstract class BreachActionBase(BreachMode mode, CapabilityCategory categ
             scope.ApplyEffect(EffectKind.Mark, scope.TargetHost, 1, 30_000, $"breach:{context.OperationId.Value}");
             // Noticing an intrusion raises the host's own alert: a second attempt meets a warier host.
             // A forced attempt or an engaged ICE is a louder signal than a quiet probe.
-            alert = scope.RaiseAlert(mode == BreachMode.Forced || ice > 0 ? 2 : 1, $"breach:{ModeIds[(int)mode]}");
+            alert = scope.RaiseAlert(loud ? 2 : 1, $"breach:{ModeIds[(int)mode]}");
+            // §9.4: whoever guards this host learns where the attempt arrived from — the host, never a claim
+            // the intruder makes about itself, and never a name it did not earn.
+            Trace(context, scope, loud);
             scope.Emit("security.breach.detected", host.Name);
         }
         if (ice > 0)
@@ -127,6 +134,30 @@ public abstract class BreachActionBase(BreachMode mode, CapabilityCategory categ
             expiresAt = grantedUntil
         });
         return new ActionExecution(ActionStatus.Ok, null, payload);
+    }
+
+    /// <summary>How many agents one attempt looks at: the same bound every defended-host routine uses.</summary>
+    private const int AgentSlots = 8;
+
+    /// <summary>
+    /// §9.4: a defence that noticed the attempt learns the host it came from. The defenders are the owners of
+    /// the ICE planted on the target — a host with no guard has nobody to tell, and the host itself is not a
+    /// person. Only a host the attempt actually executed from can be traced, and the intruder is never handed
+    /// a record about itself. A loud attempt is traced precisely; a quiet one leaves only the place it came from.
+    /// </summary>
+    private static void Trace(in ActionContext context, INetRunMutationScope scope, bool precise)
+    {
+        var source = context.ExecutionHost;
+        if (source.IsNone || source == context.TargetHost)
+            return;
+        var level = precise ? KnowledgeLevel.Identified : KnowledgeLevel.Observed;
+        var confidence = precise ? 90 : 55;
+        foreach (var agent in scope.World.Agents(context.TargetHost, AgentSlots))
+        {
+            if (agent.Kind != AgentKind.Ice || agent.Owner.IsNone || agent.Owner == context.Principal)
+                continue;
+            scope.RememberFor(agent.Owner, source, level, confidence);
+        }
     }
 }
 

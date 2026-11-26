@@ -89,7 +89,10 @@ internal sealed class NetRunIpcModule(NetRunHostService netrun) : IHostIpcModule
                 return new HostIpcResult(false, "invalid_security", null);
             security = new SecurityComponent(profile,
                 Clamp(Integer(body, "maxServices"), 0, 256, 8),
-                Clamp(Integer(body, "maxPresences"), 0, 64, 1));
+                Clamp(Integer(body, "maxPresences"), 0, 64, 1),
+                // An IDS is optional and off by default: a device that only declares a profile keeps the
+                // posture it had before the component existed (§9.3).
+                Flag(body, "ids") ?? false);
         }
 
         ServicesComponent? services = null;
