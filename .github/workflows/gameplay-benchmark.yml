@@ -24,7 +24,9 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - name: Build host
-        run: dotnet build src/NetDM.Host/NetDM.Host.csproj -c Release
+        run: |
+          dotnet build src/NetDM.Host/NetDM.Host.csproj -c Release
+          dotnet build src/NetDM.BenchmarkHost/NetDM.BenchmarkHost.csproj -c Release
       - name: Run J, K, L, M and N gameplay suites
         shell: bash
         run: |

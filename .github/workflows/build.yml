@@ -11,7 +11,9 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - name: Build
-        run: dotnet build src/NetDM.Host/NetDM.Host.csproj --configuration Release
+        run: |
+          dotnet build src/NetDM.Host/NetDM.Host.csproj --configuration Release
+          dotnet build src/NetDM.BenchmarkHost/NetDM.BenchmarkHost.csproj --configuration Release
       - name: Core concurrency and consistency tests
         run: dotnet run --project tests/NetDM.SmokeTests --configuration Release
       - name: Framed IPC and session isolation over Unix socket
@@ -37,7 +39,9 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - name: Build on Windows
-        run: dotnet build src/NetDM.Host/NetDM.Host.csproj --configuration Release
+        run: |
+          dotnet build src/NetDM.Host/NetDM.Host.csproj --configuration Release
+          dotnet build src/NetDM.BenchmarkHost/NetDM.BenchmarkHost.csproj --configuration Release
       - name: Core correctness on Windows
         run: dotnet run --project tests/NetDM.SmokeTests --configuration Release
       - name: Framed IPC and session isolation over named pipe
