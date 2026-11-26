@@ -42,7 +42,10 @@ internal static class AlertIntegrationTests
         Check((outcome.Result ?? "").Contains("alert", StringComparison.Ordinal),
             "the verdict names the alert the attempt met");
 
-        // Ordinary authority keeps working while the host is only alarmed; at Lockdown it stops.
+        // Ordinary authority keeps working while the host is only alarmed; at Lockdown it stops. The temporary
+        // control the attempt won is dropped first: it survives a lockdown by design (the lockdown must stay
+        // breakable), and leaving it in place would hide the rule this check is about.
+        runtime.Authority.RevokeAll(actor);
         runtime.Authority.Grant(actor, target.Id, CapabilityCategory.Control, null, 600_000,
             GrantSource.Granted, PrincipalId.None);
         Equal(AuthorizationStatus.Ok, runtime.Authority.Authorize(actor, target.Id,
@@ -56,6 +59,13 @@ internal static class AlertIntegrationTests
         Equal(AuthorizationStatus.Ok, runtime.Authority.Authorize(actor, target.Id,
             CapabilityCategory.Control, null, SecurityProfile.Standard).Status,
             "the grant itself is untouched: only the pipeline's lockdown flag refuses it");
+
+        // A lockdown is not absolute: what a breach won still opens the host (SEC-002, §9.2).
+        runtime.Authority.Grant(actor, target.Id, CapabilityCategory.Control, null, 10_000,
+            GrantSource.Breach, PrincipalId.None);
+        Equal(AuthorizationStatus.Ok, runtime.Authority.Authorize(actor, target.Id,
+            CapabilityCategory.Control, null, SecurityProfile.Standard, lockdown: true).Status,
+            "a breach grant still opens a host that is locked down");
 
         AlertTravelsOneHop();
     }
