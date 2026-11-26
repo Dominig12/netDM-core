@@ -6,7 +6,7 @@
 
 ## 1. Подготовка машины
 
-Нужны git, .NET SDK 10, Node.js 24 (подойдут 20.19+ или 22.12+), CMake с Visual Studio C++ x86 и BYOND 516 в `C:\Program Files (x86)\BYOND`.
+Нужны git, .NET SDK 10, Node.js 24 (подойдут 20.19+ или 22.12+), BYOND 516 в `C:\Program Files (x86)\BYOND`. CMake и компилятор C++ ставить не обязательно: `native\byond\build.ps1` при первом запуске скачивает закреплённый 32-битный MinGW-w64 и портативный CMake в `native\byond\toolchain`.
 
 ```powershell
 git -C . pull
@@ -23,7 +23,7 @@ pwsh -File scripts\setup-bluemoon-stand.ps1
 
 Если в игре появились новые файлы вне списка `deploy/bluemoon/Export-Source.ps1`, удалите `TestResults\p1\game-src` и запустите setup снова.
 
-Мост можно собрать без Visual Studio, в Docker: `pwsh -File scripts\build-bridge-mingw.ps1 -Destination TestResults\p3-bridge`.
+Мост собирается портативным toolchain без Visual Studio: `pwsh -File native\byond\build.ps1 -Destination TestResults\p3-bridge`. Первый запуск скачивает MinGW-w64 в `native\byond\toolchain` и проверяет SHA-256; дальше сборка идёт офлайн. Docker-вариант остаётся: `pwsh -File scripts\build-bridge-mingw.ps1 -Destination TestResults\p3-bridge`.
 
 ## 2. Всё автоматическое одной командой
 
@@ -131,9 +131,12 @@ pwsh -File scripts\audit-bluemoon-maps.ps1 -BuildDirectory TestResults\p1\game-a
 ### Мост BYOND
 
 ```powershell
-pwsh -File scripts\test-byond-bridge.ps1                                        # сборка моста CMake и проверка с Host
+pwsh -File native\byond\build.ps1 -Destination TestResults\p3-bridge  # портативный MinGW-w64, без Visual Studio
+pwsh -File scripts\test-byond-bridge.ps1 -BridgeBuild TestResults\p3-bridge  # проверка 32-битных exports с живым Host
 pwsh -File scripts\test-byond-world.ps1 -BridgeDll TestResults\p3-bridge\netdm_byond.dll   # маленький мир DM с мостом и Host
 ```
+
+`build.ps1` печатает `NETDM_BRIDGE_READY arch=i386 ...` и проверяет PE-машину, шесть экспортов и отсутствие зависимостей от runtime-библиотек MinGW. Полные параметры (`-Offline`, `-ToolchainArchive`, `-CMake`, `-Clean`) описаны в [docs/byond-bridge.md](byond-bridge.md).
 
 ### TGUI игры
 

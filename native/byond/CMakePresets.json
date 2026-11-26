@@ -1,0 +1,28 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "mingw-i686",
+      "displayName": "Win32 MinGW-w64 (portable toolchain)",
+      "description": "32-bit DreamDaemon DLL. Run native/byond/build.ps1 once: it installs the pinned i686 MinGW-w64 into toolchain/.",
+      "generator": "MinGW Makefiles",
+      "binaryDir": "${sourceDir}/build/mingw-i686",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "${sourceDir}/toolchain/mingw32/bin/i686-w64-mingw32-g++.exe",
+        "CMAKE_MAKE_PROGRAM": "${sourceDir}/toolchain/mingw32/bin/mingw32-make.exe"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "mingw-i686",
+      "configurePreset": "mingw-i686"
+    }
+  ]
+}

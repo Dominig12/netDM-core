@@ -15,4 +15,10 @@ if(WIN32)
   add_executable(netdm_bridge_test test_bridge.cpp)
   target_compile_features(netdm_bridge_test PRIVATE cxx_std_17)
   add_dependencies(netdm_bridge_test netdm_byond)
+  if(MINGW)
+    # DreamDaemon must load the DLL without MinGW runtime DLLs next to it: link the
+    # compiler runtime, winpthreads and libstdc++ statically in both binaries.
+    target_link_options(netdm_byond PRIVATE -static -static-libgcc -static-libstdc++)
+    target_link_options(netdm_bridge_test PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
 endif()

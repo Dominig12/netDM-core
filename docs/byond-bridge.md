@@ -32,8 +32,50 @@ BYOND's official `call_ext` documentation for DLL trust rules.
 
 ## Build
 
-Run in PowerShell with Visual Studio 2022 or 2026 C++ toolchain installed
-(the test script automatically selects the installed Win32 generator):
+The bridge crosses the BYOND process boundary as a **Win32 (x86) DLL**, even
+though NetDM.Host is x64. Two build paths produce the same artifact.
+
+### Portable local build (no Visual Studio, no Docker)
+
+`native/byond/build.ps1` keeps its toolchain inside the bridge sources folder.
+On the first run it downloads a pinned 32-bit MinGW-w64 archive into
+`native/byond/toolchain/` (Git ignores `toolchain/`, `build/` and `out/`),
+verifies its SHA-256, configures CMake and builds:
+
+```powershell
+pwsh -File native/byond/build.ps1
+# Built: native/byond/out/netdm_byond.dll + netdm_bridge_test.exe
+pwsh -File native/byond/build.ps1 -Destination TestResults/p3-bridge -Clean
+```
+
+CMake is taken from `PATH` when available; otherwise the script downloads a
+pinned portable CMake into the same toolchain folder. The same compiler is
+wired into `native/byond/CMakePresets.json` as the `mingw-i686` preset, so
+CLion, Rider or a manual `cmake --preset mingw-i686` build uses it after the
+first run of the script. The script then checks
+that both binaries are i386 PE images, that the DLL exports `netdm_init`,
+`netdm_send`, `netdm_poll`, `netdm_status`, `netdm_reconnect` and
+`netdm_shutdown`, and that no MinGW runtime DLL (`libstdc++`, `libgcc`,
+`libwinpthread`) is imported. A successful run ends with
+`NETDM_BRIDGE_READY arch=i386 ...`.
+
+Air-gapped machines: put the pinned archive into
+`native/byond/toolchain/downloads/` and add `-Offline`; `-ToolchainArchive`
+points at a copy elsewhere. `-CMake <path>` selects an installed CMake.
+The archive URL, file name and SHA-256 are pinned at the top of the script.
+Beyond the bridge itself, a machine needs .NET 10 for NetDM.Host and BYOND 516
+for the DreamDaemon tests (see [testing guide](testing-guide.ru.md)).
+
+The integration harness uses the same output and starts the x64 Host itself:
+
+```powershell
+pwsh -File scripts/test-byond-bridge.ps1 -BridgeBuild native/byond/out
+```
+
+### Visual Studio / CMake path
+
+Machines with the Visual Studio C++ x86 toolchain can keep using CMake
+directly:
 
 ```powershell
 dotnet build src/NetDM.Host/NetDM.Host.csproj -c Release
@@ -52,6 +94,10 @@ tests the 32-bit native exports against its real named-pipe service:
 ```powershell
 ./scripts/test-byond-bridge.ps1
 ```
+
+It prefers Visual Studio when `vswhere` finds the C++ workload and falls
+back to the portable toolchain otherwise; `-BridgeBuild <dir>` skips the
+build step entirely.
 
 ## DM integration
 

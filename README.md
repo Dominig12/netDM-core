@@ -1046,13 +1046,24 @@ changing the default.
 The bridge is **not** a managed .NET DLL loaded inside DreamDaemon:
 `native/byond/netdm_byond.dll` compiles for **Windows x86 / Win32** and
 exports the classic BYOND `call_ext()` string ABI (`__cdecl`,
-`char* function(unsigned argc, char* argv[])`). Its five exports are:
-`netdm_init`, `netdm_send`, `netdm_poll`, `netdm_status` and
-`netdm_shutdown`. The native shim owns a bounded worker/thread and
+`char* function(unsigned argc, char* argv[])`). Its six exports are:
+`netdm_init`, `netdm_send`, `netdm_poll`, `netdm_status`,
+`netdm_reconnect` and `netdm_shutdown`. The native shim owns a bounded
+worker/thread and
 queues, not the game/network simulation; it only connects to local
 `\\.\pipe\netdm-core`. DreamDaemon **never waits for named-pipe
 reads or expensive A*** in its main loop. It can enqueue a JSON command
 and drain a bounded count of responses per tick.
+
+**Build:** `pwsh -File native/byond/build.ps1` downloads a pinned 32-bit
+MinGW-w64 toolchain once into `native/byond/toolchain` (Git ignores
+`toolchain/`, `build/` and `out/`), builds `netdm_byond.dll` and the
+32-bit `netdm_bridge_test.exe`, and verifies the i386 PE machine, the six
+exports and the absence of MinGW runtime DLL dependencies. Visual Studio,
+Docker and a system compiler are not required; `-Destination` copies the
+result, `-Offline`/`-ToolchainArchive` support air-gapped machines. The
+Visual Studio CMake path and the Docker cross-build
+(`scripts/build-bridge-mingw.ps1`) remain available.
 
 The actual network simulation runs in a dedicated 64-bit NetDM.Host
 `GameNetworkService` (not in the benchmark): an isolated graph,
