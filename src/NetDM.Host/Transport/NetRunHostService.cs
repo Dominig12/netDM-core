@@ -340,7 +340,7 @@ internal sealed class NetRunHostService :  BackgroundService, INetRunTransport, 
                 views[i] = new HostStateView(host.Id.Value, host.Generation.Value, host.Name, host.Class.ToString(),
                     host.Powered, host.Operational, host.Compute?.CapacityCu ?? 0, host.Compute?.RateCuPerSecond ?? 0,
                     resources?.BufferCu ?? 0, resources?.MemoryHeld ?? 0, host.Memory?.Slots ?? 0,
-                    _runtime.Effects.On(host.Id, 8).Length);
+                    _runtime.Effects.On(host.Id, 8).Length, _runtime.Alerts.Level(host.Id).ToString());
             }
             return new NetRunStateView(_runtime.NowMilliseconds, TickCount, views,
                 _runtime.Actions.ActionCount, _runtime.Actions.OperationCount);
@@ -731,7 +731,9 @@ internal sealed record ObservationView(
 
 internal sealed record HostStateView(
     ulong Host, ulong Generation, string Name, string HostClass, bool Powered, bool Operational,
-    int ComputeCapacity, int ComputeRate, double BufferCu, int MemoryHeld, int MemorySlots, int Effects);
+    int ComputeCapacity, int ComputeRate, double BufferCu, int MemoryHeld, int MemorySlots, int Effects,
+    /// <summary>The host's own alert level (§9.3): Normal, Suspicious, Alert, Hostile or Lockdown.</summary>
+    string Alert);
 
 internal sealed record NetRunStateView(
     long NowMilliseconds, long Ticks, HostStateView[] Hosts, int Actions, int Operations);
