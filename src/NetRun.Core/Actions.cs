@@ -169,6 +169,12 @@ public interface INetRunMutationScope
     /// <summary>Stores what the acting principal has just learned, for example from a scan.</summary>
     void Remember(HostId host, KnowledgeLevel level, int confidence);
 
+    /// <summary>The alert level of the committing target (§9.3); Normal when nothing raised it.</summary>
+    HostAlertLevel AlertLevel();
+
+    /// <summary>Raises the target's alert by one or more steps and returns the new level.</summary>
+    HostAlertLevel RaiseAlert(int steps, string reason);
+
     /// <summary>
     /// Issues a capability as the outcome of a committed action, for example a breach. The grant is ordinary:
     /// it expires, it can be revoked, and it is rechecked at every later commit.
@@ -364,6 +370,8 @@ public sealed class ActionPipeline(
 
     /// <summary>Connects the agents, so a repair can clear a host.</summary>
     public void AttachAgents(AgentRegistry agents) => _agents = agents ?? throw new ArgumentNullException(nameof(agents));
+
+    public void AttachAlerts(AlertRegistry alerts) => _alerts = alerts ?? throw new ArgumentNullException(nameof(alerts));
 
     /// <summary>Connects the digital lives, so an operation is fenced to the generation that controls them.</summary>
     public void AttachLives(DigitalLifeRegistry lives) => _lives = lives ?? throw new ArgumentNullException(nameof(lives));
@@ -984,6 +992,8 @@ public sealed class ActionPipeline(
             transport.Send(context, serviceType, instance, command, idempotencyKey, argumentsJson);
     }
 
+    private AlertRegistry? _alerts;
+
     private sealed class MutationScope(ActionPipeline pipeline, ActionContext context) : INetRunMutationScope
     {
         public HostId TargetHost => context.TargetHost;
@@ -1005,6 +1015,12 @@ public sealed class ActionPipeline(
 
         public void Remember(HostId host, KnowledgeLevel level, int confidence) =>
             pipeline._knowledge?.Remember(context.Principal, host, level, confidence);
+
+        public HostAlertLevel AlertLevel() =>
+            pipeline._alerts?.Level(context.TargetHost) ?? HostAlertLevel.Normal;
+
+        public HostAlertLevel RaiseAlert(int steps, string reason) =>
+            pipeline._alerts?.Raise(context.TargetHost, steps, reason).Level ?? HostAlertLevel.Normal;
 
         public AuthorizationResult GrantCapability(CapabilityCategory category, string? serviceKey,
             long lifetimeMilliseconds, GrantSource source) =>

@@ -60,6 +60,8 @@ public sealed class NetRunRuntime : IEffectTargets
         Presences = new PresenceRegistry(clock, Hosts, Lives);
         Agents = new AgentRegistry(clock, Hosts, Resources);
         Actions.AttachAgents(Agents);
+        Alerts = new AlertRegistry(clock);
+        Actions.AttachAlerts(Alerts);
         Actions.AttachLives(Lives);
         if (_options.RegisterMvpEffects)
         {
@@ -91,6 +93,9 @@ public sealed class NetRunRuntime : IEffectTargets
 
     /// <summary>Viruses and ICE that live on the network (§12).</summary>
     public AgentRegistry Agents { get; }
+
+    /// <summary>Per-host alert levels (§9.3): raised by what a host notices, lowered by quiet time.</summary>
+    public AlertRegistry Alerts { get; }
 
     /// <summary>Connects the transport that plans travel routes.</summary>
     public void AttachRoutePlanner(IRoutePlanner planner) => Presences.AttachPlanner(planner);

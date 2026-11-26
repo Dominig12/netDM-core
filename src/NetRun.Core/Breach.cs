@@ -84,7 +84,9 @@ public abstract class BreachActionBase(BreachMode mode, CapabilityCategory categ
         foreach (var agent in scope.World.Agents(scope.TargetHost, 8))
             if (agent.Kind == AgentKind.Ice)
                 ice++;
-        var difficulty = Difficulty(profile) + Math.Min(2, ice);
+        // A host already on high alert is harder to take: the defenders are watching its traffic (§9.3).
+        var alert = scope.AlertLevel();
+        var difficulty = Difficulty(profile) + Math.Min(2, ice) + (alert >= HostAlertLevel.Hostile ? 1 : 0);
         var power = (int)mode;
         var succeeded = power >= difficulty;
         // Loud modes are always noticed; a quiet one is noticed only by a host that is watching closely.
@@ -105,6 +107,9 @@ public abstract class BreachActionBase(BreachMode mode, CapabilityCategory categ
         {
             // A trace, not a punishment: the defender learns that something happened and where.
             scope.ApplyEffect(EffectKind.Mark, scope.TargetHost, 1, 30_000, $"breach:{context.OperationId.Value}");
+            // Noticing an intrusion raises the host's own alert: a second attempt meets a warier host.
+            // A forced attempt or an engaged ICE is a louder signal than a quiet probe.
+            alert = scope.RaiseAlert(mode == BreachMode.Forced || ice > 0 ? 2 : 1, $"breach:{ModeIds[(int)mode]}");
             scope.Emit("security.breach.detected", host.Name);
         }
         if (ice > 0)
@@ -116,6 +121,7 @@ public abstract class BreachActionBase(BreachMode mode, CapabilityCategory categ
             detected,
             profile = profile.ToString(),
             mode = ModeIds[(int)mode],
+            alert = alert.ToString(),
             category = category.ToString(),
             grant = grantId,
             expiresAt = grantedUntil
