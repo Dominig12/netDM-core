@@ -73,7 +73,7 @@ public sealed record AgentOptions(
     int MaxAgentsPerOwner = 256,
     int MaxAgentsPerHost = 8,
     long DefaultBudget = 3,
-    /// <summary>How many existing links a virus may travel in one spread: one is the neighbourhood (§12.2).</summary>
+    // How many existing links a virus may travel in one spread: one is the neighbourhood (§12.2).
     int SpreadHops = 1);
 
 /// <summary>

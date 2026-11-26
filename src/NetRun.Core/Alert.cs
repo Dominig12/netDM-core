@@ -14,9 +14,9 @@ public enum HostAlertLevel : byte
 }
 
 public sealed record HostAlertOptions(
-    /// <summary>How long a host stays at its level with nothing new before it steps down one level.</summary>
+    // How long a host stays at its level with nothing new before it steps down one level.
     long StepDownMilliseconds = 120_000,
-    /// <summary>How many hosts may hold a non-normal level at once.</summary>
+    // How many hosts may hold a non-normal level at once.
     int MaxHosts = 4_096);
 
 /// <summary>One host's alert, with when it was last raised and why. A projection, never an owner.</summary>

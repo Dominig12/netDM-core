@@ -729,13 +729,13 @@ internal sealed class NetRunHostService :  BackgroundService, INetRunTransport, 
 internal sealed record ObservationView(
     ulong Host, string Name, ulong Node, string HostClass, string Level, int Confidence, long AgeMs, bool Stale,
     bool Available, double BufferCu, int Effects, bool Identified,
-    /// <summary>The host's own alert level (§9.3), so a known host shows whether it is on guard.</summary>
+    // The host's own alert level (§9.3), so a known host shows whether it is on guard.
     string Alert);
 
 internal sealed record HostStateView(
     ulong Host, ulong Generation, string Name, string HostClass, bool Powered, bool Operational,
     int ComputeCapacity, int ComputeRate, double BufferCu, int MemoryHeld, int MemorySlots, int Effects,
-    /// <summary>The host's own alert level (§9.3): Normal, Suspicious, Alert, Hostile or Lockdown.</summary>
+    // The host's own alert level (§9.3): Normal, Suspicious, Alert, Hostile or Lockdown.
     string Alert);
 
 internal sealed record NetRunStateView(
