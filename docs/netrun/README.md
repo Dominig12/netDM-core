@@ -17,7 +17,7 @@
 
 ```powershell
 dotnet build src/NetDM.Host -c Release                 # сборка всего C#-слоя, 0 предупреждений
-dotnet run --project tests/NetRun.Tests -c Release     # домен NETRUN, 141 утверждение
+dotnet run --project tests/NetRun.Tests -c Release     # домен NETRUN, 479 утверждений
 dotnet run --project tests/NetDM.SmokeTests -c Release # транспорт и сервисы
 pwsh -NoProfile -File tests/host-ipc.ps1               # живой Host через IPC: NETDM_IPC_PASS
 pwsh -File scripts/check-all.ps1 -Only host            # группа проверок Host целиком
@@ -34,10 +34,10 @@ pwsh -File scripts/check-all.ps1 -Only host            # группа прове
 
 | Проверка | Результат |
 |---|---|
-| Домен (`tests/NetRun.Tests`) | 451 утверждение, PASS |
+| Домен (`tests/NetRun.Tests`) | 479 утверждений, PASS |
 | Хост (`scripts/check-all.ps1 -Only host`) | PASS (сборка, smoke, домен, живой IPC) |
-| Окно (`jest NetrunView`) | 27 тестов, PASS |
+| Окно (`jest NetrunView`) | 29 тестов, PASS |
 | Живой мир (`scripts/bluemoon-netdm-tests.txt`) | **23 из 24**; единственное падение `door_station` — в герметичном мире нет кнопок blast-дверей |
 | Сквозной путь NETRUN в игре | ядро → присутствие → переход по маршруту (`netrun_client_life`) |
 
-Работа не завершена: остались легаси-слои L-3/L-4/L-6/L-8, стабильность транспорта P7/P8, слои карты UI-003 и контент N6. Точки входа и препятствия — в [status.md](status.md) §23, найденный и неисправленный дефект — §24.
+Работа не завершена: остался легаси-слой L-8 (бенчмарки в production-хосте), стабильность транспорта P7/P8, слои карты UI-003 и остаток контента §12 (Lockdown, вирусы по маршрутам, след в знаниях). Точки входа и препятствия — в [status.md](status.md) §23.
